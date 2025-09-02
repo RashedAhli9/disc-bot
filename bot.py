@@ -26,4 +26,5 @@ async def check_time():
             channel = bot.get_channel(channel_id)
             await channel.send("abyss is starting in 15 minutes!")
 
-bot.run("MTQxMjQ2OTYzNzk5NTY5NjE5OA.GktOLr.VWqljMNm9XqgQuqHHipWk85qvb96SyK981_2_k")  # <-- Replace with your bot token
+bot.run("MTQxMjQ2OTYzNzk5NTY5NjE5OA.Ggwsr0.Wt7n5RRHCEIkg9aakRDug_vlBckxLc0M_4fj90")  # <-- Replace with your bot token
+
