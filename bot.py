@@ -4,7 +4,6 @@ from discord import app_commands
 import datetime
 import pytz
 import os
-from keep_alive import keep_alive
 from openai import OpenAI
 
 # ===== Setup =====
@@ -113,7 +112,7 @@ if not bot_token:
     print("❌ Error: DISCORD_BOT_TOKEN not set")
     exit(1)
 
-keep_alive()
+
 bot.run(bot_token)
 import discord
 from discord.ext import commands, tasks
@@ -121,7 +120,6 @@ from discord import app_commands
 import datetime
 import pytz
 import os
-from keep_alive import keep_alive
 from openai import OpenAI
 
 # ===== Setup =====
@@ -230,5 +228,6 @@ if not bot_token:
     print("❌ Error: DISCORD_BOT_TOKEN not set")
     exit(1)
 
-keep_alive()
+
 bot.run(bot_token)
+
