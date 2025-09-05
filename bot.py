@@ -155,7 +155,8 @@ async def check_time():
     if now.weekday() in [1, 4]:
         if now.hour in [0, 8, 16] and now.minute == 0:
             channel = bot.get_channel(channel_id)
-            await channel.send("abyss is starting in 15 minutes!")
+            await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
+
 
 # ===== Commands =====
 @bot.tree.command(name="toggleai", description="Toggle Truffles AI mode")
@@ -188,7 +189,8 @@ async def testreminder(interaction: discord.Interaction):
 
     await interaction.response.send_message("✅ Test triggered!", ephemeral=True)
     channel = bot.get_channel(channel_id)
-    await channel.send("abyss is starting in 15 minutes!")
+   await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
+)
 
 # ===== AI Mode =====
 @bot.event
@@ -230,4 +232,5 @@ if not bot_token:
 
 
 bot.run(bot_token)
+
 
