@@ -36,10 +36,19 @@ async def on_ready():
 async def check_time():
     tz = pytz.timezone(MY_TIMEZONE)
     now = datetime.datetime.now(tz)
+
+    # Tuesday = 1, Friday = 4 (Python weekday: Monday = 0)
     if now.weekday() in [1, 4]:
+        # First set: 00:00, 08:00, 16:00
         if now.hour in [0, 8, 16] and now.minute == 0:
             channel = bot.get_channel(channel_id)
             await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
+
+        # Second set: 00:30, 08:30, 16:30
+        if now.hour in [0, 8, 16] and now.minute == 30:
+            channel = bot.get_channel(channel_id)
+            await channel.send("<@&1413532222396301322>, Round 2 of Abyss will start in 15 minutes!")
+
 
 # ===== Commands =====
 @bot.tree.command(name="toggleai", description="Toggle Truffles AI mode")
@@ -107,3 +116,4 @@ if not bot_token:
     exit(1)
 
 bot.run(bot_token)
+
