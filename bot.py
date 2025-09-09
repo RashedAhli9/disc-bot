@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import datetime
 import pytz
 import os
 from datetime import date, timedelta, datetime
@@ -69,7 +68,7 @@ async def testreminder(interaction: discord.Interaction):
 events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
 start_date = date(2025, 9, 9)  # First event: Range Forge
 
-@bot.tree.command(name="checkevent", description="Check this week's and next week's Abyss event")
+@bot.tree.command(name="checkevent", description="Check the next 4 weekly events")
 async def checkevent(interaction: discord.Interaction):
     today = date.today()
 
@@ -79,40 +78,54 @@ async def checkevent(interaction: discord.Interaction):
     # How many Sundays have passed since then
     weeks_passed = (today - start_sunday).days // 7
 
-    # Current and next event indices
-    current_index = weeks_passed % len(events)
-    next_index = (current_index + 1) % len(events)
-
-    # Current and next Tuesday dates (event days)
+    # Skip past event if this week's Tuesday already passed
     this_week_tuesday = start_sunday + timedelta(weeks=weeks_passed, days=2)
-    next_week_tuesday = start_sunday + timedelta(weeks=weeks_passed + 1, days=2)
+    if today > this_week_tuesday:
+        weeks_passed += 1
 
-    # Decide which event is next based on today's date
-    now = datetime.utcnow()
-    if now.date() < this_week_tuesday:
-        # Countdown to this week's event
-        target_event = events[current_index]
-        target_date = this_week_tuesday
-    else:
-        # Countdown to next week's event
-        target_event = events[next_index]
-        target_date = next_week_tuesday
+    # Event → Emoji mapping
+    event_emojis = {
+        "Range Forge": "🏹",
+        "Melee Wheel": "⚔️",
+        "Melee Forge": "🔨",
+        "Range Wheel": "🎯"
+    }
 
-    # Countdown calculation
-    next_event_datetime = datetime.combine(target_date, datetime.min.time())
-    delta = next_event_datetime - now
-    days_left = delta.days
-    hours_left, remainder = divmod(delta.seconds, 3600)
-    minutes_left, _ = divmod(remainder, 60)
-
-    await interaction.response.send_message(
-        f"📅 This week's event is **{events[current_index]}** on "
-        f"**{this_week_tuesday.strftime('%A, %B %d, %Y')}**\n"
-        f"📅 Next week's event is **{events[next_index]}** on "
-        f"**{next_week_tuesday.strftime('%A, %B %d, %Y')}**\n\n"
-        f"⏳ Time until next event: **{days_left}d {hours_left}h {minutes_left}m** "
-        f"({target_event} on {target_date.strftime('%A, %B %d, %Y')})"
+    # Build fancy embed
+    embed = discord.Embed(
+        title="📅 Upcoming Events",
+        description="Here are the next 4 weekly events:",
+        color=0x9b59b6
     )
+    embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/747/747310.png")
+    embed.set_footer(text="Generated on request")
+
+    for i in range(4):
+        index = (weeks_passed + i) % len(events)
+        event_date = start_sunday + timedelta(weeks=weeks_passed + i, days=2)
+        event_name = events[index]
+        emoji = event_emojis.get(event_name, "📌")
+
+        # Add countdown only for the first event
+        if i == 0:
+            now = datetime.utcnow()
+            next_event_datetime = datetime.combine(event_date, datetime.min.time())
+            delta = next_event_datetime - now
+            days_left = delta.days
+            hours_left, remainder = divmod(delta.seconds, 3600)
+            minutes_left, _ = divmod(remainder, 60)
+
+            countdown_text = f"\n⏳ Starts in **{days_left}d {hours_left}h {minutes_left}m**"
+        else:
+            countdown_text = ""
+
+        embed.add_field(
+            name=f"{emoji} {event_date.strftime('%A, %B %d, %Y')}",
+            value=f"**{event_name}**{countdown_text}",
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=embed)
 
 
 # ===== Run Bot =====
