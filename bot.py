@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import pytz
 import os
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, time
 
 # ===== Setup =====
 MY_TIMEZONE = "UTC"
@@ -78,9 +78,12 @@ async def checkevent(interaction: discord.Interaction):
     # How many Sundays have passed since then
     weeks_passed = (today - start_sunday).days // 7
 
-    # Skip past event if this week's Tuesday already passed
+    # Skip past event if we're already past Friday 00:00 UTC
     this_week_tuesday = start_sunday + timedelta(weeks=weeks_passed, days=2)
-    if today > this_week_tuesday:
+    now = datetime.utcnow()
+    event_start = datetime.combine(this_week_tuesday, time(0, 0))
+    event_end = event_start + timedelta(days=3)  # Friday 00:00 UTC
+    if now >= event_end:
         weeks_passed += 1
 
     # Event → Emoji mapping
@@ -94,7 +97,7 @@ async def checkevent(interaction: discord.Interaction):
     # Build fancy embed
     embed = discord.Embed(
         title="📅 Upcoming Events",
-        description="Here are the next 4 weekly events:",
+        description="Here are the next 4 weekly events (all start Tuesday 00:00 UTC):",
         color=0x9b59b6
     )
     embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/747/747310.png")
@@ -106,17 +109,25 @@ async def checkevent(interaction: discord.Interaction):
         event_name = events[index]
         emoji = event_emojis.get(event_name, "📌")
 
-        # Add countdown only for the first event
+        # Add countdown or LIVE status only for the first event
         if i == 0:
-            now = datetime.utcnow()
-            # Countdown to the event date but aligned with *current real UTC time*
-            next_event_datetime = datetime.combine(event_date, now.time())
-            delta = next_event_datetime - now
-            days_left = delta.days
-            hours_left, remainder = divmod(delta.seconds, 3600)
-            minutes_left, _ = divmod(remainder, 60)
+            event_start = datetime.combine(event_date, time(0, 0))
+            event_end = event_start + timedelta(days=3)  # Friday 00:00 UTC
 
-            countdown_text = f"\n⏳ Starts in **{days_left}d {hours_left}h {minutes_left}m**"
+            if event_start <= now < event_end:
+                delta = event_end - now
+                days_left = delta.days
+                hours_left, remainder = divmod(delta.seconds, 3600)
+                minutes_left, _ = divmod(remainder, 60)
+                countdown_text = f"\n🟢 **LIVE NOW** (ends in {days_left}d {hours_left}h {minutes_left}m)"
+            elif now < event_start:
+                delta = event_start - now
+                days_left = delta.days
+                hours_left, remainder = divmod(delta.seconds, 3600)
+                minutes_left, _ = divmod(remainder, 60)
+                countdown_text = f"\n⏳ Starts in **{days_left}d {hours_left}h {minutes_left}m**"
+            else:
+                countdown_text = ""
         else:
             countdown_text = ""
 
