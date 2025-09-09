@@ -64,6 +64,18 @@ async def testreminder(interaction: discord.Interaction):
     await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
 
 
+# ===== Check Event Command =====
+events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
+start_date = date(2025, 9, 9)  # First event: Range Forge
+
+# Event → Emoji mapping
+event_emojis = {
+    "Range Forge": "🏹",
+    "Melee Wheel": "⚔️",
+    "Melee Forge": "🔨",
+    "Range Wheel": "🎯"
+}
+
 @bot.tree.command(name="checkevent", description="Check the next 4 weekly events")
 async def checkevent(interaction: discord.Interaction):
     today = date.today()
@@ -121,6 +133,7 @@ async def checkevent(interaction: discord.Interaction):
 
     await interaction.response.send_message(msg)
 
+
 # ===== Run Bot =====
 bot_token = os.getenv("DISCORD_BOT_TOKEN")
 if not bot_token:
@@ -128,4 +141,3 @@ if not bot_token:
     exit(1)
 
 bot.run(bot_token)
-
