@@ -94,16 +94,16 @@ async def checkevent(interaction: discord.Interaction):
     if now >= event_end:
         weeks_passed += 1
 
-    # Build table header
-    table = "Date              | Event             | Status\n"
-    table += "------------------|------------------|----------------------\n"
+    # Build fake table
+    table = "📅 Upcoming Events (UTC)\n\n"
+    table += "Date              | Event         | Status\n"
+    table += "------------------|---------------|----------------------\n"
 
     for i in range(4):
         index = (weeks_passed + i) % len(events)
         event_date = start_sunday + timedelta(weeks=weeks_passed + i, days=2)
         event_name = events[index]
         emoji = event_emojis.get(event_name, "📌")
-        row_event = f"{emoji} **{event_name}**"
 
         status = ""
         if i == 0:
@@ -129,19 +129,10 @@ async def checkevent(interaction: discord.Interaction):
             minutes_left, _ = divmod(remainder, 60)
             status = f"⏳ Starts in {days_left}d {hours_left}h {minutes_left}m"
 
-        table += f"{event_date.strftime('%a, %b %d %Y')} | {row_event:<18} | {status}\n"
+        table += f"{event_date.strftime('%a, %b %d %Y')} | {emoji} {event_name:<11} | {status}\n"
 
-    # Build embed with table
-    embed = discord.Embed(
-        title="📅 Upcoming Events",
-        description="Here are the next 4 weekly events (all start Tuesday 00:00 UTC):",
-        color=0x9b59b6
-    )
-    embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/747/747310.png")
-    embed.set_footer(text="Generated on request")
-    embed.add_field(name="Schedule", value=f"```{table}```", inline=False)
-
-    await interaction.response.send_message(embed=embed)
+    # Send as plain message with code block
+    await interaction.response.send_message(f"```\n{table}\n```")
 
 
 # ===== Run Bot =====
