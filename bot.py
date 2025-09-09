@@ -109,7 +109,8 @@ async def checkevent(interaction: discord.Interaction):
         # Add countdown only for the first event
         if i == 0:
             now = datetime.utcnow()
-            next_event_datetime = datetime.combine(event_date, datetime.min.time())
+            # Countdown to the event date but aligned with *current real UTC time*
+            next_event_datetime = datetime.combine(event_date, now.time())
             delta = next_event_datetime - now
             days_left = delta.days
             hours_left, remainder = divmod(delta.seconds, 3600)
