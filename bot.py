@@ -68,6 +68,14 @@ async def testreminder(interaction: discord.Interaction):
 events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
 start_date = date(2025, 9, 9)  # First event: Range Forge
 
+# Event → Emoji mapping
+event_emojis = {
+    "Range Forge": "🏹",
+    "Melee Wheel": "⚔️",
+    "Melee Forge": "🔨",
+    "Range Wheel": "🎯"
+}
+
 @bot.tree.command(name="checkevent", description="Check the next 4 weekly events")
 async def checkevent(interaction: discord.Interaction):
     today = date.today()
@@ -86,30 +94,18 @@ async def checkevent(interaction: discord.Interaction):
     if now >= event_end:
         weeks_passed += 1
 
-    # Event → Emoji mapping
-    event_emojis = {
-        "Range Forge": "🏹",
-        "Melee Wheel": "⚔️",
-        "Melee Forge": "🔨",
-        "Range Wheel": "🎯"
-    }
-
-    # Build fancy embed
-    embed = discord.Embed(
-        title="📅 Upcoming Events",
-        description="Here are the next 4 weekly events (all start Tuesday 00:00 UTC):",
-        color=0x9b59b6
-    )
-    embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/747/747310.png")
-    embed.set_footer(text="Generated on request")
+    # Build table header
+    table = "Date              | Event             | Status\n"
+    table += "------------------|------------------|----------------------\n"
 
     for i in range(4):
         index = (weeks_passed + i) % len(events)
         event_date = start_sunday + timedelta(weeks=weeks_passed + i, days=2)
         event_name = events[index]
         emoji = event_emojis.get(event_name, "📌")
+        row_event = f"{emoji} **{event_name}**"
 
-        # Add countdown or LIVE status only for the first event
+        status = ""
         if i == 0:
             event_start = datetime.combine(event_date, time(0, 0))
             event_end = event_start + timedelta(days=3)  # Friday 00:00 UTC
@@ -119,23 +115,31 @@ async def checkevent(interaction: discord.Interaction):
                 days_left = delta.days
                 hours_left, remainder = divmod(delta.seconds, 3600)
                 minutes_left, _ = divmod(remainder, 60)
-                countdown_text = f"\n🟢 **LIVE NOW** (ends in {days_left}d {hours_left}h {minutes_left}m)"
+                status = f"🟢 LIVE NOW (ends in {days_left}d {hours_left}h {minutes_left}m)"
             elif now < event_start:
                 delta = event_start - now
                 days_left = delta.days
                 hours_left, remainder = divmod(delta.seconds, 3600)
                 minutes_left, _ = divmod(remainder, 60)
-                countdown_text = f"\n⏳ Starts in **{days_left}d {hours_left}h {minutes_left}m**"
-            else:
-                countdown_text = ""
+                status = f"⏳ Starts in {days_left}d {hours_left}h {minutes_left}m"
         else:
-            countdown_text = ""
+            delta = datetime.combine(event_date, time(0, 0)) - now
+            days_left = delta.days
+            hours_left, remainder = divmod(delta.seconds, 3600)
+            minutes_left, _ = divmod(remainder, 60)
+            status = f"⏳ Starts in {days_left}d {hours_left}h {minutes_left}m"
 
-        embed.add_field(
-            name=f"{emoji} {event_date.strftime('%A, %B %d, %Y')}",
-            value=f"**{event_name}**{countdown_text}",
-            inline=False
-        )
+        table += f"{event_date.strftime('%a, %b %d %Y')} | {row_event:<18} | {status}\n"
+
+    # Build embed with table
+    embed = discord.Embed(
+        title="📅 Upcoming Events",
+        description="Here are the next 4 weekly events (all start Tuesday 00:00 UTC):",
+        color=0x9b59b6
+    )
+    embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/747/747310.png")
+    embed.set_footer(text="Generated on request")
+    embed.add_field(name="Schedule", value=f"```{table}```", inline=False)
 
     await interaction.response.send_message(embed=embed)
 
