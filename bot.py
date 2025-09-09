@@ -64,18 +64,6 @@ async def testreminder(interaction: discord.Interaction):
     await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
 
 
-# ===== Check Event Command =====
-events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
-start_date = date(2025, 9, 9)  # First event: Range Forge
-
-# Event → Emoji mapping
-event_emojis = {
-    "Range Forge": "🏹",
-    "Melee Wheel": "⚔️",
-    "Melee Forge": "🔨",
-    "Range Wheel": "🎯"
-}
-
 @bot.tree.command(name="checkevent", description="Check the next 4 weekly events")
 async def checkevent(interaction: discord.Interaction):
     today = date.today()
@@ -94,10 +82,10 @@ async def checkevent(interaction: discord.Interaction):
     if now >= event_end:
         weeks_passed += 1
 
-    # Build fake table
-    table = "📅 Upcoming Events (UTC)\n\n"
-    table += "Date              | Event         | Status\n"
-    table += "------------------|---------------|----------------------\n"
+    # Event number emojis
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+
+    msg = "📅 **Upcoming Events (UTC)**\n\n"
 
     for i in range(4):
         index = (weeks_passed + i) % len(events)
@@ -129,11 +117,9 @@ async def checkevent(interaction: discord.Interaction):
             minutes_left, _ = divmod(remainder, 60)
             status = f"⏳ Starts in {days_left}d {hours_left}h {minutes_left}m"
 
-        table += f"{event_date.strftime('%a, %b %d %Y')} | {emoji} {event_name:<11} | {status}\n"
+        msg += f"{number_emojis[i]} **{event_name}** — {event_date.strftime('%A, %B %d, %Y')}\n{status}\n\n"
 
-    # Send as plain message with code block
-    await interaction.response.send_message(f"```\n{table}\n```")
-
+    await interaction.response.send_message(msg)
 
 # ===== Run Bot =====
 bot_token = os.getenv("DISCORD_BOT_TOKEN")
@@ -142,3 +128,4 @@ if not bot_token:
     exit(1)
 
 bot.run(bot_token)
+
