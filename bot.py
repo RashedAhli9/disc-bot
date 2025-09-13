@@ -18,12 +18,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ===== Events =====
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"✅ Logged in as {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash commands")
+        print(f"🔄 Synced {len(synced)} slash commands")
     except Exception as e:
-        print(e)
+        print(f"❌ Sync failed: {e}")
     check_time.start()
 
 @tasks.loop(minutes=1)
@@ -31,8 +31,7 @@ async def check_time():
     tz = pytz.timezone(MY_TIMEZONE)
     now = datetime.now(tz)
 
-    # Tuesday = 1, Friday = 4 (Python weekday: Monday = 0)
-    if now.weekday() in [1, 4]:
+    if now.weekday() in [1, 4]:  # Tuesday, Friday
         if now.hour in [0, 8, 16] and now.minute == 0:
             channel = bot.get_channel(channel_id)
             await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
@@ -42,27 +41,27 @@ async def check_time():
             await channel.send("<@&1413532222396301322>, Round 2 of Abyss will start in 15 minutes!")
 
 
-# ===== Commands =====
+# ===== Basic Commands =====
 @bot.tree.command(name="say", description="Make the bot say something")
 async def say(interaction: discord.Interaction, message: str):
     if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ You can't use this command.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     await interaction.channel.send(message)
 
 
-@bot.tree.command(name="testreminder", description="Test the abyss reminder message")
+@bot.tree.command(name="testreminder", description="Test the Abyss reminder message")
 async def testreminder(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ You can't use this command.", ephemeral=True)
         return
     await interaction.response.send_message("✅ Test triggered!", ephemeral=True)
     channel = bot.get_channel(channel_id)
     await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
 
 
-# ===== Weekly Event Command (Abyss rotation) =====
+# ===== Weekly Event Command (Abyss) =====
 events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
 start_date = date(2025, 9, 9)  # First event: Range Forge
 
@@ -83,11 +82,12 @@ async def weeklyevent(interaction: discord.Interaction):
     now = datetime.utcnow()
     event_start = datetime.combine(this_week_tuesday, time(0, 0))
     event_end = event_start + timedelta(days=3)
-    if now >= event_end:
+
+    if now >= event_end:  # skip expired
         weeks_passed += 1
 
     number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-    msg = "📅 **Weekly Abyss Events (UTC)**\n\n"
+    msg = "📅 **Weekly Abyss Events**\n\n"
 
     for i in range(4):
         index = (weeks_passed + i) % len(events)
@@ -97,14 +97,14 @@ async def weeklyevent(interaction: discord.Interaction):
 
         if i == 0 and event_start <= now < event_end:
             delta = event_end - now
-            days_left, seconds = delta.days, delta.seconds
+            days, seconds = delta.days, delta.seconds
             hours, minutes = divmod(seconds // 60, 60)
-            status = f"🟢 LIVE NOW (ends in {days_left}d {hours}h {minutes}m)"
+            status = f"🟢 LIVE NOW (ends in {days}d {hours}h {minutes}m)"
         else:
             delta = datetime.combine(event_date, time(0, 0)) - now
-            days_left, seconds = delta.days, delta.seconds
+            days, seconds = delta.days, delta.seconds
             hours, minutes = divmod(seconds // 60, 60)
-            status = f"⏳ Starts in {days_left}d {hours}h {minutes}m"
+            status = f"⏳ Starts in {days}d {hours}h {minutes}m"
 
         msg += f"{number_emojis[i]} **{event_name}** — <t:{int(datetime.combine(event_date, time(0,0)).timestamp())}:F>\n{status}\n\n"
 
@@ -141,16 +141,14 @@ async def kvkevent(interaction: discord.Interaction):
     number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
     msg = "📅 **KVK Season Events**\n\n"
 
-    # Filter upcoming events (or those that just started)
     upcoming = []
     for name, dt in kvk_events:
         delta = (now - dt).total_seconds()
-        if -3600 <= delta <= 0:  # within 1h after start → LIVE
+        if -3600 <= delta <= 0:  # started within last 1h → LIVE
             upcoming.append((name, dt, "live"))
-        elif dt > now:  # future events
+        elif dt > now:
             upcoming.append((name, dt, "upcoming"))
 
-    # Take only the next 4
     upcoming = upcoming[:4]
 
     for i, (name, dt, status_type) in enumerate(upcoming):
@@ -158,9 +156,9 @@ async def kvkevent(interaction: discord.Interaction):
             status = "🟢 LIVE NOW (for 1h)"
         else:
             delta = dt - now
-            days_left, seconds = delta.days, delta.seconds
+            days, seconds = delta.days, delta.seconds
             hours, minutes = divmod(seconds // 60, 60)
-            status = f"⏳ Starts in {days_left}d {hours}h {minutes}m"
+            status = f"⏳ Starts in {days}d {hours}h {minutes}m"
 
         msg += f"{number_emojis[i]} **{name}** — <t:{int(dt.timestamp())}:F>\n{status}\n\n"
 
