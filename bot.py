@@ -144,7 +144,9 @@ async def kvkevent(interaction: discord.Interaction):
     upcoming = []
     for name, dt in kvk_events:
         delta = (now - dt).total_seconds()
-        if -3600 <= delta <= 0:  # started within last 1h → LIVE
+       if 0 <= (now - dt).total_seconds() <= 3600:
+    # event started within last hour
+  # started within last 1h → LIVE
             upcoming.append((name, dt, "live"))
         elif dt > now:
             upcoming.append((name, dt, "upcoming"))
@@ -172,3 +174,4 @@ if not bot_token:
     exit(1)
 
 bot.run(bot_token)
+
