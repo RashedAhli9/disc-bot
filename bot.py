@@ -33,12 +33,10 @@ async def check_time():
 
     # Tuesday = 1, Friday = 4 (Python weekday: Monday = 0)
     if now.weekday() in [1, 4]:
-        # First set: 00:00, 08:00, 16:00
         if now.hour in [0, 8, 16] and now.minute == 0:
             channel = bot.get_channel(channel_id)
             await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
 
-        # Second set: 00:30, 08:30, 16:30
         if now.hour in [0, 8, 16] and now.minute == 30:
             channel = bot.get_channel(channel_id)
             await channel.send("<@&1413532222396301322>, Round 2 of Abyss will start in 15 minutes!")
@@ -64,11 +62,10 @@ async def testreminder(interaction: discord.Interaction):
     await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
 
 
-# ===== Check Event Command =====
+# ===== Weekly Event Command (Abyss rotation) =====
 events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
 start_date = date(2025, 9, 9)  # First event: Range Forge
 
-# Event → Emoji mapping
 event_emojis = {
     "Range Forge": "🏹",
     "Melee Wheel": "⚔️",
@@ -76,28 +73,21 @@ event_emojis = {
     "Range Wheel": "🎯"
 }
 
-@bot.tree.command(name="checkevent", description="Check the next 4 weekly events")
-async def checkevent(interaction: discord.Interaction):
+@bot.tree.command(name="weeklyevent", description="Check the next 4 weekly Abyss events")
+async def weeklyevent(interaction: discord.Interaction):
     today = date.today()
-
-    # Find the Sunday of the starting week (before 9/9)
     start_sunday = start_date - timedelta(days=start_date.weekday() + 1)
-
-    # How many Sundays have passed since then
     weeks_passed = (today - start_sunday).days // 7
 
-    # Skip past event if we're already past Friday 00:00 UTC
     this_week_tuesday = start_sunday + timedelta(weeks=weeks_passed, days=2)
     now = datetime.utcnow()
     event_start = datetime.combine(this_week_tuesday, time(0, 0))
-    event_end = event_start + timedelta(days=3)  # Friday 00:00 UTC
+    event_end = event_start + timedelta(days=3)
     if now >= event_end:
         weeks_passed += 1
 
-    # Event number emojis
     number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-
-    msg = "📅 **Upcoming Events (UTC)**\n\n"
+    msg = "📅 **Weekly Abyss Events (UTC)**\n\n"
 
     for i in range(4):
         index = (weeks_passed + i) % len(events)
@@ -105,31 +95,74 @@ async def checkevent(interaction: discord.Interaction):
         event_name = events[index]
         emoji = event_emojis.get(event_name, "📌")
 
-        status = ""
-        if i == 0:
-            event_start = datetime.combine(event_date, time(0, 0))
-            event_end = event_start + timedelta(days=3)  # Friday 00:00 UTC
-
-            if event_start <= now < event_end:
-                delta = event_end - now
-                days_left = delta.days
-                hours_left, remainder = divmod(delta.seconds, 3600)
-                minutes_left, _ = divmod(remainder, 60)
-                status = f"🟢 LIVE NOW (ends in {days_left}d {hours_left}h {minutes_left}m)"
-            elif now < event_start:
-                delta = event_start - now
-                days_left = delta.days
-                hours_left, remainder = divmod(delta.seconds, 3600)
-                minutes_left, _ = divmod(remainder, 60)
-                status = f"⏳ Starts in {days_left}d {hours_left}h {minutes_left}m"
+        if i == 0 and event_start <= now < event_end:
+            delta = event_end - now
+            days_left, seconds = delta.days, delta.seconds
+            hours, minutes = divmod(seconds // 60, 60)
+            status = f"🟢 LIVE NOW (ends in {days_left}d {hours}h {minutes}m)"
         else:
             delta = datetime.combine(event_date, time(0, 0)) - now
-            days_left = delta.days
-            hours_left, remainder = divmod(delta.seconds, 3600)
-            minutes_left, _ = divmod(remainder, 60)
-            status = f"⏳ Starts in {days_left}d {hours_left}h {minutes_left}m"
+            days_left, seconds = delta.days, delta.seconds
+            hours, minutes = divmod(seconds // 60, 60)
+            status = f"⏳ Starts in {days_left}d {hours}h {minutes}m"
 
-        msg += f"{number_emojis[i]} **{event_name}** — {event_date.strftime('%A, %B %d, %Y')}\n{status}\n\n"
+        msg += f"{number_emojis[i]} **{event_name}** — <t:{int(datetime.combine(event_date, time(0,0)).timestamp())}:F>\n{status}\n\n"
+
+    await interaction.response.send_message(msg)
+
+
+# ===== KVK Event Command =====
+kvk_events = [
+    ("Bear", datetime(2025, 9, 13, 14, 0)),
+    ("Giant", datetime(2025, 9, 15, 2, 0)),
+    ("Gate1", datetime(2025, 9, 16, 14, 0)),
+    ("Statue", datetime(2025, 9, 18, 14, 0)),
+    ("Fort12", datetime(2025, 9, 20, 2, 0)),
+    ("Gate2", datetime(2025, 9, 21, 14, 0)),
+    ("Hydra", datetime(2025, 9, 23, 14, 0)),
+    ("Fort13", datetime(2025, 9, 25, 2, 0)),
+    ("Gate3", datetime(2025, 9, 26, 14, 0)),
+    ("Gear Sentry", datetime(2025, 9, 28, 14, 0)),
+    ("Island Statue", datetime(2025, 9, 30, 14, 0)),
+    ("Necrogiant", datetime(2025, 10, 2, 14, 0)),
+    ("Gate4", datetime(2025, 10, 4, 14, 0)),
+    ("60k Merit", datetime(2025, 10, 6, 2, 0)),
+    ("Fort14", datetime(2025, 10, 9, 2, 0)),
+    ("Gate5", datetime(2025, 10, 10, 14, 0)),
+    ("60k Merit", datetime(2025, 10, 12, 2, 0)),
+    ("Shadow Dragon", datetime(2025, 10, 13, 14, 0)),
+    ("Fort15", datetime(2025, 10, 16, 2, 0)),
+    ("Magma", datetime(2025, 10, 17, 14, 0)),
+]
+
+@bot.tree.command(name="kvkevent", description="Check the next 4 KVK season events")
+async def kvkevent(interaction: discord.Interaction):
+    now = datetime.utcnow()
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    msg = "📅 **KVK Season Events**\n\n"
+
+    # Filter upcoming events (or those that just started)
+    upcoming = []
+    for name, dt in kvk_events:
+        delta = (now - dt).total_seconds()
+        if -3600 <= delta <= 0:  # within 1h after start → LIVE
+            upcoming.append((name, dt, "live"))
+        elif dt > now:  # future events
+            upcoming.append((name, dt, "upcoming"))
+
+    # Take only the next 4
+    upcoming = upcoming[:4]
+
+    for i, (name, dt, status_type) in enumerate(upcoming):
+        if status_type == "live":
+            status = "🟢 LIVE NOW (for 1h)"
+        else:
+            delta = dt - now
+            days_left, seconds = delta.days, delta.seconds
+            hours, minutes = divmod(seconds // 60, 60)
+            status = f"⏳ Starts in {days_left}d {hours}h {minutes}m"
+
+        msg += f"{number_emojis[i]} **{name}** — <t:{int(dt.timestamp())}:F>\n{status}\n\n"
 
     await interaction.response.send_message(msg)
 
