@@ -25,6 +25,8 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Sync failed: {e}")
     check_time.start()
+    kvk_reminder.start()
+
 
 @tasks.loop(minutes=1)
 async def check_time():
@@ -106,33 +108,33 @@ async def weeklyevent(interaction: discord.Interaction):
             hours, minutes = divmod(seconds // 60, 60)
             status = f"⏳ Starts in {days}d {hours}h {minutes}m"
 
-        msg += f"{number_emojis[i]} **{event_name}** — <t:{int(datetime.combine(event_date, time(0,0)).timestamp())}:F>\n{status}\n\n"
+        msg += f"{number_emojis[i]} {emoji} **{event_name}** — <t:{int(datetime.combine(event_date, time(0,0)).timestamp())}:F>\n{status}\n\n"
 
     await interaction.response.send_message(msg)
 
 
 # ===== KVK Event Command =====
 kvk_events = [
-    ("Bear", datetime(2025, 9, 13, 14, 0)),
-    ("Giant", datetime(2025, 9, 15, 2, 0)),
-    ("Gate1", datetime(2025, 9, 16, 14, 0)),
-    ("Statue", datetime(2025, 9, 18, 14, 0)),
-    ("Fort12", datetime(2025, 9, 20, 2, 0)),
-    ("Gate2", datetime(2025, 9, 21, 14, 0)),
-    ("Hydra", datetime(2025, 9, 23, 14, 0)),
-    ("Fort13", datetime(2025, 9, 25, 2, 0)),
-    ("Gate3", datetime(2025, 9, 26, 14, 0)),
-    ("Gear Sentry", datetime(2025, 9, 28, 14, 0)),
-    ("Island Statue", datetime(2025, 9, 30, 14, 0)),
-    ("Necrogiant", datetime(2025, 10, 2, 14, 0)),
-    ("Gate4", datetime(2025, 10, 4, 14, 0)),
-    ("60k Merit", datetime(2025, 10, 6, 2, 0)),
-    ("Fort14", datetime(2025, 10, 9, 2, 0)),
-    ("Gate5", datetime(2025, 10, 10, 14, 0)),
-    ("60k Merit", datetime(2025, 10, 12, 2, 0)),
-    ("Shadow Dragon", datetime(2025, 10, 13, 14, 0)),
-    ("Fort15", datetime(2025, 10, 16, 2, 0)),
-    ("Magma", datetime(2025, 10, 17, 14, 0)),
+    ("🐻 Bear", datetime(2025, 9, 13, 14, 0)),
+    ("🗿 Giant", datetime(2025, 9, 15, 2, 0)),
+    ("🚪 Gate1", datetime(2025, 9, 16, 14, 0)),
+    ("🗿 Statue", datetime(2025, 9, 18, 14, 0)),
+    ("⚔️ Fort12", datetime(2025, 9, 20, 2, 0)),
+    ("🚪 Gate2", datetime(2025, 9, 21, 14, 0)),
+    ("🐍 Hydra", datetime(2025, 9, 23, 14, 0)),
+    ("⚔️ Fort13", datetime(2025, 9, 25, 2, 0)),
+    ("🚪 Gate3", datetime(2025, 9, 26, 14, 0)),
+    ("⚙️ Gear Sentry", datetime(2025, 9, 28, 14, 0)),
+    ("🗿 Island Statue", datetime(2025, 9, 30, 14, 0)),
+    ("💀 Necrogiant", datetime(2025, 10, 2, 14, 0)),
+    ("🚪 Gate4", datetime(2025, 10, 4, 14, 0)),
+    ("🎖️ 60k Merit", datetime(2025, 10, 6, 2, 0)),
+    ("⚔️ Fort14", datetime(2025, 10, 9, 2, 0)),
+    ("🚪 Gate5", datetime(2025, 10, 10, 14, 0)),
+    ("🎖️ 60k Merit", datetime(2025, 10, 12, 2, 0)),
+    ("🐉 Shadow Dragon", datetime(2025, 10, 13, 14, 0)),
+    ("⚔️ Fort15", datetime(2025, 10, 16, 2, 0)),
+    ("🔥 Magma", datetime(2025, 10, 17, 14, 0)),
 ]
 
 @bot.tree.command(name="kvkevent", description="Check the next 4 KVK season events")
@@ -143,7 +145,7 @@ async def kvkevent(interaction: discord.Interaction):
 
     upcoming = []
     for name, dt in kvk_events:
-        if dt <= now < dt + timedelta(hours=1):  # LIVE NOW if within 1h after start
+        if dt <= now < dt + timedelta(hours=1):  # LIVE NOW for 1h
             upcoming.append((name, dt, "live"))
         elif dt > now:
             upcoming.append((name, dt, "upcoming"))
@@ -159,9 +161,20 @@ async def kvkevent(interaction: discord.Interaction):
             hours, minutes = divmod(seconds // 60, 60)
             status = f"⏳ Starts in {days}d {hours}h {minutes}m"
 
-        msg += f"{number_emojis[i]} **{name}** — <t:{int(dt.timestamp())}:F>\n{status}\n\n"
+        msg += f"{number_emojis[i]} {name} — <t:{int(dt.timestamp())}:F>\n{status}\n\n"
 
     await interaction.response.send_message(msg)
+
+
+# ===== KVK Reminder System =====
+@tasks.loop(minutes=1)
+async def kvk_reminder():
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+    channel = bot.get_channel(channel_id)
+
+    for name, dt in kvk_events:
+        if dt - timedelta(minutes=10) == now:  # exactly 10 minutes before
+            await channel.send(f"⏰ Reminder: {name} starts in 10 minutes! <t:{int(dt.timestamp())}:F>")
 
 
 # ===== Run Bot =====
