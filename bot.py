@@ -7,8 +7,9 @@ from datetime import date, timedelta, datetime, time
 
 # ===== Setup =====
 MY_TIMEZONE = "UTC"
-channel_id = 1328658110897983549  # Replace with your channel ID
-OWNER_ID = 1084884048884797490    # Replace with your Discord ID
+channel_id = 1328658110897983549      # Abyss reminders channel
+update_channel_id = 1332676174995918859  # Bot update notifications channel
+OWNER_ID = 1084884048884797490
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -24,6 +25,12 @@ async def on_ready():
         print(f"🔄 Synced {len(synced)} slash commands")
     except Exception as e:
         print(f"❌ Sync failed: {e}")
+
+    # Send update message
+    update_channel = bot.get_channel(update_channel_id)
+    if update_channel:
+        await update_channel.send("🤖 Bot updated and online!")
+
     check_time.start()
     kvk_reminder.start()
 
