@@ -11,6 +11,7 @@ MY_TIMEZONE = "UTC"
 channel_id = 1328658110897983549      # Abyss reminders channel
 update_channel_id = 1332676174995918859  # Bot update notifications channel
 OWNER_ID = 1084884048884797490
+GUILD_ID = 1328405638744641548  # replace with your actual server ID
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -64,8 +65,10 @@ def has_admin_permission(interaction):
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     try:
-        synced = await bot.tree.sync()
-        print(f"🔄 Synced {len(synced)} slash commands")
+        # Force sync all slash commands only to your guild (instant updates)
+        guild = discord.Object(id=GUILD_ID)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"🔄 Synced {len(synced)} commands to guild {GUILD_ID}")
     except Exception as e:
         print(f"❌ Sync failed: {e}")
 
@@ -75,6 +78,7 @@ async def on_ready():
 
     check_time.start()
     event_reminder.start()
+
 
 
 @tasks.loop(minutes=1)
@@ -335,3 +339,4 @@ if not bot_token:
     print("❌ Error: DISCORD_BOT_TOKEN not set")
     exit(1)
 bot.run(bot_token)
+
