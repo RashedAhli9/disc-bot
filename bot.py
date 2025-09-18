@@ -1,16 +1,15 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import datetime
 import pytz
 import os
 import json
 import re
-from datetime import timedelta, datetime
+from datetime import date, timedelta, datetime, time
 
 # ===== Setup =====
 MY_TIMEZONE = "UTC"
-abyss_channel_id = 1328658110897983549
+channel_id = 1328658110897983549
 update_channel_id = 1332676174995918859
 OWNER_ID = 1084884048884797490
 
@@ -19,25 +18,14 @@ intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== Storage =====
+# ===== Custom Events Storage =====
 EVENTS_FILE = "events.json"
 
-def preload_events():
+def load_events():
     if not os.path.exists(EVENTS_FILE):
-        data = {
-            "kvk": [
-                {"name": "Bear", "datetime": "2025-09-13T18:00:00", "reminder": 10},
-                {"name": "Giant", "datetime": "2025-09-15T02:00:00", "reminder": 10},
-                {"name": "Gate1", "datetime": "2025-09-16T18:00:00", "reminder": 10},
-                {"name": "Statue", "datetime": "2025-09-18T18:00:00", "reminder": 10}
-            ],
-            "custom": []
-        }
+        data = {"custom": []}
         with open(EVENTS_FILE, "w") as f:
             json.dump(data, f, indent=2)
-
-def load_events():
-    preload_events()
     with open(EVENTS_FILE, "r") as f:
         return json.load(f)
 
@@ -45,7 +33,148 @@ def save_events(events):
     with open(EVENTS_FILE, "w") as f:
         json.dump(events, f, indent=2)
 
-# ===== Permission Check =====
+# ===== Weekly Event (Abyss Cycle) =====
+events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
+start_date = date(2025, 9, 16)  # Start from Sept 16, 2025
+
+event_emojis = {
+    "Range Forge": "🏹",
+    "Melee Wheel": "⚔️",
+    "Melee Forge": "🔨",
+    "Range Wheel": "🎯"
+}
+
+@bot.tree.command(name="weeklyevent", description="Check the next 4 weekly Abyss events")
+async def weeklyevent(interaction: discord.Interaction):
+    today = date.today()
+    start_sunday = start_date - timedelta(days=start_date.weekday() + 1)
+    weeks_passed = (today - start_sunday).days // 7
+
+    this_week_tuesday = start_sunday + timedelta(weeks=weeks_passed, days=2)
+    now = datetime.utcnow()
+    event_start = datetime.combine(this_week_tuesday, time(0, 0))
+    event_end = event_start + timedelta(days=3)
+
+    if now >= event_end:
+        weeks_passed += 1
+
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    msg = "📅 **Weekly Abyss Events**\n\n"
+
+    for i in range(4):
+        index = (weeks_passed + i) % len(events)
+        event_date = start_sunday + timedelta(weeks=weeks_passed + i, days=2)
+        event_name = events[index]
+        emoji = event_emojis.get(event_name, "📌")
+
+        dt = datetime.combine(event_date, time(0,0))
+        ts = int(dt.replace(tzinfo=pytz.UTC).timestamp())
+
+        if i == 0 and event_start <= now < event_end:
+            delta = event_end - now
+            days, seconds = delta.days, delta.seconds
+            hours, minutes = divmod(seconds // 60, 60)
+            status = f"🟢 LIVE NOW (ends in {days}d {hours}h {minutes}m)"
+        else:
+            delta = dt - now
+            days, seconds = delta.days, delta.seconds
+            hours, minutes = divmod(seconds // 60, 60)
+            status = f"⏳ Starts in {days}d {hours}h {minutes}m"
+
+        msg += f"{number_emojis[i]} {emoji} **{event_name}** — <t:{ts}:F>\n{status}\n\n"
+
+    await interaction.response.send_message(msg)
+
+# ===== KVK Events (Fixed List UTC) =====
+kvk_events = [
+    ("🐻 Bear", datetime(2025, 9, 13, 14, 0)),
+    ("🗿 Giant", datetime(2025, 9, 15, 2, 0)),
+    ("🚪 Gate1", datetime(2025, 9, 16, 14, 0)),
+    ("🗿 Statue", datetime(2025, 9, 18, 14, 0)),
+    ("⚔️ Fort12", datetime(2025, 9, 20, 2, 0)),
+    ("🚪 Gate2", datetime(2025, 9, 21, 14, 0)),
+    ("🐍 Hydra", datetime(2025, 9, 23, 14, 0)),
+    ("⚔️ Fort13", datetime(2025, 9, 25, 2, 0)),
+    ("🚪 Gate3", datetime(2025, 9, 26, 14, 0)),
+    ("⚙️ Gear Sentry", datetime(2025, 9, 28, 14, 0)),
+    ("🗿 Island Statue", datetime(2025, 9, 30, 14, 0)),
+    ("💀 Necrogiant", datetime(2025, 10, 2, 14, 0)),
+    ("🚪 Gate4", datetime(2025, 10, 4, 14, 0)),
+    ("🎖️ 60k Merit", datetime(2025, 10, 6, 2, 0)),
+    ("⚔️ Fort14", datetime(2025, 10, 9, 2, 0)),
+    ("🚪 Gate5", datetime(2025, 10, 10, 14, 0)),
+    ("🎖️ 60k Merit", datetime(2025, 10, 12, 2, 0)),
+    ("🐉 Shadow Dragon", datetime(2025, 10, 13, 14, 0)),
+    ("⚔️ Fort15", datetime(2025, 10, 16, 2, 0)),
+    ("🔥 Magma", datetime(2025, 10, 17, 14, 0)),
+]
+
+@bot.tree.command(name="kvkevent", description="Check the next 4 KVK + Custom events")
+async def kvkevent(interaction: discord.Interaction):
+    now = datetime.utcnow()
+    events_data = load_events()
+
+    combined = []
+    for name, dt in kvk_events:
+        if dt <= now < dt + timedelta(hours=1):
+            combined.append((name, dt, "live"))
+        elif dt > now:
+            combined.append((name, dt, "upcoming"))
+
+    for e in events_data["custom"]:
+        dt = datetime.fromisoformat(e["datetime"])
+        if dt <= now < dt + timedelta(hours=1):
+            combined.append((e["name"], dt, "live"))
+        elif dt > now:
+            combined.append((e["name"], dt, "upcoming"))
+
+    # Auto cleanup old events
+    events_data["custom"] = [e for e in events_data["custom"] if datetime.fromisoformat(e["datetime"]) > now - timedelta(hours=1)]
+    save_events(events_data)
+
+    combined = sorted(combined, key=lambda x: x[1])[:4]
+
+    if not combined:
+        await interaction.response.send_message("No upcoming events.")
+        return
+
+    msg = "📅 **KVK + Custom Events**\n\n"
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+
+    for i, (name, dt, status_type) in enumerate(combined):
+        ts = int(dt.replace(tzinfo=pytz.UTC).timestamp())
+        if status_type == "live":
+            status = "🟢 LIVE NOW"
+        else:
+            delta = dt - now
+            days, seconds = delta.days, delta.seconds
+            hours, minutes = divmod(seconds // 60, 60)
+            status = f"⏳ Starts in {days}d {hours}h {minutes}m"
+
+        msg += f"{number_emojis[i]} {name} — <t:{ts}:F>\n{status}\n\n"
+
+    await interaction.response.send_message(msg)
+
+# ===== Reminders for KVK + Custom =====
+@tasks.loop(minutes=1)
+async def event_reminders():
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+    channel = bot.get_channel(channel_id)
+    events_data = load_events()
+
+    # KVK reminders (fixed 10m before)
+    for name, dt in kvk_events:
+        if now == dt - timedelta(minutes=10):
+            await channel.send(f"⏰ Reminder: {name} starts in 10 minutes! <t:{int(dt.replace(tzinfo=pytz.UTC).timestamp())}:F>")
+
+    # Custom reminders
+    for e in events_data["custom"]:
+        dt = datetime.fromisoformat(e["datetime"])
+        reminder = e.get("reminder", 10)
+        if now == dt - timedelta(minutes=reminder):
+            await channel.send(f"⏰ Reminder: {e['name']} starts in {reminder} minutes! <t:{int(dt.replace(tzinfo=pytz.UTC).timestamp())}:F>")
+
+# ===== Admin Permission Check =====
 def has_admin_permission(interaction: discord.Interaction):
     if interaction.user.id == OWNER_ID:
         return True
@@ -53,247 +182,162 @@ def has_admin_permission(interaction: discord.Interaction):
         return True
     return False
 
-# ===== Weekly Events Rotation =====
-weekly_rotation = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
-weekly_start = datetime(2025, 9, 9, 0, 0)
-
-def get_weekly_events():
-    now = datetime.utcnow()
-    weeks_passed = (now - weekly_start).days // 7
-    events = []
-    for i in range(4):
-        index = (weeks_passed + i) % len(weekly_rotation)
-        event_date = weekly_start + timedelta(weeks=weeks_passed + i)
-        events.append({"name": weekly_rotation[index], "datetime": event_date})
-    return events
-
-# ===== State Sessions =====
-active_sessions = {}  # user_id: {mode, category, step, event_index, field}
-
-# ===== Bot Events =====
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
+# ===== Add Event =====
+@bot.tree.command(name="addevent", description="Add a custom event (UTC input, reminder in minutes)")
+@app_commands.describe(name="Event name", datetime_str="UTC time (DD-MM-YYYY HH:MM)", reminder="Minutes before start to remind")
+async def addevent(interaction: discord.Interaction, name: str, datetime_str: str, reminder: int = 10):
+    if not has_admin_permission(interaction):
+        await interaction.response.send_message("❌ You can't use this command.", ephemeral=True)
+        return
     try:
-        synced = await bot.tree.sync()
-        print(f"🔄 Synced {len(synced)} slash commands")
-    except Exception as e:
-        print(f"❌ Sync failed: {e}")
+        event_dt = datetime.strptime(datetime_str, "%d-%m-%Y %H:%M")  # UTC input
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid format. Use `DD-MM-YYYY HH:MM` in UTC.", ephemeral=True)
+        return
 
-    channel = bot.get_channel(update_channel_id)
-    if channel:
-        await channel.send("🤖 Bot updated and online!")
-
-    reminder_loop.start()
-
-# ===== Reminder Loop =====
-@tasks.loop(minutes=1)
-async def reminder_loop():
-    tz = pytz.timezone(MY_TIMEZONE)
-    now = datetime.now(tz)
     events = load_events()
+    events["custom"].append({"name": name, "datetime": event_dt.isoformat(), "reminder": reminder})
+    save_events(events)
+    await interaction.response.send_message(f"✅ Added custom event **{name}** at <t:{int(event_dt.replace(tzinfo=pytz.UTC).timestamp())}:F> (reminder {reminder}m)")
 
-    for category, evlist in events.items():
-        for event in evlist[:]:
-            event_dt = datetime.fromisoformat(event["datetime"])
-            reminder = event["reminder"]
+# ===== Edit Event (multi-step) =====
+active_edits = {}
 
-            # Reminder check
-            if event_dt - timedelta(minutes=reminder) <= now < event_dt - timedelta(minutes=reminder-1):
-                channel = bot.get_channel(abyss_channel_id)
-                if channel:
-                    await channel.send(f"⏰ Reminder: **{event['name']}** starts in {reminder} minutes!")
-
-            # Live now
-            if event_dt <= now < event_dt + timedelta(hours=1):
-                channel = bot.get_channel(abyss_channel_id)
-                if channel:
-                    await channel.send(f"🔥 **{event['name']}** is LIVE NOW!")
-
-            # Expired cleanup
-            if now > event_dt + timedelta(hours=1):
-                evlist.remove(event)
-                save_events(events)
-
-# ===== Display Commands =====
-def format_events(events, category):
-    tz = pytz.timezone(MY_TIMEZONE)
-    now = datetime.now(tz)
-    upcoming = sorted(events, key=lambda e: e["datetime"])
-    upcoming = [e for e in upcoming if datetime.fromisoformat(e["datetime"]) >= now]
-    if not upcoming:
-        return f"No upcoming {category.upper()} events."
-
-    msg = f"📅 **Next {category.upper()} Events:**\n"
-    for i, event in enumerate(upcoming[:4], start=1):
-        dt = datetime.fromisoformat(event["datetime"])
-        delta = dt - now
-        days, seconds = delta.days, delta.seconds
-        hours, minutes = divmod(seconds // 60, 60)
-        msg += f"{i}. **{event['name']}** → <t:{int(dt.timestamp())}:F> (in {days}d {hours}h {minutes}m, reminder {event['reminder']}m)\n"
-    return msg
-
-@bot.tree.command(name="weeklyevent", description="Show the next 4 Weekly events")
-async def weeklyevent(interaction: discord.Interaction):
-    weekly = get_weekly_events()
-    msg = "📅 **Next WEEKLY Events:**\n"
-    now = datetime.utcnow()
-    for i, event in enumerate(weekly, start=1):
-        delta = event["datetime"] - now
-        days, seconds = delta.days, delta.seconds
-        hours, minutes = divmod(seconds // 60, 60)
-        msg += f"{i}. **{event['name']}** → <t:{int(event['datetime'].timestamp())}:F> (in {days}d {hours}h {minutes}m)\n"
-    await interaction.response.send_message(msg)
-
-@bot.tree.command(name="kvkevent", description="Show the next 4 KVK events")
-async def kvkevent(interaction: discord.Interaction):
-    events = load_events()
-    await interaction.response.send_message(format_events(events["kvk"], "kvk"))
-
-@bot.tree.command(name="customevent", description="Show the next 4 Custom events")
-async def customevent(interaction: discord.Interaction):
-    events = load_events()
-    await interaction.response.send_message(format_events(events["custom"], "custom"))
-
-# ===== Interactive Edit / Remove =====
-@bot.tree.command(name="editevent", description="Interactively edit an event (admin only)")
-@app_commands.describe(category="Category: kvk or custom")
-async def editevent(interaction: discord.Interaction, category: str = "custom"):
+@bot.tree.command(name="editevent", description="Edit a custom event (admin only)")
+async def editevent(interaction: discord.Interaction):
     if not has_admin_permission(interaction):
-        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
+        await interaction.response.send_message("❌ You can't use this command.", ephemeral=True)
         return
 
-    events = load_events()
-    evlist = events.get(category.lower(), [])
-    if not evlist:
-        await interaction.response.send_message(f"No events in {category.upper()}.", ephemeral=True)
+    events = load_events()["custom"]
+    if not events:
+        await interaction.response.send_message("No custom events available to edit.")
         return
 
-    msg = f"📋 Events in {category.upper()}:\n"
-    for i, e in enumerate(evlist, start=1):
+    msg = "✏️ **Custom Events List**\n\n"
+    for idx, e in enumerate(events, start=1):
         dt = datetime.fromisoformat(e["datetime"])
-        msg += f"{i}. **{e['name']}** → {dt.strftime('%d %b %Y, %H:%M UTC')} (reminder {e['reminder']}m)\n"
+        msg += f"{idx}. {e['name']} — <t:{int(dt.replace(tzinfo=pytz.UTC).timestamp())}:F> (reminder {e['reminder']}m)\n"
 
-    await interaction.response.send_message(msg + "\nReply with the number of the event you want to edit. Type `exit` to cancel.")
-    active_sessions[interaction.user.id] = {"mode": "edit", "category": category.lower(), "step": "choose_id"}
+    await interaction.response.send_message(msg + "\nReply with the event **number** to edit or type `exit`.")
+    active_edits[interaction.user.id] = {"step": "choose_event"}
 
-@bot.tree.command(name="removeevent", description="Interactively remove an event (admin only)")
-@app_commands.describe(category="Category: kvk or custom")
-async def removeevent(interaction: discord.Interaction, category: str = "custom"):
-    if not has_admin_permission(interaction):
-        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
-        return
-
-    events = load_events()
-    evlist = events.get(category.lower(), [])
-    if not evlist:
-        await interaction.response.send_message(f"No events in {category.upper()}.", ephemeral=True)
-        return
-
-    msg = f"📋 Events in {category.upper()}:\n"
-    for i, e in enumerate(evlist, start=1):
-        dt = datetime.fromisoformat(e["datetime"])
-        msg += f"{i}. **{e['name']}** → {dt.strftime('%d %b %Y, %H:%M UTC')}\n"
-
-    await interaction.response.send_message(msg + "\nReply with the number of the event you want to delete. Type `exit` to cancel.")
-    active_sessions[interaction.user.id] = {"mode": "remove", "category": category.lower(), "step": "choose_id"}
-
-# ===== On Message for Interactive Flow =====
 @bot.event
 async def on_message(message):
-    if message.author.bot:
-        return
-
-    uid = message.author.id
-    if uid in active_sessions:
-        session = active_sessions[uid]
+    if message.author.bot: return
+    if message.author.id in active_edits:
+        ctx = active_edits[message.author.id]
+        events = load_events()["custom"]
 
         if message.content.lower() == "exit":
-            await message.channel.send("❌ Session cancelled.")
-            del active_sessions[uid]
+            await message.channel.send("❌ Edit cancelled.")
+            del active_edits[message.author.id]
             return
 
-        events = load_events()
-        evlist = events.get(session["category"], [])
+        if ctx["step"] == "choose_event":
+            try:
+                idx = int(message.content) - 1
+                ctx["index"] = idx
+                ctx["step"] = "choose_field"
+                await message.channel.send("What do you want to edit? (name / datetime / reminder)")
+            except:
+                await message.channel.send("Invalid input, try again.")
+            return
 
-        # Step 1: Choose ID
-        if session["step"] == "choose_id":
-            if not message.content.isdigit() or not (1 <= int(message.content) <= len(evlist)):
-                await message.channel.send("⚠️ Invalid choice. Please enter a valid number or type `exit`.")
-                return
-            index = int(message.content) - 1
-            session["event_index"] = index
-
-            if session["mode"] == "edit":
-                await message.channel.send(f"What do you want to edit for **{evlist[index]['name']}**?\nOptions: `name`, `datetime`, `reminder`, `category` (or `exit`)")
-                session["step"] = "choose_field"
-
-            elif session["mode"] == "remove":
-                event = evlist[index]
-                dt = datetime.fromisoformat(event["datetime"])
-                await message.channel.send(f"Are you sure you want to delete **{event['name']}** ({dt.strftime('%d %b %Y, %H:%M UTC')})? Type `yes` or `no`.")
-                session["step"] = "confirm_remove"
-
-        # Step 2: Edit field choice
-        elif session["step"] == "choose_field":
+        if ctx["step"] == "choose_field":
             field = message.content.lower()
-            if field not in ["name", "datetime", "reminder", "category"]:
-                await message.channel.send("⚠️ Invalid option. Choose `name`, `datetime`, `reminder`, or `category`.")
+            if field not in ["name", "datetime", "reminder"]:
+                await message.channel.send("Invalid field, type: name / datetime / reminder")
                 return
-            session["field"] = field
-            session["step"] = "provide_value"
-            await message.channel.send(f"Enter new value for **{field}**:")
+            ctx["field"] = field
+            ctx["step"] = "new_value"
+            await message.channel.send(f"Enter new value for {field}:")
+            return
 
-        # Step 3: Provide new value
-        elif session["step"] == "provide_value":
-            event = evlist[session["event_index"]]
-            field = session["field"]
-
+        if ctx["step"] == "new_value":
+            idx = ctx["index"]
+            field = ctx["field"]
             if field == "name":
-                event["name"] = message.content
-
-            elif field == "datetime":
-                if re.match(r"\d{2}-\d{2}-\d{4}", message.content):
-                    event["datetime"] = datetime.strptime(message.content, "%d-%m-%Y %H:%M").isoformat()
-                else:
-                    delta = timedelta()
-                    match = re.findall(r"(\d+)([dhm])", message.content)
-                    for val, unit in match:
-                        if unit == "d": delta += timedelta(days=int(val))
-                        elif unit == "h": delta += timedelta(hours=int(val))
-                        elif unit == "m": delta += timedelta(minutes=int(val))
-                    event["datetime"] = (datetime.utcnow() + delta).isoformat()
-
+                events[idx]["name"] = message.content
             elif field == "reminder":
-                if not message.content.isdigit():
-                    await message.channel.send("⚠️ Reminder must be a number (minutes). Try again or type `exit`.")
+                events[idx]["reminder"] = int(message.content)
+            elif field == "datetime":
+                try:
+                    dt = datetime.strptime(message.content, "%d-%m-%Y %H:%M")
+                    events[idx]["datetime"] = dt.isoformat()
+                except:
+                    await message.channel.send("Invalid date format. Use DD-MM-YYYY HH:MM in UTC.")
                     return
-                event["reminder"] = int(message.content)
+            save_events({"custom": events})
+            await message.channel.send(f"✅ Updated event {events[idx]['name']}. Edit another field? (yes/no)")
+            ctx["step"] = "edit_again"
+            return
 
-            elif field == "category":
-                if message.content.lower() not in ["kvk", "custom"]:
-                    await message.channel.send("⚠️ Category must be `kvk` or `custom`. Try again or type `exit`.")
-                    return
-                events[message.content.lower()].append(event)
-                evlist.remove(event)
-
-            save_events(events)
-            await message.channel.send("✅ Event updated successfully.")
-            del active_sessions[uid]
-
-        # Step 4: Confirm remove
-        elif session["step"] == "confirm_remove":
+        if ctx["step"] == "edit_again":
             if message.content.lower() == "yes":
-                event = evlist.pop(session["event_index"])
-                save_events(events)
-                await message.channel.send(f"✅ Event **{event['name']}** deleted.")
+                ctx["step"] = "choose_field"
+                await message.channel.send("What field do you want to edit next? (name / datetime / reminder)")
             else:
-                await message.channel.send("❌ Deletion cancelled.")
-            del active_sessions[uid]
+                del active_edits[message.author.id]
+                await message.channel.send("✅ Editing finished.")
+            return
+
+    await bot.process_commands(message)
+
+# ===== Remove Event Interactive =====
+active_removes = {}
+
+@bot.tree.command(name="removeevent", description="Remove a custom event (admin only)")
+async def removeevent(interaction: discord.Interaction):
+    if not has_admin_permission(interaction):
+        await interaction.response.send_message("❌ You can't use this command.", ephemeral=True)
+        return
+
+    events = load_events()["custom"]
+    if not events:
+        await interaction.response.send_message("No custom events available to remove.")
+        return
+
+    msg = "🗑️ **Custom Events List**\n\n"
+    for idx, e in enumerate(events, start=1):
+        dt = datetime.fromisoformat(e["datetime"])
+        msg += f"{idx}. {e['name']} — <t:{int(dt.replace(tzinfo=pytz.UTC).timestamp())}:F> (reminder {e['reminder']}m)\n"
+
+    await interaction.response.send_message(msg + "\nReply with the event **number** to delete or type `exit`.")
+    active_removes[interaction.user.id] = True
+
+@bot.event
+async def on_message(message):
+    if message.author.bot: return
+
+    if message.author.id in active_removes:
+        events = load_events()["custom"]
+        if message.content.lower() == "exit":
+            await message.channel.send("❌ Delete cancelled.")
+            del active_removes[message.author.id]
+            return
+        try:
+            idx = int(message.content) - 1
+            removed = events.pop(idx)
+            save_events({"custom": events})
+            await message.channel.send(f"🗑️ Deleted event {removed['name']}")
+        except:
+            await message.channel.send("Invalid number, try again or type `exit`.")
+            return
+        del active_removes[message.author.id]
+        return
 
     await bot.process_commands(message)
 
 # ===== Run Bot =====
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    update_channel = bot.get_channel(update_channel_id)
+    if update_channel:
+        await update_channel.send("🤖 Bot updated and online!")
+    event_reminders.start()
+
 bot_token = os.getenv("DISCORD_BOT_TOKEN")
 if not bot_token:
     print("❌ Error: DISCORD_BOT_TOKEN not set")
