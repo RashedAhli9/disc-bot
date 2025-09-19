@@ -5,13 +5,14 @@ import pytz
 import os
 import json
 from datetime import date, timedelta, datetime, time
+from discord.ui import View, Button, Select, Modal, TextInput
 
 # ===== Setup =====
 MY_TIMEZONE = "UTC"
 channel_id = 1328658110897983549      # Abyss reminders channel
 update_channel_id = 1332676174995918859  # Bot update notifications channel
 OWNER_ID = 1084884048884797490
-GUILD_ID = 1328405638744641548  # replace with your actual server ID
+GUILD_ID = 1328658110897983549  # replace with your server ID
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -19,6 +20,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 CUSTOM_FILE = "custom_events.json"
+active_flows = {}
 
 
 # ===== JSON Storage =====
@@ -65,7 +67,6 @@ def has_admin_permission(interaction):
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     try:
-        # Force sync all slash commands only to your guild (instant updates)
         guild = discord.Object(id=GUILD_ID)
         synced = await bot.tree.sync(guild=guild)
         print(f"🔄 Synced {len(synced)} commands to guild {GUILD_ID}")
@@ -78,7 +79,6 @@ async def on_ready():
 
     check_time.start()
     event_reminder.start()
-
 
 
 @tasks.loop(minutes=1)
@@ -190,18 +190,40 @@ async def kvkevent(interaction: discord.Interaction):
     await interaction.response.send_message(msg)
 
 
-# ===== Add/Edit/Remove Custom Events =====
-active_flows = {}
+# ===== Add Custom Event with Modal =====
+class AddEventModal(Modal, title="➕ Add New Event"):
+    event_name = TextInput(label="Event Name", placeholder="Dragon Raid")
+    event_datetime = TextInput(label="Datetime (UTC)", placeholder="DD-MM-YYYY HH:MM or 1d 2h")
+    event_reminder = TextInput(label="Reminder (minutes or 'no')", placeholder="10")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            dt = parse_datetime(self.event_datetime.value)
+            reminder = 0 if self.event_reminder.value.lower() == "no" else int(self.event_reminder.value)
+            new_event = {
+                "name": self.event_name.value,
+                "datetime": dt.isoformat(),
+                "reminder": reminder
+            }
+            events = load_custom_events()
+            events.append(new_event)
+            save_custom_events(events)
+            await interaction.response.send_message(
+                f"✅ Event added: **{new_event['name']}** at <t:{int(dt.timestamp())}:F>",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to add event: {e}", ephemeral=True)
 
 @bot.tree.command(name="addevent", description="Add a custom event (admin only)")
 async def addevent(interaction: discord.Interaction):
     if not has_admin_permission(interaction):
         await interaction.response.send_message("❌ No permission.", ephemeral=True)
         return
-    await interaction.response.send_message("✍️ Enter event name (or type 'exit' to cancel):", ephemeral=True)
-    active_flows[interaction.user.id] = {"step": "name", "data": {}}
+    await interaction.response.send_modal(AddEventModal())
 
 
+# ===== Edit Event with Dropdown + Buttons =====
 @bot.tree.command(name="editevent", description="Edit a custom event (admin only)")
 async def editevent(interaction: discord.Interaction):
     if not has_admin_permission(interaction):
@@ -211,13 +233,63 @@ async def editevent(interaction: discord.Interaction):
     if not custom:
         await interaction.response.send_message("No custom events found.", ephemeral=True)
         return
-    msg = "📋 Choose ID to edit:\n"
-    for i, ev in enumerate(custom, 1):
-        msg += f"{i}. {ev['name']} — <t:{int(datetime.fromisoformat(ev['datetime']).timestamp())}:F>\n"
-    await interaction.response.send_message(msg, ephemeral=True)
-    active_flows[interaction.user.id] = {"step": "edit_select"}
+
+    class EventSelect(Select):
+        def __init__(self):
+            options = []
+            for i, ev in enumerate(custom):
+                dt_str = f"<t:{int(datetime.fromisoformat(ev['datetime']).timestamp())}:F>"
+                options.append(discord.SelectOption(
+                    label=ev["name"],
+                    description=f"Date: {dt_str}",
+                    value=str(i)
+                ))
+            super().__init__(placeholder="Select an event to edit", min_values=1, max_values=1, options=options)
+
+        async def callback(self, interaction2: discord.Interaction):
+            idx = int(self.values[0])
+            flow = {"step": "edit_field", "data": {"idx": idx}}
+            active_flows[interaction.user.id] = flow
+
+            class EditFieldView(View):
+                def __init__(self):
+                    super().__init__(timeout=60)
+
+                @discord.ui.button(label="✏️ Edit Name", style=discord.ButtonStyle.primary)
+                async def edit_name(self, button: Button, inter: discord.Interaction):
+                    if inter.user.id != interaction.user.id:
+                        await inter.response.send_message("❌ Not your flow.", ephemeral=True)
+                        return
+                    flow["data"]["field"] = "name"
+                    flow["step"] = "edit_value"
+                    await inter.response.send_message("Enter new value for **name**:")
+
+                @discord.ui.button(label="🕒 Edit Datetime", style=discord.ButtonStyle.secondary)
+                async def edit_datetime(self, button: Button, inter: discord.Interaction):
+                    if inter.user.id != interaction.user.id:
+                        await inter.response.send_message("❌ Not your flow.", ephemeral=True)
+                        return
+                    flow["data"]["field"] = "datetime"
+                    flow["step"] = "edit_value"
+                    await inter.response.send_message("Enter new value for **datetime** (UTC `DD-MM-YYYY HH:MM`):")
+
+                @discord.ui.button(label="⏰ Edit Reminder", style=discord.ButtonStyle.success)
+                async def edit_reminder(self, button: Button, inter: discord.Interaction):
+                    if inter.user.id != interaction.user.id:
+                        await inter.response.send_message("❌ Not your flow.", ephemeral=True)
+                        return
+                    flow["data"]["field"] = "reminder"
+                    flow["step"] = "edit_value"
+                    await inter.response.send_message("Enter new value for **reminder** minutes (or `no`):")
+
+            await interaction2.response.send_message("👉 Choose what to edit:", view=EditFieldView(), ephemeral=True)
+
+    view = View()
+    view.add_item(EventSelect())
+    await interaction.response.send_message("📋 Select an event to edit:", view=view, ephemeral=True)
 
 
+# ===== Remove Event with Dropdown + Confirm =====
 @bot.tree.command(name="removeevent", description="Remove a custom event (admin only)")
 async def removeevent(interaction: discord.Interaction):
     if not has_admin_permission(interaction):
@@ -227,13 +299,61 @@ async def removeevent(interaction: discord.Interaction):
     if not custom:
         await interaction.response.send_message("No custom events found.", ephemeral=True)
         return
-    msg = "🗑️ Choose ID to remove:\n"
-    for i, ev in enumerate(custom, 1):
-        msg += f"{i}. {ev['name']} — <t:{int(datetime.fromisoformat(ev['datetime']).timestamp())}:F>\n"
-    await interaction.response.send_message(msg, ephemeral=True)
-    active_flows[interaction.user.id] = {"step": "remove_select"}
+
+    class RemoveSelect(Select):
+        def __init__(self):
+            options = []
+            for i, ev in enumerate(custom):
+                dt_str = f"<t:{int(datetime.fromisoformat(ev['datetime']).timestamp())}:F>"
+                options.append(discord.SelectOption(
+                    label=ev["name"],
+                    description=f"Date: {dt_str}",
+                    value=str(i)
+                ))
+            super().__init__(placeholder="Select an event to remove", min_values=1, max_values=1, options=options)
+
+        async def callback(self, interaction2: discord.Interaction):
+            idx = int(self.values[0])
+            flow = {"step": "remove_confirm", "data": {"idx": idx}}
+            active_flows[interaction.user.id] = flow
+
+            class ConfirmDeleteView(View):
+                def __init__(self):
+                    super().__init__(timeout=30)
+
+                @discord.ui.button(label="✅ Yes, delete it", style=discord.ButtonStyle.danger)
+                async def confirm_yes(self, button: Button, inter: discord.Interaction):
+                    if inter.user.id != interaction.user.id:
+                        await inter.response.send_message("❌ Not your flow.", ephemeral=True)
+                        return
+                    custom = load_custom_events()
+                    idx = flow["data"]["idx"]
+                    if 0 <= idx < len(custom):
+                        removed = custom.pop(idx)
+                        save_custom_events(custom)
+                        await inter.response.send_message(f"🗑️ Removed event: {removed['name']}")
+                    else:
+                        await inter.response.send_message("❌ Invalid ID.")
+                    del active_flows[interaction.user.id]
+
+                @discord.ui.button(label="❌ No, cancel", style=discord.ButtonStyle.secondary)
+                async def confirm_no(self, button: Button, inter: discord.Interaction):
+                    if inter.user.id != interaction.user.id:
+                        await inter.response.send_message("❌ Not your flow.", ephemeral=True)
+                        return
+                    await inter.response.send_message("❌ Deletion cancelled.")
+                    del active_flows[interaction.user.id]
+
+            view = ConfirmDeleteView()
+            ev_name = custom[idx]["name"]
+            await interaction2.response.send_message(f"⚠️ Are you sure you want to delete **{ev_name}**?", view=view, ephemeral=True)
+
+    view = View()
+    view.add_item(RemoveSelect())
+    await interaction.response.send_message("🗑️ Select an event to remove:", view=view, ephemeral=True)
 
 
+# ===== Handle Text Entry for Edit Values =====
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -247,39 +367,7 @@ async def on_message(message):
         del active_flows[message.author.id]
         return
 
-    if flow["step"] == "name":
-        flow["data"]["name"] = message.content
-        flow["step"] = "datetime"
-        await message.channel.send("📅 Enter date/time (UTC) as `DD-MM-YYYY HH:MM` or relative like `1d 2h 30m`:")
-    elif flow["step"] == "datetime":
-        try:
-            dt = parse_datetime(message.content)
-            flow["data"]["datetime"] = dt.isoformat()
-            flow["step"] = "reminder"
-            await message.channel.send("⏰ Enter reminder minutes before event (or 'no'):")
-        except Exception:
-            await message.channel.send("❌ Invalid date/time. Try again.")
-    elif flow["step"] == "reminder":
-        if message.content.lower() == "no":
-            flow["data"]["reminder"] = 0
-        else:
-            flow["data"]["reminder"] = int(message.content)
-        events = load_custom_events()
-        events.append(flow["data"])
-        save_custom_events(events)
-        await message.channel.send(f"✅ Event added: **{flow['data']['name']}** at <t:{int(datetime.fromisoformat(flow['data']['datetime']).timestamp())}:F>")
-        del active_flows[message.author.id]
-
-    elif flow["step"] == "edit_select":
-        idx = int(message.content) - 1
-        flow["data"]["idx"] = idx
-        flow["step"] = "edit_field"
-        await message.channel.send("✍️ What do you want to edit? (name / datetime / reminder)")
-    elif flow["step"] == "edit_field":
-        flow["data"]["field"] = message.content.lower()
-        flow["step"] = "edit_value"
-        await message.channel.send(f"Enter new value for {flow['data']['field']}:")
-    elif flow["step"] == "edit_value":
+    if flow["step"] == "edit_value":
         custom = load_custom_events()
         idx = flow["data"]["idx"]
         field = flow["data"]["field"]
@@ -291,17 +379,6 @@ async def on_message(message):
             custom[idx]["name"] = message.content
         save_custom_events(custom)
         await message.channel.send("✅ Event updated.")
-        del active_flows[message.author.id]
-
-    elif flow["step"] == "remove_select":
-        idx = int(message.content) - 1
-        custom = load_custom_events()
-        if 0 <= idx < len(custom):
-            removed = custom.pop(idx)
-            save_custom_events(custom)
-            await message.channel.send(f"🗑️ Removed event: {removed['name']}")
-        else:
-            await message.channel.send("❌ Invalid ID.")
         del active_flows[message.author.id]
 
 
@@ -339,4 +416,3 @@ if not bot_token:
     print("❌ Error: DISCORD_BOT_TOKEN not set")
     exit(1)
 bot.run(bot_token)
-
