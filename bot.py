@@ -95,9 +95,15 @@ async def check_time():
 
 
 # ===== Weekly Event Command =====
-events = ["Range Forge", "Melee Wheel", "Melee Forge", "Range Wheel"]
-start_date = date(2025, 9, 16)  # First event: Range Forge
-event_emojis = {"Range Forge": "🏹", "Melee Wheel": "⚔️", "Melee Forge": "🔨", "Range Wheel": "🎯"}
+# Corrected rotation: Sep 16, 2025 = Melee Wheel
+events = ["Melee Wheel", "Melee Forge", "Range Wheel", "Range Forge"]
+start_date = date(2025, 9, 16)  # First event: Melee Wheel
+event_emojis = {
+    "Range Forge": "🏹",
+    "Melee Wheel": "⚔️",
+    "Melee Forge": "🔨",
+    "Range Wheel": "🎯"
+}
 
 @bot.tree.command(name="weeklyevent", description="Check the next 4 weekly Abyss events")
 async def weeklyevent(interaction: discord.Interaction):
