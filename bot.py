@@ -280,7 +280,7 @@ async def editevent(interaction: discord.Interaction):
                         return
                     flow["data"]["field"] = "name"
                     flow["step"] = "edit_value"
-                    await inter.response.send_message("Enter new value for **name**:")
+                    await inter.response.send_message("Enter new value for **name**:", ephemeral=True)
 
                 @discord.ui.button(label="🕒 Edit Datetime", style=discord.ButtonStyle.secondary)
                 async def edit_datetime(self, button: Button, inter: discord.Interaction):
@@ -289,7 +289,7 @@ async def editevent(interaction: discord.Interaction):
                         return
                     flow["data"]["field"] = "datetime"
                     flow["step"] = "edit_value"
-                    await inter.response.send_message("Enter new value for **datetime** (UTC `DD-MM-YYYY HH:MM`):")
+                    await inter.response.send_message("Enter new value for **datetime** (UTC `DD-MM-YYYY HH:MM`):", ephemeral=True)
 
                 @discord.ui.button(label="⏰ Edit Reminder", style=discord.ButtonStyle.success)
                 async def edit_reminder(self, button: Button, inter: discord.Interaction):
@@ -298,7 +298,7 @@ async def editevent(interaction: discord.Interaction):
                         return
                     flow["data"]["field"] = "reminder"
                     flow["step"] = "edit_value"
-                    await inter.response.send_message("Enter new value for **reminder** minutes (or `no`):")
+                    await inter.response.send_message("Enter new value for **reminder** minutes (or `no`):", ephemeral=True)
 
             await interaction2.response.send_message("👉 Choose what to edit:", view=EditFieldView(), ephemeral=True)
 
@@ -360,7 +360,7 @@ async def removeevent(interaction: discord.Interaction):
                     if inter.user.id != interaction.user.id:
                         await inter.response.send_message("❌ Not your flow.", ephemeral=True)
                         return
-                    await inter.response.send_message("❌ Deletion cancelled.")
+                    await inter.response.send_message("❌ Deletion cancelled.", ephemeral=True)
                     del active_flows[interaction.user.id]
 
             view = ConfirmDeleteView()
@@ -398,7 +398,7 @@ async def on_message(message):
             custom[idx]["name"] = message.content
         save_custom_events(custom)
         await message.channel.send("✅ Event updated.")
-        await log_action(f"✏️ [Event Edited] **{custom[idx]['name']}** ({field}) by {message.author.mention}")
+        await log_action(f"✏️ [Event Edited] **{custom[idx]['name']}** field **{field}** by {message.author.mention}")
         del active_flows[message.author.id]
 
 
