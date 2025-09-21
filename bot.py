@@ -10,7 +10,7 @@ from discord.ui import View, Button, Select, Modal, TextInput
 # ===== Setup =====
 MY_TIMEZONE = "UTC"
 channel_id = 1328658110897983549      # Abyss reminders channel
-update_channel_id = 1332676174995918859  # Bot update notifications channel
+update_channel_id = 1332676174995918859  # Bot update notifications + logs channel
 OWNER_ID = 1084884048884797490
 GUILD_ID = 1328658110897983549  # replace with your server ID
 
@@ -21,6 +21,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 CUSTOM_FILE = "custom_events.json"
 active_flows = {}
+
+# Track sent reminders to avoid duplicates
+sent_reminders = set()
 
 
 # ===== JSON Storage =====
@@ -62,6 +65,13 @@ def has_admin_permission(interaction):
     )
 
 
+async def log_action(message: str):
+    """Send logs to the update_channel_id"""
+    channel = bot.get_channel(update_channel_id)
+    if channel:
+        await channel.send(message)
+
+
 # ===== Events =====
 @bot.event
 async def on_ready():
@@ -88,14 +98,15 @@ async def check_time():
     if now.weekday() in [1, 4]:
         if now.hour in [0, 8, 16] and now.minute == 0:
             channel = bot.get_channel(channel_id)
-            await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
+            if channel:
+                await channel.send("<@&1413532222396301322>, Abyss will start in 15 minutes!")
         if now.hour in [0, 8, 16] and now.minute == 30:
             channel = bot.get_channel(channel_id)
-            await channel.send("<@&1413532222396301322>, Round 2 of Abyss will start in 15 minutes!")
+            if channel:
+                await channel.send("<@&1413532222396301322>, Round 2 of Abyss will start in 15 minutes!")
 
 
 # ===== Weekly Event Command =====
-# Corrected rotation: Sep 16, 2025 = Melee Wheel
 events = ["Melee Wheel", "Melee Forge", "Range Wheel", "Range Forge"]
 start_date = date(2025, 9, 16)  # First event: Melee Wheel
 event_emojis = {
@@ -218,6 +229,7 @@ class AddEventModal(Modal, title="➕ Add New Event"):
                 f"✅ Event added: **{new_event['name']}** at <t:{int(dt.timestamp())}:F>",
                 ephemeral=True
             )
+            await log_action(f"📝 [Event Added] **{new_event['name']}** at <t:{int(dt.timestamp())}:F> by {interaction.user.mention}")
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed to add event: {e}", ephemeral=True)
 
@@ -338,6 +350,7 @@ async def removeevent(interaction: discord.Interaction):
                         removed = custom.pop(idx)
                         save_custom_events(custom)
                         await inter.response.send_message(f"🗑️ Removed event: {removed['name']}")
+                        await log_action(f"🗑️ [Event Removed] **{removed['name']}** by {interaction.user.mention}")
                     else:
                         await inter.response.send_message("❌ Invalid ID.")
                     del active_flows[interaction.user.id]
@@ -385,12 +398,14 @@ async def on_message(message):
             custom[idx]["name"] = message.content
         save_custom_events(custom)
         await message.channel.send("✅ Event updated.")
+        await log_action(f"✏️ [Event Edited] **{custom[idx]['name']}** ({field}) by {message.author.mention}")
         del active_flows[message.author.id]
 
 
 # ===== Reminder + Cleanup Loop =====
 @tasks.loop(minutes=1)
 async def event_reminder():
+    global sent_reminders
     now = datetime.utcnow().replace(second=0, microsecond=0)
     channel = bot.get_channel(channel_id)
 
@@ -410,10 +425,20 @@ async def event_reminder():
     for ev in updated_custom:
         events.append((ev["name"], datetime.fromisoformat(ev["datetime"]), ev.get("reminder", 0)))
 
-    # Check reminders
-    for name, dt, reminder in events:
-        if reminder > 0 and dt - timedelta(minutes=reminder) == now:
-            await channel.send(f"⏰ Reminder: {name} starts in {reminder} minutes! <t:{int(dt.timestamp())}:F>")
+    # Check reminders (robust + no duplicates)
+    if channel:
+        for name, dt, reminder in events:
+            if reminder > 0:
+                reminder_time = dt - timedelta(minutes=reminder)
+                key = (name, reminder_time.isoformat())
+                if reminder_time <= now < (reminder_time + timedelta(minutes=1)):
+                    if key not in sent_reminders:
+                        await channel.send(f"⏰ Reminder: {name} starts in {reminder} minutes! <t:{int(dt.timestamp())}:F>")
+                        sent_reminders.add(key)
+
+    # Keep sent_reminders set small
+    if len(sent_reminders) > 500:
+        sent_reminders = set(list(sent_reminders)[-200:])
 
 
 # ===== Run Bot =====
