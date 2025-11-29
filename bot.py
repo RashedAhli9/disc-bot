@@ -4,7 +4,7 @@ from discord import app_commands
 import pytz
 import os
 import json
-from datetime import date, timedelta, datetime, time
+from datetime import date, datetime, timedelta, time
 from discord.ui import View, Button, Select, Modal, TextInput
 
 # ==============================
@@ -12,133 +12,317 @@ from discord.ui import View, Button, Select, Modal, TextInput
 # ==============================
 MY_TIMEZONE = "UTC"
 
-channel_id = 1328658110897983549          # Abyss reminders channel
-update_channel_id = 1332676174995918859   # Bot update notifications & logs
+channel_id = 1328658110897983549
+update_channel_id = 1332676174995918859
 OWNER_ID = 1084884048884797490
-GUILD_ID = 1328405638744641548            # Main server
+GUILD_ID = 1328405638744641548
 
-CUSTOM_FILE = os.getenv("CUSTOM_FILE", "custom_events.json")
-ABYSS_CONFIG_FILE = os.getenv("ABYSS_CONFIG_FILE", "abyss_config.json")
+CUSTOM_FILE = "custom_events.json"
+ABYSS_CONFIG_FILE = "abyss_config.json"
 
-DEFAULT_ABYSS_DAYS = [1, 4, 6]                  # Tue, Fri, Sun
-DEFAULT_ABYSS_HOURS = [0, 4, 8, 12, 16, 20]     # UTC hours
+DEFAULT_ABYSS_DAYS = [1, 4, 6]
+DEFAULT_ABYSS_HOURS = [0, 4, 8, 12, 16, 20]
+DEFAULT_REMINDER_HOURS = DEFAULT_ABYSS_HOURS
+DEFAULT_OFFSETS = [15]
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-active_flows: dict[int, dict] = {}
-sent_reminders: set[tuple[str, str]] = set()
-ABYSS_DAYS = DEFAULT_ABYSS_DAYS.copy()
-ABYSS_HOURS = DEFAULT_ABYSS_HOURS.copy()
+active_flows = {}
+sent_reminders = set()
 
 # ==============================
-# STORAGE HELPERS
+# LOAD / SAVE
 # ==============================
 def load_custom_events():
     if not os.path.exists(CUSTOM_FILE):
         return []
-    with open(CUSTOM_FILE, "r") as f:
-        return json.load(f)
+    return json.load(open(CUSTOM_FILE))
 
 def save_custom_events(events):
-    with open(CUSTOM_FILE, "w") as f:
-        json.dump(events, f, indent=2, default=str)
+    json.dump(events, open(CUSTOM_FILE, "w"), indent=2)
 
 def load_abyss_config():
     if not os.path.exists(ABYSS_CONFIG_FILE):
-        return {"days": DEFAULT_ABYSS_DAYS, "hours": DEFAULT_ABYSS_HOURS}
-    with open(ABYSS_CONFIG_FILE, "r") as f:
-        data = json.load(f)
-    return {
-        "days": data.get("days", DEFAULT_ABYSS_DAYS),
-        "hours": data.get("hours", DEFAULT_ABYSS_HOURS),
-    }
+        return {
+            "days": DEFAULT_ABYSS_DAYS,
+            "hours": DEFAULT_ABYSS_HOURS,
+            "reminder_hours": DEFAULT_REMINDER_HOURS,
+            "reminder_offsets": DEFAULT_OFFSETS,
+        }
+    return json.load(open(ABYSS_CONFIG_FILE))
 
-def save_abyss_config(days, hours):
-    with open(ABYSS_CONFIG_FILE, "w") as f:
-        json.dump({"days": days, "hours": hours}, f, indent=2)
+def save_abyss_config(cfg):
+    json.dump(cfg, open(ABYSS_CONFIG_FILE, "w"), indent=2)
 
-_conf = load_abyss_config()
-ABYSS_DAYS = _conf["days"]
-ABYSS_HOURS = _conf["hours"]
+cfg = load_abyss_config()
+ABYSS_DAYS = cfg["days"]
+ABYSS_HOURS = cfg["hours"]
+REMINDER_HOURS = cfg["reminder_hours"]
+REMINDER_OFFSETS = cfg["reminder_offsets"]
 
 # ==============================
-# GENERIC HELPERS
+# HELPERS
 # ==============================
-def parse_datetime(input_str: str) -> datetime:
+def parse_datetime(txt: str):
     try:
-        return datetime.strptime(input_str, "%d-%m-%Y %H:%M")
-    except ValueError:
+        return datetime.strptime(txt, "%d-%m-%Y %H:%M")
+    except:
         pass
 
     now = datetime.utcnow()
-    days = hours = minutes = 0
-    for part in input_str.split():
+    d = h = m = 0
+    for part in txt.split():
         if "d" in part:
-            days = int(part.replace("d", ""))
+            d = int(part.replace("d", ""))
         elif "h" in part:
-            hours = int(part.replace("h", ""))
+            h = int(part.replace("h", ""))
         elif "m" in part:
-            minutes = int(part.replace("m", ""))
-    return now + timedelta(days=days, hours=hours, minutes=minutes)
+            m = int(part.replace("m", ""))
+    return now + timedelta(days=d, hours=h, minutes=m)
 
-async def log_action(msg: str):
+def has_admin(inter):
+    return inter.user.id == OWNER_ID or any(r.name.lower() == "admin" for r in inter.user.roles)
+
+async def log_action(txt):
     ch = bot.get_channel(update_channel_id)
     if ch:
-        await ch.send(msg)
-
-def has_admin_permission(interaction: discord.Interaction) -> bool:
-    return (
-        interaction.user.id == OWNER_ID or
-        any(r.name.lower() == "admin" for r in interaction.user.roles)
-    )
+        await ch.send(txt)
 
 # ==============================
-# READY + SYNC
+# READY
 # ==============================
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-
+    print(f"Logged in as {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"🌍 Synced {len(synced)} global commands")
+        print(f"Synced {len(synced)} global commands")
     except Exception as e:
-        print(f"❌ Sync failed: {e}")
+        print("Sync error:", e)
 
-    log = bot.get_channel(update_channel_id)
-    if log:
-        await log.send("🤖 Bot updated & synced (global commands).")
+    ch = bot.get_channel(update_channel_id)
+    if ch:
+        await ch.send("🤖 Bot updated & online!")
 
     check_time.start()
     event_reminder.start()
 
 # ==============================
-# ABYSS SCHEDULE REMINDERS
+# UPGRADED /abyssconfig
+# ==============================
+class OffsetModal(Modal, title="Set Reminder Offsets (minutes)"):
+    offsets = TextInput(label="Offsets", placeholder="Example: 5, 10, 15, 60")
+
+    def __init__(self, inter):
+        super().__init__()
+        self.inter = inter
+
+    async def on_submit(self, inter2):
+        global REMINDER_OFFSETS, cfg
+
+        raw = self.offsets.value.replace(",", " ")
+        nums = []
+
+        for part in raw.split():
+            if part.isdigit():
+                nums.append(int(part))
+
+        if not nums:
+            await inter2.response.send_message("❌ Invalid offsets.", ephemeral=True)
+            return
+
+        REMINDER_OFFSETS = nums
+        cfg["reminder_offsets"] = nums
+        save_abyss_config(cfg)
+
+        await inter2.response.send_message(
+            f"✅ Offsets updated: {nums}", ephemeral=True
+        )
+
+class AbyssConfigView(View):
+    def __init__(self, inter):
+        super().__init__(timeout=300)
+        self.inter = inter
+        self.selected_days = set(ABYSS_DAYS)
+        self.selected_hours = set(ABYSS_HOURS)
+        self.selected_reminder_hours = set(REMINDER_HOURS)
+
+        # DAY DROPDOWN
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        day_opts = [
+            discord.SelectOption(label=day_names[i], value=str(i),
+                                 default=(i in ABYSS_DAYS))
+            for i in range(7)
+        ]
+
+        self.days_dropdown = Select(
+            placeholder="Select Days",
+            options=day_opts,
+            min_values=0,
+            max_values=7
+        )
+        self.days_dropdown.callback = self.update_days
+        self.add_item(self.days_dropdown)
+
+        # HOURS DROPDOWN
+        hour_opts = [
+            discord.SelectOption(
+                label=f"{h:02d}:00",
+                value=str(h),
+                default=(h in ABYSS_HOURS)
+            )
+            for h in range(24)
+        ]
+
+        self.hours_dropdown = Select(
+            placeholder="Select Abyss Hours",
+            options=hour_opts,
+            min_values=0,
+            max_values=24
+        )
+        self.hours_dropdown.callback = self.update_hours
+        self.add_item(self.hours_dropdown)
+
+        # REMINDER HOURS
+        rem_opts = [
+            discord.SelectOption(
+                label=f"{h:02d}:00",
+                value=str(h),
+                default=(h in REMINDER_HOURS)
+            )
+            for h in range(24)
+        ]
+
+        self.reminder_hours_dropdown = Select(
+            placeholder="Select Reminder Hours",
+            options=rem_opts,
+            min_values=0,
+            max_values=24
+        )
+        self.reminder_hours_dropdown.callback = self.update_reminder_hours
+        self.add_item(self.reminder_hours_dropdown)
+
+        # BUTTONS
+        btn_offsets = Button(label="Set Offsets", style=discord.ButtonStyle.secondary)
+        btn_offsets.callback = self.open_offset_modal
+        self.add_item(btn_offsets)
+
+        btn_save = Button(label="Save", style=discord.ButtonStyle.success)
+        btn_save.callback = self.save_changes
+        self.add_item(btn_save)
+
+    async def update_days(self, inter):
+        self.selected_days = {int(v) for v in self.days_dropdown.values}
+        await inter.response.defer()
+
+    async def update_hours(self, inter):
+        self.selected_hours = {int(v) for v in self.hours_dropdown.values}
+        await inter.response.defer()
+
+    async def update_reminder_hours(self, inter):
+        self.selected_reminder_hours = {int(v) for v in self.reminder_hours_dropdown.values}
+        await inter.response.defer()
+
+    async def open_offset_modal(self, inter):
+        await inter.response.send_modal(OffsetModal(inter))
+
+    async def save_changes(self, inter):
+        global ABYSS_DAYS, ABYSS_HOURS, REMINDER_HOURS, cfg
+
+        ABYSS_DAYS = sorted(list(self.selected_days))
+        ABYSS_HOURS = sorted(list(self.selected_hours))
+        REMINDER_HOURS = sorted(list(self.selected_reminder_hours))
+
+        cfg["days"] = ABYSS_DAYS
+        cfg["hours"] = ABYSS_HOURS
+        cfg["reminder_hours"] = REMINDER_HOURS
+
+        save_abyss_config(cfg)
+
+        embed = discord.Embed(
+            title="Abyss Config Updated",
+            description=(
+                f"**Days:** {ABYSS_DAYS}\n"
+                f"**Hours:** {ABYSS_HOURS}\n"
+                f"**Reminder Hours:** {REMINDER_HOURS}\n"
+                f"**Offsets:** {REMINDER_OFFSETS}"
+            ),
+            color=0x2ecc71
+        )
+        await inter.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="abyssconfig", description="Configure Abyss schedule")
+async def abyssconfig_cmd(inter):
+    if inter.user.id != OWNER_ID:
+        await inter.response.send_message("❌ Owner only.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="⚙ Abyss Configuration",
+        description=(
+            f"**Days:** {ABYSS_DAYS}\n"
+            f"**Hours:** {ABYSS_HOURS}\n"
+            f"**Reminder Hours:** {REMINDER_HOURS}\n"
+            f"**Offsets:** {REMINDER_OFFSETS}"
+        ),
+        color=0x3498db
+    )
+
+    await inter.response.send_message(embed=embed, view=AbyssConfigView(inter), ephemeral=True)
+
+# ==============================
+# ABYSS SCHEDULE LOOP
 # ==============================
 @tasks.loop(minutes=1)
 async def check_time():
     tz = pytz.timezone(MY_TIMEZONE)
     now = datetime.now(tz)
 
-    if now.weekday() in ABYSS_DAYS:
-        if now.hour in ABYSS_HOURS and now.minute == 0:
-            ch = bot.get_channel(channel_id)
-            if ch:
-                await ch.send("<@&1413532222396301322>, Abyss starts in 15 minutes!")
+    if now.weekday() not in ABYSS_DAYS:
+        return
 
-        if now.hour in ABYSS_HOURS and now.minute == 30:
-            ch = bot.get_channel(channel_id)
-            if ch:
-                await ch.send("<@&1413532222396301322>, Abyss Round 2 starts in 15 minutes!")
+    if now.hour in ABYSS_HOURS and now.minute == 0:
+        ch = bot.get_channel(channel_id)
+        if ch:
+            await ch.send("<@&1413532222396301322>, Abyss starts in 15 minutes!")
+
+    if now.hour in ABYSS_HOURS and now.minute == 30:
+        ch = bot.get_channel(channel_id)
+        if ch:
+            await ch.send("<@&1413532222396301322>, Round 2 starts in 15 minutes!")
 
 # ==============================
-# WEEKLY EVENT ROTATION
+# REMINDER LOOP (closest offset only)
+# ==============================
+@tasks.loop(minutes=1)
+async def event_reminder():
+    global sent_reminders
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+    ch = bot.get_channel(channel_id)
+
+    for hr in REMINDER_HOURS:
+        for offset in REMINDER_OFFSETS:
+            target = now + timedelta(minutes=offset)
+
+            if target.hour == hr and target.minute == 0:
+                key = (hr, offset)
+                if key not in sent_reminders:
+                    if ch:
+                        await ch.send(
+                            f"⏰ Abyss starts in {offset} minutes (at {hr:02d}:00 UTC)"
+                        )
+                    sent_reminders.add(key)
+
+    if len(sent_reminders) > 200:
+        sent_reminders = set(list(sent_reminders)[-100:])
+
+# ==============================
+# WEEKLY EVENT COMMAND
 # ==============================
 weekly_events = ["Melee Wheel", "Melee Forge", "Range Wheel", "Range Forge"]
 start_date = date(2025, 9, 16)
-
 event_emojis = {
     "Range Forge": "🏹",
     "Melee Wheel": "⚔️",
@@ -147,7 +331,7 @@ event_emojis = {
 }
 
 @bot.tree.command(name="weeklyevent", description="Check the next 4 weekly Abyss events")
-async def weeklyevent(interaction: discord.Interaction):
+async def weeklyevent(inter):
     today = date.today()
     start_sunday = start_date - timedelta(days=start_date.weekday() + 1)
     weeks_passed = (today - start_sunday).days // 7
@@ -164,7 +348,7 @@ async def weeklyevent(interaction: discord.Interaction):
         event_end = event_start + timedelta(days=3)
 
     msg = "📅 **Weekly Abyss Events**\n\n"
-    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    ids = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
 
     for i in range(4):
         idx = (weeks_passed + i) % len(weekly_events)
@@ -181,75 +365,15 @@ async def weeklyevent(interaction: discord.Interaction):
             delta = base_dt - now
             status = f"⏳ Starts in {delta.days}d {delta.seconds//3600}h {(delta.seconds//60)%60}m"
 
-        msg += (
-            f"{number_emojis[i]} {emoji} **{name}** — <t:{int(base_dt.timestamp())}:F>\n"
-            f"{status}\n\n"
-        )
+        msg += f"{ids[i]} {emoji} **{name}** — <t:{int(base_dt.timestamp())}:F>\n{status}\n\n"
 
-    await interaction.response.send_message(msg)
-
-# ==============================
-# ABYSS CONFIG (OWNER ONLY)
-# ==============================
-@bot.tree.command(name="abyssconfig", description="View or update Abyss days/hours (owner only)")
-@app_commands.describe(
-    days="Comma-separated weekdays 0=Mon..6=Sun",
-    hours="Comma-separated UTC hours 0-23",
-)
-async def abyssconfig(interaction: discord.Interaction, days: str | None = None, hours: str | None = None):
-    global ABYSS_DAYS, ABYSS_HOURS
-
-    if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message("❌ Only the bot owner can use this.", ephemeral=True)
-        return
-
-    if days is None and hours is None:
-        await interaction.response.send_message(
-            f"⚙️ **Current Abyss Config**\n"
-            f"Days: `{', '.join(str(d) for d in ABYSS_DAYS)}`\n"
-            f"Hours UTC: `{', '.join(str(h) for h in ABYSS_HOURS)}`",
-            ephemeral=True,
-        )
-        return
-
-    # Update days
-    if days:
-        try:
-            parsed = [int(x) for x in days.split(",") if x.strip()]
-            if not all(0 <= d <= 6 for d in parsed):
-                raise ValueError
-            ABYSS_DAYS = parsed
-        except:
-            await interaction.response.send_message("❌ Invalid days. Use 0–6.", ephemeral=True)
-            return
-
-    # Update hours
-    if hours:
-        try:
-            parsed = [int(x) for x in hours.split(",") if x.strip()]
-            if not all(0 <= h <= 23 for h in parsed):
-                raise ValueError
-            ABYSS_HOURS = parsed
-        except:
-            await interaction.response.send_message("❌ Invalid hours. Use 0–23.", ephemeral=True)
-            return
-
-    save_abyss_config(ABYSS_DAYS, ABYSS_HOURS)
-
-    await interaction.response.send_message(
-        f"✅ Updated Abyss Config\n"
-        f"Days: `{ABYSS_DAYS}`\n"
-        f"Hours: `{ABYSS_HOURS}`",
-        ephemeral=True,
-    )
-
-    await log_action(f"⚙️ Abyss Config Updated by {interaction.user.mention}")
+    await inter.response.send_message(msg)
 
 # ==============================
 # KVK CUSTOM EVENTS
 # ==============================
 @bot.tree.command(name="kvkevent", description="Show next 4 upcoming custom events")
-async def kvkevent(interaction: discord.Interaction):
+async def kvkevent(inter):
     now = datetime.utcnow()
     events = load_custom_events()
 
@@ -266,11 +390,11 @@ async def kvkevent(interaction: discord.Interaction):
             break
 
     if not upcoming:
-        await interaction.response.send_message("📭 No upcoming events.", ephemeral=True)
+        await inter.response.send_message("📭 No upcoming events.", ephemeral=True)
         return
 
     msg = "📅 **Upcoming Events**\n\n"
-    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    ids = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
 
     for i, (name, dt, state) in enumerate(upcoming):
         if state == "live":
@@ -281,9 +405,9 @@ async def kvkevent(interaction: discord.Interaction):
             delta = dt - now
             status = f"⏳ Starts in {delta.days}d {delta.seconds//3600}h {(delta.seconds//60)%60}m"
 
-        msg += f"{emojis[i]} **{name}** — <t:{int(dt.timestamp())}:F>\n{status}\n\n"
+        msg += f"{ids[i]} **{name}** — <t:{int(dt.timestamp())}:F>\n{status}\n\n"
 
-    await interaction.response.send_message(msg)
+    await inter.response.send_message(msg)
 
 # ==============================
 # ADD CUSTOM EVENT
@@ -293,176 +417,170 @@ class AddEventModal(Modal, title="➕ Add Event"):
     datetime_input = TextInput(label="Datetime (UTC)", placeholder="DD-MM-YYYY HH:MM or 1d 2h")
     reminder = TextInput(label="Reminder (minutes or 'no')", placeholder="10")
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def on_submit(self, inter):
         try:
             dt = parse_datetime(self.datetime_input.value)
-            reminder_value = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
+            rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
 
             new_ev = {
                 "name": self.name.value,
                 "datetime": dt.isoformat(),
-                "reminder": reminder_value,
+                "reminder": rem,
             }
 
             events = load_custom_events()
             events.append(new_ev)
             save_custom_events(events)
 
-            await interaction.response.send_message(
+            await inter.response.send_message(
                 f"✅ Event added: **{new_ev['name']}** at <t:{int(dt.timestamp())}:F>",
                 ephemeral=True,
             )
-            await log_action(f"📝 Event Added by {interaction.user.mention}")
+            await log_action(f"📝 Event Added by {inter.user.mention}")
         except Exception as e:
-            await interaction.response.send_message(f"❌ Failed to add event: {e}", ephemeral=True)
+            await inter.response.send_message(f"❌ Failed: {e}", ephemeral=True)
 
 @bot.tree.command(name="addevent", description="Add a custom event (admin only)")
-async def addevent(interaction: discord.Interaction):
-    if not has_admin_permission(interaction):
-        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+async def addevent(inter):
+    if not has_admin(inter):
+        await inter.response.send_message("❌ No permission.", ephemeral=True)
         return
-    await interaction.response.send_modal(AddEventModal())
+    await inter.response.send_modal(AddEventModal())
 
 # ==============================
 # EDIT EVENT
 # ==============================
-@bot.tree.command(name="editevent", description="Edit a custom event (admin only)")
-async def editevent(interaction: discord.Interaction):
-    if not has_admin_permission(interaction):
-        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+@bot.tree.command(name="editevent", description="Edit a custom event")
+async def editevent(inter):
+    if not has_admin(inter):
+        await inter.response.send_message("❌ No permission.", ephemeral=True)
         return
 
     custom = load_custom_events()
     if not custom:
-        await interaction.response.send_message("No events found.", ephemeral=True)
+        await inter.response.send_message("No events found.", ephemeral=True)
         return
 
     class SelectEvent(Select):
         def __init__(self):
-            options = [
+            opts = [
                 discord.SelectOption(
                     label=e["name"],
                     description=datetime.fromisoformat(e["datetime"]).strftime("%d-%m %H:%M UTC"),
-                    value=str(i),
+                    value=str(i)
                 )
                 for i, e in enumerate(custom)
             ]
-            super().__init__(placeholder="Choose event to edit", options=options)
+            super().__init__(placeholder="Choose event to edit", options=opts)
 
-        async def callback(self, inter):
+        async def callback(self, inter2):
             idx = int(self.values[0])
-            active_flows[interaction.user.id] = {"idx": idx}
+            active_flows[inter.user.id] = {"idx": idx}
 
             class EditButtons(View):
                 @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
-                async def edit_name(self, button, i):
-                    active_flows[interaction.user.id]["field"] = "name"
+                async def edit_name(self, btn, i):
+                    active_flows[inter.user.id]["field"] = "name"
                     await i.response.send_message("Enter new name:", ephemeral=True)
 
                 @discord.ui.button(label="Edit Datetime", style=discord.ButtonStyle.secondary)
-                async def edit_datetime(self, button, i):
-                    active_flows[interaction.user.id]["field"] = "datetime"
+                async def edit_dt(self, btn, i):
+                    active_flows[inter.user.id]["field"] = "datetime"
                     await i.response.send_message("Enter new datetime:", ephemeral=True)
 
                 @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
-                async def edit_reminder(self, button, i):
-                    active_flows[interaction.user.id]["field"] = "reminder"
-                    await i.response.send_message("Enter new reminder minutes:", ephemeral=True)
+                async def edit_rem(self, btn, i):
+                    active_flows[inter.user.id]["field"] = "reminder"
+                    await i.response.send_message("Enter new reminder:", ephemeral=True)
 
-            await inter.response.send_message("Choose what to edit:", view=EditButtons(), ephemeral=True)
+            await inter2.response.send_message("Choose field to edit:", view=EditButtons(), ephemeral=True)
 
-    view = View()
-    view.add_item(SelectEvent())
-    await interaction.response.send_message("Select an event:", view=view, ephemeral=True)
+    v = View()
+    v.add_item(SelectEvent())
+    await inter.response.send_message("Select event:", view=v, ephemeral=True)
 
 # ==============================
-# REMOVE EVENT
+# DELETE EVENT
 # ==============================
-@bot.tree.command(name="removeevent", description="Remove a custom event (admin only)")
-async def removeevent(interaction: discord.Interaction):
-    if not has_admin_permission(interaction):
-        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+@bot.tree.command(name="removeevent", description="Delete a custom event")
+async def removeevent(inter):
+    if not has_admin(inter):
+        await inter.response.send_message("❌ No permission.", ephemeral=True)
         return
 
     custom = load_custom_events()
     if not custom:
-        await interaction.response.send_message("No events found.", ephemeral=True)
+        await inter.response.send_message("No events.", ephemeral=True)
         return
 
     class SelectRemove(Select):
         def __init__(self):
-            options = [
+            opts = [
                 discord.SelectOption(
                     label=e["name"],
                     description=datetime.fromisoformat(e["datetime"]).strftime("%d-%m %H:%M UTC"),
-                    value=str(i),
+                    value=str(i)
                 )
                 for i, e in enumerate(custom)
             ]
-            super().__init__(placeholder="Select event to delete", options=options)
+            super().__init__(options=opts, placeholder="Select event")
 
-        async def callback(self, inter):
+        async def callback(self, inter2):
             idx = int(self.values[0])
 
             class Confirm(View):
                 @discord.ui.button(label="YES", style=discord.ButtonStyle.danger)
-                async def yes(self, button, i2):
-                    ev_list = load_custom_events()
-                    if 0 <= idx < len(ev_list):
-                        ev = ev_list.pop(idx)
-                        save_custom_events(ev_list)
-                        await i2.response.send_message(f"🗑️ Removed **{ev['name']}**")
-                        await log_action(f"🗑️ Event Removed by {interaction.user.mention}")
+                async def yes(self, b, i2):
+                    evs = load_custom_events()
+                    if 0 <= idx < len(evs):
+                        ev = evs.pop(idx)
+                        save_custom_events(evs)
+                        await i2.response.send_message(f"🗑 Removed: {ev['name']}")
+                        await log_action(f"🗑 Event removed by {inter.user.mention}")
 
                 @discord.ui.button(label="NO", style=discord.ButtonStyle.secondary)
-                async def no(self, button, i2):
+                async def no(self, b, i2):
                     await i2.response.send_message("Cancelled.", ephemeral=True)
 
-            await inter.response.send_message("Confirm deletion:", view=Confirm(), ephemeral=True)
+            await inter2.response.send_message("Confirm deletion:", view=Confirm(), ephemeral=True)
 
-    view = View()
-    view.add_item(SelectRemove())
-    await interaction.response.send_message("Choose event to remove:", view=view, ephemeral=True)
+    v = View()
+    v.add_item(SelectRemove())
+    await inter.response.send_message("Select event to remove:", view=v, ephemeral=True)
 
 # ==============================
-# TEXT INPUT HANDLER FOR EDIT FLOW
+# EDIT FLOW HANDLER
 # ==============================
 @bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
+async def on_message(msg):
+    if msg.author.bot:
+        return
+    if msg.author.id not in active_flows:
         return
 
-    if message.author.id not in active_flows:
-        return
+    flow = active_flows[msg.author.id]
+    idx = flow["idx"]
+    field = flow["field"]
+    events = load_custom_events()
 
-    flow = active_flows[message.author.id]
-    idx = flow.get("idx")
-    field = flow.get("field")
-
-    custom = load_custom_events()
-
-    if idx is None or field not in ("name", "datetime", "reminder"):
-        del active_flows[message.author.id]
-        return
-
-    if not (0 <= idx < len(custom)):
-        del active_flows[message.author.id]
+    if not (0 <= idx < len(events)):
+        del active_flows[msg.author.id]
         return
 
     if field == "datetime":
-        custom[idx]["datetime"] = parse_datetime(message.content).isoformat()
+        events[idx]["datetime"] = parse_datetime(msg.content).isoformat()
     elif field == "reminder":
-        custom[idx]["reminder"] = 0 if message.content.lower() == "no" else int(message.content)
+        events[idx]["reminder"] = 0 if msg.content.lower() == "no" else int(msg.content)
     else:
-        custom[idx]["name"] = message.content
+        events[idx]["name"] = msg.content
 
-    save_custom_events(custom)
-    await message.channel.send("✅ Event updated.")
-    await log_action(f"✏️ Event Edited by {message.author.mention}")
-    del active_flows[message.author.id]
+    save_custom_events(events)
+    await msg.channel.send("✅ Event updated.")
+    await log_action(f"✏️ Event edited by {msg.author.mention}")
+    del active_flows[msg.author.id]
 
 # ==============================
-# EVENT REMINDER LOOP
+# CUSTOM EVENT REMINDER LOOP
 # ==============================
 @tasks.loop(minutes=1)
 async def event_reminder():
@@ -470,34 +588,23 @@ async def event_reminder():
     now = datetime.utcnow().replace(second=0, microsecond=0)
     ch = bot.get_channel(channel_id)
 
-    events = load_custom_events()
-    if ch:
-        for ev in events:
-            dt = datetime.fromisoformat(ev["datetime"])
-            rem = ev.get("reminder", 0)
-            if rem <= 0:
-                continue
-
-            remind_time = dt - timedelta(minutes=rem)
-            key = (ev["name"], remind_time.isoformat())
-
-            if remind_time <= now < remind_time + timedelta(minutes=1):
+    for hr in REMINDER_HOURS:
+        for offset in REMINDER_OFFSETS:
+            target = now + timedelta(minutes=offset)
+            if target.hour == hr and target.minute == 0:
+                key = (hr, offset)
                 if key not in sent_reminders:
-                    await ch.send(
-                        f"⏰ Reminder: {ev['name']} starts in {rem} minutes! "
-                        f"<t:{int(dt.timestamp())}:F>"
-                    )
+                    if ch:
+                        await ch.send(
+                            f"⏰ Abyss starts in {offset} minutes (at {hr:02d}:00 UTC)"
+                        )
                     sent_reminders.add(key)
 
-    if len(sent_reminders) > 300:
+    if len(sent_reminders) > 200:
         sent_reminders = set(list(sent_reminders)[-100:])
 
 # ==============================
-# RUN BOT
+# RUN
 # ==============================
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-if not TOKEN:
-    print("❌ DISCORD_BOT_TOKEN not set")
-    raise SystemExit(1)
-
 bot.run(TOKEN)
