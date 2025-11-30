@@ -1,1 +1,6 @@
-[]
+{
+  "days": [1, 4, 6],
+  "hours": [0, 4, 8, 12, 16, 20],
+  "reminder_hours": [0, 4, 8, 12, 16, 20],
+  "reminder_offsets": [15]
+}
