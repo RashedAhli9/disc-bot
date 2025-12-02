@@ -122,122 +122,128 @@ async def log(msg):
         await ch.send(msg)
 
 # ================================
-# ABYSSCONFIG UI
-# ================================
-class DaySelect(Select):
-    def __init__(self, selected):
-        days = [
-            ("Monday",0), ("Tuesday",1), ("Wednesday",2),
-            ("Thursday",3), ("Friday",4), ("Saturday",5), ("Sunday",6)
-        ]
-        opts = [
-            discord.SelectOption(label=name, value=str(num), default=(num in selected))
-            for name, num in days
-        ]
-        super().__init__(
-            placeholder="Select Abyss Days",
-            min_values=1,
-            max_values=7,
-            options=opts
-        )
-
-    async def callback(self, inter):
-        cfg["days"] = [int(v) for v in self.values]
-        save_abyss_config(cfg)
-        await inter.response.edit_message(view=build_abyssconfig_view())
-
-
-class HourSelect(Select):
-    def __init__(self, selected):
-        opts = [
-            discord.SelectOption(
-                label=f"{h:02d}:00",
-                value=str(h),
-                default=(h in selected)
-            )
-            for h in range(24)
-        ]
-        super().__init__(
-            placeholder="Select Abyss Hours",
-            min_values=1,
-            max_values=24,
-            options=opts
-        )
-
-    async def callback(self, inter):
-        cfg["hours"] = [int(v) for v in self.values]
-        save_abyss_config(cfg)
-        await inter.response.edit_message(view=build_abyssconfig_view())
-
-
-class ReminderHourSelect(Select):
-    def __init__(self, abyss_hours, selected):
-        opts = [
-            discord.SelectOption(
-                label=f"{h:02d}:00",
-                value=str(h),
-                default=(h in selected)
-            )
-            for h in abyss_hours
-        ]
-
-        super().__init__(
-            placeholder="Choose Reminder Hours",
-            min_values=0,
-            max_values=len(abyss_hours),
-            options=opts
-        )
-
-    async def callback(self, inter):
-        cfg["reminder_hours"] = [int(v) for v in self.values]
-        save_abyss_config(cfg)
-        await inter.response.edit_message(view=build_abyssconfig_view())
-
-
-class Round2Select(Select):
-    def __init__(self, state):
-        opts = [
-            discord.SelectOption(label="Enabled", value="1", default=state),
-            discord.SelectOption(label="Disabled", value="0", default=not state),
-        ]
-        super().__init__(
-            placeholder="Enable Round 2?",
-            min_values=1,
-            max_values=1,
-            options=opts
-        )
-
-    async def callback(self, inter):
-        cfg["round2"] = (self.values[0] == "1")
-        save_abyss_config(cfg)
-        await inter.response.edit_message(view=build_abyssconfig_view())
-
-
-def build_abyssconfig_view():
-    v = View()
-    v.add_item(DaySelect(cfg["days"]))
-    v.add_item(HourSelect(cfg["hours"]))
-    v.add_item(ReminderHourSelect(cfg["hours"], cfg["reminder_hours"]))
-    v.add_item(Round2Select(cfg["round2"]))
-    return v
-
-
-@bot.tree.command(name="abyssconfig", description="Configure Abyss schedule.")
+# ======================================
+# /abyssconfig (UI WITH SAVE BUTTON)
+# ======================================
+@bot.tree.command(name="abyssconfig", description="Configure Abyss reminder settings")
 async def abyssconfig(inter):
     if inter.user.id != OWNER_ID:
         return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
-    embed = discord.Embed(title="⚙️ Abyss Config", color=discord.Color.gold())
-    embed.add_field(name="Days", value=str(cfg["days"]), inline=False)
-    embed.add_field(name="Hours", value=str(cfg["hours"]), inline=False)
-    embed.add_field(name="Reminder Hours", value=str(cfg["reminder_hours"]), inline=False)
-    embed.add_field(name="Round 2", value=str(cfg["round2"]), inline=False)
+    # Build UI
+    view = View()
 
-    await inter.response.send_message(
-        embed=embed,
-        view=build_abyssconfig_view(),
-        ephemeral=True
+    # ----- DAY SELECT -----
+    day_select = Select(
+        placeholder="Select Abyss Days",
+        min_values=1,
+        max_values=7,
+        options=[
+            discord.SelectOption(label="Monday", value="0"),
+            discord.SelectOption(label="Tuesday", value="1"),
+            discord.SelectOption(label="Wednesday", value="2"),
+            discord.SelectOption(label="Thursday", value="3"),
+            discord.SelectOption(label="Friday", value="4"),
+            discord.SelectOption(label="Saturday", value="5"),
+            discord.SelectOption(label="Sunday", value="6"),
+        ]
     )
+
+    # Preselect
+    day_select.default_values = [str(d) for d in ABYSS_DAYS]
+
+    async def day_callback(inter2):
+        day_select.default_values = day_select.values
+        await inter2.response.defer()
+
+    day_select.callback = day_callback
+    view.add_item(day_select)
+
+    # ----- HOUR SELECT -----
+    hour_select = Select(
+        placeholder="Select Abyss Hours",
+        min_values=1,
+        max_values=24,
+        options=[discord.SelectOption(label=f"{h:02}:00", value=str(h)) for h in range(24)]
+    )
+
+    hour_select.default_values = [str(h) for h in ABYSS_HOURS]
+
+    async def hour_callback(inter2):
+        hour_select.default_values = hour_select.values
+        await inter2.response.defer()
+
+    hour_select.callback = hour_callback
+    view.add_item(hour_select)
+
+    # ----- REMINDER HOURS (only hours selected above) -----
+    reminder_select = Select(
+        placeholder="Choose which hours will send the reminder",
+        min_values=0,
+        max_values=len(ABYSS_HOURS),
+        options=[discord.SelectOption(label=f"{h:02}:00", value=str(h)) for h in ABYSS_HOURS]
+    )
+
+    reminder_select.default_values = [str(r) for r in REMINDER_HOURS]
+
+    async def reminder_callback(inter2):
+        reminder_select.default_values = reminder_select.values
+        await inter2.response.defer()
+
+    reminder_select.callback = reminder_callback
+    view.add_item(reminder_select)
+
+    # ----- ROUND 2 TOGGLE -----
+    round2_select = Select(
+        placeholder="Enable Round 2?",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label="Enabled", value="true"),
+            discord.SelectOption(label="Disabled", value="false"),
+        ]
+    )
+
+    round2_select.default_values = ["true" if ROUND2_ENABLED else "false"]
+
+    async def round2_callback(inter2):
+        round2_select.default_values = round2_select.values
+        await inter2.response.defer()
+
+    round2_select.callback = round2_callback
+    view.add_item(round2_select)
+
+    # ----- SAVE BUTTON (THE MISSING ONE!) -----
+    @discord.ui.button(label="Save", style=discord.ButtonStyle.green)
+    async def save_button(btn, inter2):
+        global ABYSS_DAYS, ABYSS_HOURS, REMINDER_HOURS, ROUND2_ENABLED
+
+        ABYSS_DAYS = [int(v) for v in day_select.default_values]
+        ABYSS_HOURS = [int(v) for v in hour_select.default_values]
+        REMINDER_HOURS = [int(v) for v in reminder_select.default_values]
+        ROUND2_ENABLED = (round2_select.default_values[0] == "true")
+
+        cfg = {
+            "days": ABYSS_DAYS,
+            "hours": ABYSS_HOURS,
+            "reminder_hours": REMINDER_HOURS,
+            "round2": ROUND2_ENABLED
+        }
+        save_abyss_config(cfg)
+
+        await inter2.response.send_message("✅ **Abyss Config Saved!**", ephemeral=True)
+
+    view.add_item(save_button)
+
+    # ----- SUMMARY EMBED -----
+    embed = discord.Embed(title="⚙️ Abyss Config", color=0x2ecc71)
+    embed.add_field(name="Days", value=str(ABYSS_DAYS), inline=False)
+    embed.add_field(name="Hours", value=str(ABYSS_HOURS), inline=False)
+    embed.add_field(name="Reminder Hours", value=str(REMINDER_HOURS), inline=False)
+    embed.add_field(name="Round 2", value=str(ROUND2_ENABLED), inline=False)
+
+    await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+
 # ======================================
 # ABYSS REMINDER BOT — FINAL VERSION (PATCHED)
 # PART 2 OF 3
@@ -723,4 +729,5 @@ if not TOKEN:
     print("❌ ERROR: DISCORD_BOT_TOKEN missing!")
 else:
     bot.run(TOKEN)
+
 
