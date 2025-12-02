@@ -20,6 +20,7 @@ OWNER_ID = 1084884048884797490
 
 CUSTOM_FILE = "custom_events.json"
 ABYSS_CONFIG_FILE = "abyss_config.json"
+
 # ============================================================
 # SAFE CONFIG LOADER (CRASH-PROOF)
 # ============================================================
@@ -31,13 +32,13 @@ DEFAULT_ABYSS = {
     "round2": True
 }
 
-# Ensure file exists OR overwrite it if corrupted / missing fields
 def load_or_reset_abyss_config():
+    """Loads abyss_config.json or regenerates it if corrupted."""
     try:
         with open(ABYSS_CONFIG_FILE, "r") as f:
             data = json.load(f)
 
-        # Reset if ANY key is missing
+        # If ANY field is missing → reset the entire file
         for key in DEFAULT_ABYSS:
             if key not in data:
                 raise KeyError
@@ -45,19 +46,18 @@ def load_or_reset_abyss_config():
         return data
 
     except:
-        # WRITE A CLEAN DEFAULT FILE
+        # Write a clean new config file
         with open(ABYSS_CONFIG_FILE, "w") as f:
             json.dump(DEFAULT_ABYSS, f, indent=2)
         return DEFAULT_ABYSS.copy()
 
-
+# Load into globals
 cfg = load_or_reset_abyss_config()
 
 ABYSS_DAYS = cfg["days"]
 ABYSS_HOURS = cfg["hours"]
 REMINDER_HOURS = cfg["reminder_hours"]
 ROUND2_ENABLED = cfg["round2"]
-
 
 # ============================================================
 # HELPERS — FILE HANDLING
@@ -78,24 +78,11 @@ def save_json(path, data):
         json.dump(data, f, indent=2)
 
 # ============================================================
-# LOAD CONFIG
+# CUSTOM EVENTS LOADER
 # ============================================================
 
-# Load Abyss Config
-cfg = load_json(ABYSS_CONFIG_FILE, {
-    "days": DEFAULT_ABYSS_DAYS,
-    "hours": DEFAULT_ABYSS_HOURS,
-    "reminder_hours": DEFAULT_REMINDER_HOURS,
-    "round2": DEFAULT_ROUND2
-})
-
-ABYSS_DAYS = cfg["days"]
-ABYSS_HOURS = cfg["hours"]
-REMINDER_HOURS = cfg["reminder_hours"]
-ROUND2_ENABLED = cfg["round2"]
-
-# Load Custom Events
 ensure_file_exists(CUSTOM_FILE, [])
+
 def load_custom_events():
     return load_json(CUSTOM_FILE, [])
 
@@ -109,14 +96,11 @@ def save_custom_events(data):
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-active_flows = {}  # For edit event
-sent_custom_reminders = set()
-
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
+active_flows = {}      # For editing custom events
+sent_custom_reminders = set()   # For preventing duplicate reminders
 
 def parse_datetime(input_str: str) -> datetime:
     """Parse either 'DD-MM-YYYY HH:MM' or relative '1d 2h 30m'."""
@@ -782,4 +766,5 @@ if not TOKEN:
     print("❌ DISCORD_BOT_TOKEN is missing!")
 else:
     bot.run(TOKEN)
+
 
