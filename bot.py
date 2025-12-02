@@ -311,7 +311,9 @@ async def abyssconfig(inter):
 
         await i.response.send_message("✅ **Abyss Config Saved!**", ephemeral=True)
 
-    view.add_item(save_btn)
+    @discord.ui.button(...)
+    async def save_btn(...)
+
 
     # Embed Summary
     embed = discord.Embed(title="⚙️ Abyss Config", color=0x2ecc71)
@@ -766,5 +768,6 @@ if not TOKEN:
     print("❌ DISCORD_BOT_TOKEN is missing!")
 else:
     bot.run(TOKEN)
+
 
 
