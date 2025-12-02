@@ -20,11 +20,44 @@ OWNER_ID = 1084884048884797490
 
 CUSTOM_FILE = "custom_events.json"
 ABYSS_CONFIG_FILE = "abyss_config.json"
+# ============================================================
+# SAFE CONFIG LOADER (CRASH-PROOF)
+# ============================================================
 
-DEFAULT_ABYSS_DAYS = [1, 4, 6]  # Tue, Fri, Sun
-DEFAULT_ABYSS_HOURS = [0, 4, 8, 12, 16, 20]
-DEFAULT_REMINDER_HOURS = [8, 12, 16, 20]
-DEFAULT_ROUND2 = True
+DEFAULT_ABYSS = {
+    "days": [1, 4, 6],                # Tue, Fri, Sun
+    "hours": [0, 4, 8, 12, 16, 20],   # Default Abyss hours
+    "reminder_hours": [0, 4, 8, 12, 16, 20],
+    "round2": True
+}
+
+# Ensure file exists OR overwrite it if corrupted / missing fields
+def load_or_reset_abyss_config():
+    try:
+        with open(ABYSS_CONFIG_FILE, "r") as f:
+            data = json.load(f)
+
+        # Reset if ANY key is missing
+        for key in DEFAULT_ABYSS:
+            if key not in data:
+                raise KeyError
+
+        return data
+
+    except:
+        # WRITE A CLEAN DEFAULT FILE
+        with open(ABYSS_CONFIG_FILE, "w") as f:
+            json.dump(DEFAULT_ABYSS, f, indent=2)
+        return DEFAULT_ABYSS.copy()
+
+
+cfg = load_or_reset_abyss_config()
+
+ABYSS_DAYS = cfg["days"]
+ABYSS_HOURS = cfg["hours"]
+REMINDER_HOURS = cfg["reminder_hours"]
+ROUND2_ENABLED = cfg["round2"]
+
 
 # ============================================================
 # HELPERS — FILE HANDLING
@@ -749,3 +782,4 @@ if not TOKEN:
     print("❌ DISCORD_BOT_TOKEN is missing!")
 else:
     bot.run(TOKEN)
+
