@@ -587,7 +587,7 @@ class AddEventView(View):
         if not self.draft.name or not self.draft.datetime:
             return await interaction.response.send_message("❌ Name and datetime required.", ephemeral=True)
 
-        dt = self.draft.datetime.isoformat()
+        dt = self.draft.datetime.isoformat(sep="T", timespec="seconds")
         db_add_event(self.draft.name, dt, self.draft.reminder)
 
         await interaction.response.send_message(
@@ -818,6 +818,7 @@ if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
