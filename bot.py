@@ -522,7 +522,7 @@ async def on_message(msg):
             return
 
         save_custom_events(evs)
-        await msg.channel.send("
+        await msg.channel.send("❌ Invalid datetime. Edit cancelled.")
         await msg.channel.send("✅ Datetime updated.")
         del active_flows[uid]
         return
@@ -723,3 +723,4 @@ if not TOKEN:
     print("❌ ERROR: DISCORD_BOT_TOKEN missing!")
 else:
     bot.run(TOKEN)
+
