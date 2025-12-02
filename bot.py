@@ -378,247 +378,115 @@ async def kvkevent(inter):
     await inter.response.send_message(msg, ephemeral=True)
 
 # ============================================================
-# NEW /addevent — PREMIUM UI VERSION (LATEST DISCORD.PY)
+# ADD EVENT (Restored Modal UI + 14UTC Support)
 # ============================================================
 
-from discord.ui import View, Button, Modal, TextInput
+# --- Improved datetime parser ---
+def parse_datetime(input_str: str):
+    """Parse datetime in formats:
+    - DD-MM-YYYY HH:MM
+    - 1d 2h 30m (relative)
+    - 14utc (today 14:00 UTC, or tomorrow if passed)
+    """
 
-# Temporary event holder
-class EventDraft:
-    def __init__(self):
-        self.name = None
-        self.datetime = None
-        self.reminder = 10  # default reminder
+    raw = input_str.strip().lower().replace(" ", "")
 
+    # ------------------------------------------------------------
+    # NEW FEATURE: "14utc" → today at 14:00 UTC OR tomorrow
+    # ------------------------------------------------------------
+    if raw.endswith("utc") and raw[:-3].isdigit():
+        hour = int(raw[:-3])
 
-# ============================================================
-# MODALS
-# ============================================================
-
-class NameModal(Modal, title="Edit Event Name"):
-    new_name = TextInput(label="Event Name")
-
-    def __init__(self, draft: EventDraft):
-        super().__init__()
-        self.draft = draft
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.draft.name = self.new_name.value
-        await interaction.response.send_message("✔ Name updated.", ephemeral=True)
-
-
-class CustomDTModal(Modal, title="Custom Datetime Input"):
-    dt_field = TextInput(label="Datetime", placeholder="14utc | 1d2h | 23-12-2025 14:00")
-
-    def __init__(self, draft: EventDraft):
-        super().__init__()
-        self.draft = draft
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            parsed = parse_datetime(self.dt_field.value)
-            self.draft.datetime = parsed
-            await interaction.response.send_message("✔ Datetime updated.", ephemeral=True)
-        except:
-            await interaction.response.send_message("❌ Invalid datetime.", ephemeral=True)
-
-
-class CustomReminderModal(Modal, title="Custom Reminder"):
-    mins = TextInput(label="Minutes", placeholder="10")
-
-    def __init__(self, draft: EventDraft):
-        super().__init__()
-        self.draft = draft
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            self.draft.reminder = int(self.mins.value)
-            await interaction.response.send_message("✔ Reminder updated.", ephemeral=True)
-        except:
-            await interaction.response.send_message("❌ Invalid number.", ephemeral=True)
-
-
-# ============================================================
-# DATETIME SUGGESTION VIEW
-# ============================================================
-
-class DatetimeSuggestView(View):
-    def __init__(self, draft: EventDraft):
-        super().__init__(timeout=90)
-        self.draft = draft
-        self.build_buttons()
-
-    def build_buttons(self):
         now = datetime.utcnow()
+        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
 
-        # TODAY suggestions
-        today_14 = now.replace(hour=14, minute=0, second=0, microsecond=0)
-        today_18 = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        # If the time already passed today → schedule for tomorrow
+        if target <= now:
+            target += timedelta(days=1)
 
-        # If time passed, move to tomorrow
-        if today_14 <= now:
-            today_14 += timedelta(days=1)
-        if today_18 <= now:
-            today_18 += timedelta(days=1)
+        return target
 
-        # Tomorrow suggestions
-        tmrw = now + timedelta(days=1)
-        tmrw_14 = tmrw.replace(hour=14, minute=0, second=0, microsecond=0)
-        tmrw_18 = tmrw.replace(hour=18, minute=0, second=0, microsecond=0)
+    # ------------------------------------------------------------
+    # Absolute date format: DD-MM-YYYY HH:MM
+    # ------------------------------------------------------------
+    try:
+        return datetime.strptime(input_str, "%d-%m-%Y %H:%M")
+    except:
+        pass
 
-        # Relative (1h)
-        in1h = now + timedelta(hours=1)
-        in1h = in1h.replace(second=0, microsecond=0)
+    # ------------------------------------------------------------
+    # Relative format: "1d 2h 30m"
+    # ------------------------------------------------------------
+    now = datetime.utcnow()
+    d = h = m = 0
 
-        # Add buttons
-        def make_button(label, dt):
-            self.add_item(Button(
-                label=label,
-                style=discord.ButtonStyle.primary,
-                custom_id=f"dt|{dt.isoformat()}"
-            ))
+    for part in input_str.split():
+        part = part.lower()
+        if part.endswith("d"):
+            d = int(part[:-1])
+        elif part.endswith("h"):
+            h = int(part[:-1])
+        elif part.endswith("m"):
+            m = int(part[:-1])
 
-        make_button(f"Today {today_14.strftime('%H:%M')} UTC", today_14)
-        make_button(f"Today {today_18.strftime('%H:%M')} UTC", today_18)
-        make_button(f"Tomorrow {tmrw_14.strftime('%H:%M')} UTC", tmrw_14)
-        make_button(f"Tomorrow {tmrw_18.strftime('%H:%M')} UTC", tmrw_18)
-        make_button(f"In 1 hour (UTC {in1h.strftime('%H:%M')})", in1h)
-
-        # Custom
-        self.add_item(Button(
-            label="Custom Input",
-            style=discord.ButtonStyle.danger,
-            custom_id="custom_dt"
-        ))
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        cid = interaction.data["custom_id"]
-
-        # Custom input modal
-        if cid == "custom_dt":
-            await interaction.response.send_modal(CustomDTModal(self.draft))
-            return True
-
-        # Suggested datetime button
-        if cid.startswith("dt|"):
-            iso = cid.split("|", 1)[1]
-            self.draft.datetime = datetime.fromisoformat(iso)
-            await interaction.response.send_message("✔ Datetime selected.", ephemeral=True)
-            return True
-
-        return True
+    return now + timedelta(days=d, hours=h, minutes=m)
 
 
 # ============================================================
-# REMINDER VIEW
+# MODAL UI FOR ADDING EVENTS
 # ============================================================
 
-class ReminderView(View):
-    def __init__(self, draft: EventDraft):
-        super().__init__(timeout=90)
-        self.draft = draft
+from discord.ui import Modal, TextInput
 
-        self.add_item(Button(label="5 min", style=discord.ButtonStyle.primary, custom_id="r|5"))
-        self.add_item(Button(label="10 min", style=discord.ButtonStyle.primary, custom_id="r|10"))
-        self.add_item(Button(label="15 min", style=discord.ButtonStyle.primary, custom_id="r|15"))
-        self.add_item(Button(label="No Reminder", style=discord.ButtonStyle.secondary, custom_id="r|0"))
-        self.add_item(Button(label="Custom", style=discord.ButtonStyle.danger, custom_id="r_custom"))
+class AddEventModal(Modal, title="➕ Add Event"):
+    name = TextInput(label="Event Name")
 
-    async def interaction_check(self, interaction: discord.Interaction):
-        cid = interaction.data["custom_id"]
+    dt_input = TextInput(
+        label="Datetime (UTC)",
+        placeholder="DD-MM-YYYY HH:MM | 1d2h | 14utc"
+    )
 
-        if cid == "r_custom":
-            await interaction.response.send_modal(CustomReminderModal(self.draft))
-            return True
+    reminder = TextInput(
+        label="Reminder (minutes or 'no')",
+        placeholder="10"
+    )
 
-        if cid.startswith("r|"):
-            mins = int(cid.split("|")[1])
-            self.draft.reminder = mins
-            await interaction.response.send_message("✔ Reminder updated.", ephemeral=True)
-            return True
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Parse datetime using upgraded function
+            dt = parse_datetime(self.dt_input.value)
 
-        return True
+            # Parse reminder
+            rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
 
+            # Store using ISO with "T" for best compatibility
+            iso_dt = dt.isoformat(sep="T", timespec="seconds")
 
-# ============================================================
-# MAIN ADD EVENT UI
-# ============================================================
+            db_add_event(self.name.value, iso_dt, rem)
 
-class AddEventView(View):
-    def __init__(self, draft: EventDraft):
-        super().__init__(timeout=300)
-        self.draft = draft
+            await interaction.response.send_message(
+                f"✅ **Event Added:** {self.name.value}\n"
+                f"🕒 Time: <t:{int(dt.timestamp())}:F>\n"
+                f"🔔 Reminder: {rem} min",
+                ephemeral=True
+            )
 
-    def embed(self):
-        e = discord.Embed(title="📅 Add Custom Event", color=0x2ecc71)
+            await log_action(f"Added event: {self.name.value} at {iso_dt}")
 
-        e.add_field(name="Name", value=self.draft.name or "(not set)", inline=False)
-        e.add_field(
-            name="Datetime",
-            value=self.draft.datetime.isoformat() if self.draft.datetime else "(not set)",
-            inline=False
-        )
-        e.add_field(name="Reminder", value=f"{self.draft.reminder} minutes", inline=False)
-
-        return e
-
-    @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
-    async def edit_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(NameModal(self.draft))
-
-    @discord.ui.button(label="Edit Datetime", style=discord.ButtonStyle.secondary)
-    async def edit_dt(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Choose datetime:",
-            view=DatetimeSuggestView(self.draft),
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
-    async def edit_rem(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Choose reminder:",
-            view=ReminderView(self.draft),
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="Create Event", style=discord.ButtonStyle.green)
-    async def create_ev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.draft.name or not self.draft.datetime:
-            return await interaction.response.send_message("❌ Name and datetime required.", ephemeral=True)
-
-        dt = self.draft.datetime.isoformat(sep="T", timespec="seconds")
-        db_add_event(self.draft.name, dt, self.draft.reminder)
-
-        await interaction.response.send_message(
-            f"✅ Event created: **{self.draft.name}**",
-            ephemeral=True
-        )
-
-        await log_action(f"Added event: {self.draft.name}")
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Cancelled.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 
 # ============================================================
-# /addevent COMMAND
+# /addevent COMMAND (UNCHANGED UI, JUST FIXED)
 # ============================================================
 
 @bot.tree.command(name="addevent")
 async def addevent(interaction: discord.Interaction):
     if not has_admin(interaction):
-        return await interaction.response.send_message("No permission.", ephemeral=True)
+        return await interaction.response.send_message("❌ No permission.", ephemeral=True)
 
-    draft = EventDraft()
-    view = AddEventView(draft)
-
-    await interaction.response.send_message(
-        embed=view.embed(),
-        view=view,
-        ephemeral=True
-    )
+    await interaction.response.send_modal(AddEventModal())
 
 
 # EDIT EVENT
@@ -818,6 +686,7 @@ if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
