@@ -460,46 +460,47 @@ async def editevent(inter):
     if not rows:
         return await inter.response.send_message("📭 No events available.", ephemeral=True)
 
-    class PickEvent(Select):
-        def __init__(self):
-            super().__init__(
-                placeholder="Select event to edit",
-                options=[
-                    discord.SelectOption(
-                        label=f"{eid}: {name}",
-                        description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                        value=str(eid)
-                    )
-                    for eid, name, dt, rem in rows
-                ]
-            )
+class PickEvent(Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select event to edit",
+            options=[
+                discord.SelectOption(
+                    label=f"{eid}: {name}",
+                    description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
+                    value=str(eid)
+                )
+                for eid, name, dt, rem in rows
+            ]
+        )
 
-        async def callback(self, inter2):
-    await inter2.response.defer(ephemeral=True)
+    async def callback(self, inter2):
+        await inter2.response.defer(ephemeral=True)
 
-    eid = int(self.values[0])
+        eid = int(self.values[0])
 
-    class EditView(View):
-        @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
-        async def edit_name(self, btn, ix):
-            bot.active_edit = (ix.user.id, eid, "name")
-            await ix.response.send_message("Send new name in chat.", ephemeral=True)
+        class EditView(View):
+            @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
+            async def edit_name(self, btn, ix):
+                bot.active_edit = (ix.user.id, eid, "name")
+                await ix.response.send_message("Send new name in chat.", ephemeral=True)
 
-        @discord.ui.button(label="Edit Time", style=discord.ButtonStyle.secondary)
-        async def edit_time(self, btn, ix):
-            bot.active_edit = (ix.user.id, eid, "time")
-            await ix.response.send_message("Send new datetime in chat.", ephemeral=True)
+            @discord.ui.button(label="Edit Time", style=discord.ButtonStyle.secondary)
+            async def edit_time(self, btn, ix):
+                bot.active_edit = (ix.user.id, eid, "time")
+                await ix.response.send_message("Send new datetime in chat.", ephemeral=True)
 
-        @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
-        async def edit_rem(self, btn, ix):
-            bot.active_edit = (ix.user.id, eid, "rem")
-            await ix.response.send_message("Send new reminder (minutes or 'no').", ephemeral=True)
+            @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
+            async def edit_rem(self, btn, ix):
+                bot.active_edit = (ix.user.id, eid, "rem")
+                await ix.response.send_message("Send new reminder (minutes or 'no').", ephemeral=True)
 
-    await inter2.followup.send(
-        "Choose what to edit:",
-        view=EditView(),
-        ephemeral=True
-    )
+        await inter2.followup.send(
+            "Choose what to edit:",
+            view=EditView(),
+            ephemeral=True
+        )
+
 
 
 @bot.tree.command(name="removeevent", description="Remove a custom event")
@@ -511,30 +512,29 @@ async def removeevent(inter):
     if not rows:
         return await inter.response.send_message("📭 No events available.", ephemeral=True)
 
-    class PickRemove(Select):
-        def __init__(self):
-            super().__init__(
-                placeholder="Select event to remove",
-                options=[
-                    discord.SelectOption(
-                        label=f"{eid}: {name}",
-                        description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                        value=str(eid)
-                    )
-                    for eid, name, dt, rem in rows
-                ]
-            )
+class PickRemove(Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select event to remove",
+            options=[
+                discord.SelectOption(
+                    label=f"{eid}: {name}",
+                    description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
+                    value=str(eid)
+                )
+                for eid, name, dt, rem in rows
+            ]
+        )
 
-        async def callback(self, inter2):
-    await inter2.response.defer(ephemeral=True)
+    async def callback(self, inter2):
+        await inter2.response.defer(ephemeral=True)
 
-    db_delete_event(int(self.values[0]))
+        db_delete_event(int(self.values[0]))
 
-    await inter2.followup.send(
-        "🗑 Event removed.",
-        ephemeral=True
-    )
-
+        await inter2.followup.send(
+            "🗑 Event removed.",
+            ephemeral=True
+        )
 
 # ============================================================
 # ABYSS CONFIG COMMAND
@@ -743,6 +743,7 @@ async def safe_login():
 
 if __name__ == "__main__":
     asyncio.run(safe_login())
+
 
 
 
