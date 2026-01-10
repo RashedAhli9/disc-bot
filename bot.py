@@ -536,12 +536,28 @@ async def abyssconfig(inter):
         return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
     emb = discord.Embed(title="⚙️ Abyss Config", color=0x2ecc71)
-    emb.add_field(name="Days", value=pretty_days(ABYSS_DAYS))
-    emb.add_field(name="Hours", value=pretty_hours(ABYSS_HOURS))
-    emb.add_field(name="Reminder Hours", value=pretty_hours(REMINDER_HOURS))
-    emb.add_field(name="Round 2", value="Enabled" if ROUND2_ENABLED else "Disabled")
+    emb.add_field(name="Days", value=pretty_days(ABYSS_DAYS), inline=False)
+    emb.add_field(name="Hours", value=pretty_hours(ABYSS_HOURS), inline=False)
+    emb.add_field(name="Reminder Hours", value=pretty_hours(REMINDER_HOURS), inline=False)
+    emb.add_field(
+        name="Round 2",
+        value="Enabled" if ROUND2_ENABLED else "Disabled",
+        inline=False
+    )
 
-    await inter.response.send_message(embed=emb, ephemeral=True)
+    view = AbyssConfigView(
+        ABYSS_DAYS,
+        ABYSS_HOURS,
+        REMINDER_HOURS,
+        ROUND2_ENABLED
+    )
+
+    await inter.response.send_message(
+        embed=emb,
+        view=view,
+        ephemeral=True
+    )
+
 
 # ============================================================
 # REMINDER LOOPS
@@ -618,3 +634,4 @@ async def safe_login():
 
 if __name__ == "__main__":
     asyncio.run(safe_login())
+
