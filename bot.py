@@ -1,5 +1,5 @@
 # ============================================================
-# ABYSS REMINDER BOT — BOT(3) BEHAVIOR + SAFE FLASK FIXx
+# ABYSS REMINDER BOT — FINAL KOYEB-STABLE VERSION
 # ============================================================
 
 import discord
@@ -14,6 +14,26 @@ from datetime import datetime, timedelta
 import zipfile
 from flask import Flask
 import threading
+
+# ============================================================
+# FLASK KEEPALIVE (MUST START IMMEDIATELY FOR KOYEB)
+# ============================================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OK", 200
+
+@app.route("/health")
+def health():
+    return "healthy", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask, daemon=True).start()
 
 # ============================================================
 # CONSTANTS
@@ -99,7 +119,7 @@ def db_get_events():
 db_init()
 
 # ============================================================
-# ABYSS CONFIG (UNCHANGED)
+# ABYSS CONFIG
 # ============================================================
 
 DEFAULT_CONFIG = {
@@ -173,7 +193,7 @@ def parse_datetime(s):
     return None
 
 # ============================================================
-# ADD EVENT MODAL (BOT3)
+# ADD EVENT MODAL
 # ============================================================
 
 class AddEventModal(discord.ui.Modal, title="➕ Add Event"):
@@ -196,7 +216,7 @@ class AddEventModal(discord.ui.Modal, title="➕ Add Event"):
         )
 
 # ============================================================
-# EDIT EVENT (BOT3 VERBATIM)
+# EDIT EVENT MODAL (BOT3)
 # ============================================================
 
 class EditEventModal(discord.ui.Modal, title="✏️ Edit Event"):
@@ -315,7 +335,7 @@ async def removeevent(interaction: discord.Interaction):
     await interaction.response.send_message("Choose an event to remove:", view=view, ephemeral=True)
 
 # ============================================================
-# PUBLIC COMMANDS (UNCHANGED)
+# PUBLIC COMMANDS
 # ============================================================
 
 @bot.tree.command(name="weeklyevents", description="Show weekly events")
@@ -341,7 +361,7 @@ async def removerole(interaction: discord.Interaction):
         await interaction.response.send_message("✅ Role removed.", ephemeral=True)
 
 # ============================================================
-# LOOPS (BOT3)
+# LOOPS
 # ============================================================
 
 @tasks.loop(minutes=1)
@@ -370,25 +390,7 @@ async def custom_event_loop():
                 await ch.send(f"⏰ **{name}** in {rem} minutes")
 
 # ============================================================
-# FLASK (FIXED — STARTS AFTER BOT READY)
-# ============================================================
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "OK", 200
-
-@app.route("/health")
-def health():
-    return "healthy", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
-
-# ============================================================
-# SAFE LOGIN
+# SAFE LOGIN (ONLY DISCORD ENTRY POINT)
 # ============================================================
 
 async def safe_login():
@@ -411,10 +413,7 @@ async def on_ready():
     if not custom_event_loop.is_running():
         custom_event_loop.start()
 
-    threading.Thread(target=run_flask, daemon=True).start()
-
     print("✅ Bot online")
 
 if __name__ == "__main__":
     asyncio.run(safe_login())
-
