@@ -731,18 +731,25 @@ async def safe_login():
         print("❌ Missing DISCORD_BOT_TOKEN")
         return
 
-    delay = 10
     while True:
         try:
             await bot.start(token)
             break
-        except discord.HTTPException as e:
-            print(f"[Login Retry] {e}")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 120)
 
-if __name__ == "__main__":
-    asyncio.run(safe_login())
+        except discord.HTTPException as e:
+            if e.status == 429:
+                # HARD COOLDOWN on rate limit
+                print("⛔ Discord rate-limited login. Cooling down for 15 minutes.")
+                await asyncio.sleep(900)  # 15 minutes
+            else:
+                print(f"[Login Error] {e}")
+                await asyncio.sleep(60)
+
+        except Exception as e:
+            print(f"[Fatal Login Error] {e}")
+            await asyncio.sleep(120)
+
+
 
 
 
