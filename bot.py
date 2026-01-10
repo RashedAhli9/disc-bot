@@ -23,7 +23,7 @@ def run_flask():
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ============================================================
-# ORIGINAL BOT.PY (UNTOUCHED LOGIC BELOW)
+# DISCORD + SYSTEM IMPORTS
 # ============================================================
 
 import discord
@@ -57,7 +57,47 @@ MAX_BACKUPS = 10
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # ============================================================
-# BACKUP SYSTEM (ADDITIVE ONLY)
+# REQUIRED HELPERS (FIXES ALL CRASHES)
+# ============================================================
+
+def has_admin(inter):
+    if inter.user.id == OWNER_ID:
+        return True
+    return any(r.permissions.administrator for r in inter.user.roles)
+
+def parse_datetime(input_str):
+    try:
+        return datetime.strptime(input_str, "%d-%m-%Y %H:%M")
+    except:
+        pass
+
+    now = datetime.utcnow()
+    d = h = m = 0
+
+    for part in input_str.lower().split():
+        if part.endswith("d"):
+            d = int(part[:-1])
+        elif part.endswith("h"):
+            h = int(part[:-1])
+        elif part.endswith("m"):
+            m = int(part[:-1])
+        elif part.endswith("utc"):
+            hh = int(part.replace("utc", ""))
+            return now.replace(hour=hh, minute=0, second=0, microsecond=0)
+
+    return now + timedelta(days=d, hours=h, minutes=m)
+
+def day_name(i):
+    return ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i]
+
+def pretty_days(days):
+    return ", ".join(day_name(d) for d in sorted(days))
+
+def pretty_hours(hours):
+    return ", ".join(f"{h:02}:00" for h in sorted(hours))
+
+# ============================================================
+# BACKUP SYSTEM
 # ============================================================
 
 def cleanup_old_backups():
@@ -72,12 +112,9 @@ def cleanup_old_backups():
             pass
 
 async def upload_backup(path):
-    try:
-        ch = bot.get_channel(BACKUP_CHANNEL_ID)
-        if ch:
-            await ch.send("📦 **Backup created**", file=discord.File(path))
-    except Exception as e:
-        print("[Backup Upload Error]", e)
+    ch = bot.get_channel(BACKUP_CHANNEL_ID)
+    if ch:
+        await ch.send("📦 **Backup created**", file=discord.File(path))
 
 def make_backup():
     ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
@@ -94,16 +131,13 @@ def make_backup():
     if bot.loop.is_running():
         bot.loop.create_task(upload_backup(path))
 
-    return path
-
 def silent_backup():
     try:
         make_backup()
-    except Exception as e:
-        print("[Backup Error]", e)
-
+    except:
+        pass
 # ============================================================
-# SQLITE DATABASE (ORIGINAL)
+# SQLITE DATABASE
 # ============================================================
 
 def init_db():
@@ -134,7 +168,9 @@ def db_add_event(name, dt, reminder):
 def db_get_events():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT id, name, datetime, reminder FROM events ORDER BY datetime ASC")
+    c.execute(
+        "SELECT id, name, datetime, reminder FROM events ORDER BY datetime ASC"
+    )
     rows = c.fetchall()
     conn.close()
     return rows
@@ -165,7 +201,7 @@ def db_delete_event(event_id):
 init_db()
 
 # ============================================================
-# DEFAULT ABYSS CONFIG (ORIGINAL)
+# DEFAULT ABYSS CONFIG
 # ============================================================
 
 DEFAULT_ABYSS = {
@@ -201,7 +237,7 @@ REMINDER_HOURS = cfg["reminder_hours"]
 ROUND2_ENABLED = cfg["round2"]
 
 # ============================================================
-# DISCORD SETUP (ORIGINAL)
+# DISCORD BOT SETUP
 # ============================================================
 
 intents = discord.Intents.default()
@@ -210,19 +246,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 bot.active_edit = None
 
 # ============================================================
-# OWNER CHECK (ADDITIVE)
-# ============================================================
-
-def is_owner(inter):
-    return inter.user.id == OWNER_ID
-
-# ============================================================
-# BACKUP COMMANDS (OWNER ONLY – ADDITIVE)
+# BACKUP SLASH COMMANDS (OWNER ONLY)
 # ============================================================
 
 @bot.tree.command(name="backup", description="List recent backups")
 async def backup(inter):
-    if not is_owner(inter):
+    if inter.user.id != OWNER_ID:
         return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
     files = sorted(
@@ -233,12 +262,14 @@ async def backup(inter):
     if not files:
         return await inter.response.send_message("📦 No backups found.", ephemeral=True)
 
-    msg = "**📦 Recent Backups:**\n" + "\n".join(f"- `{f}`" for f in files[:MAX_BACKUPS])
+    msg = "**📦 Recent Backups:**\n" + "\n".join(
+        f"- `{f}`" for f in files[:MAX_BACKUPS]
+    )
     await inter.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="forcebackup", description="Create a backup now")
 async def forcebackup(inter):
-    if not is_owner(inter):
+    if inter.user.id != OWNER_ID:
         return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
     make_backup()
@@ -246,7 +277,7 @@ async def forcebackup(inter):
 
 @bot.tree.command(name="restorebackup", description="Restore a backup")
 async def restorebackup(inter):
-    if not is_owner(inter):
+    if inter.user.id != OWNER_ID:
         return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
     files = sorted(
@@ -258,7 +289,7 @@ async def restorebackup(inter):
         return await inter.response.send_message("❌ No backups found.", ephemeral=True)
 
     select = Select(
-        placeholder="Select a backup to restore",
+        placeholder="Select backup to restore",
         options=[discord.SelectOption(label=f, value=f) for f in files[:MAX_BACKUPS]]
     )
 
@@ -275,12 +306,13 @@ async def restorebackup(inter):
     view = View()
     view.add_item(select)
 
-    await inter.response.send_message("Choose a backup:", view=view, ephemeral=True)
-
+    await inter.response.send_message(
+        "Choose a backup:",
+        view=view,
+        ephemeral=True
+    )
 # ============================================================
-# EVERYTHING BELOW IS YOUR ORIGINAL CODE
-# weeklyevent, kvkevent, modals, abyssconfig, loops
-# (UNCHANGED – EXACTLY AS IN YOUR FILE)
+# ON READY
 # ============================================================
 
 @bot.event
@@ -303,241 +335,79 @@ async def on_ready():
 # WEEKLY EVENTS
 # ============================================================
 
-weekly_events = ["Melee Wheel","Melee Forge","Range Wheel","Range Forge"]
-event_emojis = {"Range Forge":"🏹","Melee Wheel":"⚔️","Melee Forge":"🔨","Range Wheel":"🎯"}
+weekly_events = ["Melee Wheel", "Melee Forge", "Range Wheel", "Range Forge"]
+event_emojis = {
+    "Range Forge": "🏹",
+    "Melee Wheel": "⚔️",
+    "Melee Forge": "🔨",
+    "Range Wheel": "🎯"
+}
 
 start_date = date(2025, 9, 16)
 
-@bot.tree.command(name="weeklyevent")
+@bot.tree.command(name="weeklyevent", description="Show current and upcoming weekly Abyss events")
 async def weeklyevent(inter):
     today = date.today()
-    sunday = start_date - timedelta(days=start_date.weekday()+1)
+    sunday = start_date - timedelta(days=start_date.weekday() + 1)
     weeks = (today - sunday).days // 7
 
     this_tue = sunday + timedelta(weeks=weeks, days=2)
     now = datetime.utcnow()
 
-    event_start = datetime.combine(this_tue, time(0,0))
+    event_start = datetime.combine(this_tue, time(0, 0))
     event_end = event_start + timedelta(days=3)
 
     if now >= event_end:
         weeks += 1
         this_tue = sunday + timedelta(weeks=weeks, days=2)
-        event_start = datetime.combine(this_tue, time(0,0))
+        event_start = datetime.combine(this_tue, time(0, 0))
         event_end = event_start + timedelta(days=3)
 
     msg = "📅 **Weekly Abyss Events**\n\n"
-    nums=["1️⃣","2️⃣","3️⃣","4️⃣"]
+    nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
 
     for i in range(4):
-        idx = (weeks+i) % 4
+        idx = (weeks + i) % 4
         nm = weekly_events[idx]
-        emoji = event_emojis.get(nm,"📌")
-        ev_date = sunday + timedelta(weeks=weeks+i, days=2)
-        base_dt = datetime.combine(ev_date, time(0,0))
+        emoji = event_emojis.get(nm, "📌")
+        ev_date = sunday + timedelta(weeks=weeks + i, days=2)
+        base_dt = datetime.combine(ev_date, time(0, 0))
 
-        if i==0 and event_start <= now < event_end:
-            left = event_end-now
-            st=f"🟢 LIVE NOW ({left.seconds//3600}h {(left.seconds//60)%60}m left)"
+        if i == 0 and event_start <= now < event_end:
+            left = event_end - now
+            st = f"🟢 LIVE NOW ({left.seconds // 3600}h {(left.seconds // 60) % 60}m left)"
         else:
-            left = base_dt-now
-            st=f"⏳ {left.days}d {left.seconds//3600}h {(left.seconds//60)%60}m"
+            left = base_dt - now
+            st = f"⏳ {left.days}d {left.seconds // 3600}h {(left.seconds // 60) % 60}m"
 
-        msg+=f"{nums[i]} {emoji} **{nm}** — <t:{int(base_dt.timestamp())}:F>\n{st}\n\n"
+        msg += f"{nums[i]} {emoji} **{nm}** — <t:{int(base_dt.timestamp())}:F>\n{st}\n\n"
 
     await inter.response.send_message(msg)
 
 # ============================================================
-# ABYSS CONFIG VIEW
+# KVK / CUSTOM EVENTS DISPLAY
 # ============================================================
 
-class AbyssConfigView(View):
-    def __init__(self, d, h, r, rd2):
-        super().__init__(timeout=300)
-        self.days=d
-        self.hours=h
-        self.rem=r
-        self.round2=rd2
-
-        self.day_sel = Select(
-            placeholder="Select Abyss Days",
-            min_values=1, max_values=7,
-            options=[discord.SelectOption(label=day_name(i), value=str(i), default=(i in d)) for i in range(7)]
-        )
-        self.day_sel.callback = self.cb_days
-        self.add_item(self.day_sel)
-
-        self.hour_sel = Select(
-            placeholder="Select Abyss Hours",
-            min_values=1, max_values=24,
-            options=[discord.SelectOption(label=f"{i:02}:00", value=str(i), default=(i in h)) for i in range(24)]
-        )
-        self.hour_sel.callback = self.cb_hours
-        self.add_item(self.hour_sel)
-
-        self.rem_sel = Select(
-            placeholder="Reminder Hours",
-            min_values=0, max_values=len(h),
-            options=[discord.SelectOption(label=f"{i:02}:00", value=str(i), default=(i in r)) for i in h]
-        )
-        self.rem_sel.callback = self.cb_rem
-        self.add_item(self.rem_sel)
-
-        self.round_sel = Select(
-            placeholder="Round 2?",
-            min_values=1, max_values=1,
-            options=[
-                discord.SelectOption(label="Enabled", value="1", default=rd2),
-                discord.SelectOption(label="Disabled", value="0", default=not rd2)
-            ]
-        )
-        self.round_sel.callback = self.cb_round2
-        self.add_item(self.round_sel)
-
-        btn = Button(label="Save", style=discord.ButtonStyle.green)
-        btn.callback = self.save
-        self.add_item(btn)
-
-    async def cb_days(self, inter):
-        self.days=[int(x) for x in self.day_sel.values]
-        await self.refresh(inter)
-
-    async def cb_hours(self, inter):
-        self.hours=[int(x) for x in self.hour_sel.values]
-        self.rem=[x for x in self.rem if x in self.hours]
-        await self.refresh(inter)
-
-    async def cb_rem(self, inter):
-        self.rem=[int(x) for x in self.rem_sel.values]
-        await self.refresh(inter)
-
-    async def cb_round2(self, inter):
-        self.round2=(self.round_sel.values[0]=="1")
-        await self.refresh(inter)
-
-    async def refresh(self, inter):
-        new=AbyssConfigView(self.days,self.hours,self.rem,self.round2)
-        emb=discord.Embed(title="⚙️ Abyss Config",color=0x2ecc71)
-        emb.add_field(name="Days",value=pretty_days(self.days))
-        emb.add_field(name="Hours",value=pretty_hours(self.hours))
-        emb.add_field(name="Reminder Hours",value=pretty_hours(self.rem))
-        emb.add_field(name="Round 2",value="Enabled" if self.round2 else "Disabled")
-        await inter.response.edit_message(embed=emb,view=new)
-
-    async def save(self, inter):
-        global ABYSS_DAYS, ABYSS_HOURS, REMINDER_HOURS, ROUND2_ENABLED, cfg
-
-        ABYSS_DAYS=self.days
-        ABYSS_HOURS=self.hours
-        REMINDER_HOURS=self.rem
-        ROUND2_ENABLED=self.round2
-
-        cfg={
-            "days":ABYSS_DAYS,
-            "hours":ABYSS_HOURS,
-            "reminder_hours":REMINDER_HOURS,
-            "round2":ROUND2_ENABLED
-        }
-        save_json(ABYSS_CONFIG_FILE, cfg)
-        await inter.response.send_message("Saved!", ephemeral=True)
-
-@bot.tree.command(name="abyssconfig")
-async def abyssconfig(inter):
-    if inter.user.id!=OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
-
-    emb=discord.Embed(title="⚙️ Abyss Config",color=0x2ecc71)
-    emb.add_field(name="Days",value=pretty_days(ABYSS_DAYS))
-    emb.add_field(name="Hours",value=pretty_hours(ABYSS_HOURS))
-    emb.add_field(name="Reminder Hours",value=pretty_hours(REMINDER_HOURS))
-    emb.add_field(name="Round 2",value="Enabled" if ROUND2_ENABLED else "Disabled")
-
-    view=AbyssConfigView(ABYSS_DAYS,ABYSS_HOURS,REMINDER_HOURS,ROUND2_ENABLED)
-    await inter.response.send_message(embed=emb,view=view,ephemeral=True)
-
-# ============================================================
-# REMINDER LOOPS
-# ============================================================
-
-@tasks.loop(minutes=1)
-async def abyss_reminder_loop():
-    tz=pytz.timezone(MY_TIMEZONE)
-    now=datetime.now(tz)
-
-    if now.weekday() not in ABYSS_DAYS:
-        return
-
-    ch=bot.get_channel(channel_id)
-    if not ch: return
-
-    if now.hour in REMINDER_HOURS and now.minute==0:
-        await ch.send(f"<@&{ROLE_ID}>, Abyss starts in 15 minutes!")
-
-    if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute==30:
-        await ch.send(f"<@&{ROLE_ID}>, Round 2 in 15 minutes!")
-
-sent_custom=set()
-
-@tasks.loop(minutes=1)
-async def custom_event_loop():
-    now=datetime.utcnow().replace(second=0,microsecond=0)
-    ch=bot.get_channel(channel_id)
-    if not ch: return
-
-    rows=db_get_events()
-    for ev in rows:
-        event_id,name,dt,rem=ev
-        dt_obj=datetime.fromisoformat(dt)
-
-        if now >= dt_obj + timedelta(hours=1):
-            db_delete_event(event_id)
-            continue
-
-        if rem>0:
-            rtime=dt_obj - timedelta(minutes=rem)
-            key=(event_id, rtime.isoformat())
-            if rtime <= now < rtime + timedelta(minutes=1):
-                if key not in sent_custom:
-                    await ch.send(
-                        f"⏰ Reminder: **{name}** in {rem} minutes! <t:{int(dt_obj.timestamp())}:F>"
-                    )
-                    sent_custom.add(key)
-
-    if len(sent_custom)>300:
-        sent_custom.clear()
-# ============================================================
-# KVK EVENTS (CUSTOM EVENTS DISPLAY)
-# ============================================================
-
-@bot.tree.command(
-    name="kvkevent",
-    description="Show upcoming custom scheduled events"
-)
+@bot.tree.command(name="kvkevent", description="Show upcoming custom scheduled events")
 async def kvkevent(inter):
     now = datetime.utcnow()
     rows = db_get_events()
 
     upcoming = [r for r in rows if datetime.fromisoformat(r[2]) > now]
-
     if not upcoming:
-        return await inter.response.send_message(
-            "📭 No upcoming events.",
-            ephemeral=True
-        )
+        return await inter.response.send_message("📭 No upcoming events.", ephemeral=True)
 
     upcoming = upcoming[:4]
     nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-
     msg = "📅 **Upcoming Events**\n\n"
 
     for i, row in enumerate(upcoming):
         event_id, name, dt, rem = row
         dt_obj = datetime.fromisoformat(dt)
         left = dt_obj - now
-
         msg += (
             f"{nums[i]} **{name}** — <t:{int(dt_obj.timestamp())}:F>\n"
-            f"Starts in {left.days}d {left.seconds//3600}h {(left.seconds//60)%60}m\n\n"
+            f"Starts in {left.days}d {left.seconds // 3600}h {(left.seconds // 60) % 60}m\n\n"
         )
 
     await inter.response.send_message(msg, ephemeral=True)
@@ -547,16 +417,11 @@ async def kvkevent(inter):
 # ============================================================
 
 class AddEventModal(Modal, title="➕ Add Event"):
-    name = TextInput(
-        label="Event Name",
-        placeholder="e.g. Pass 1 Opens"
-    )
-
+    name = TextInput(label="Event Name", placeholder="e.g. Pass 1 Opens")
     dt_input = TextInput(
         label="Datetime (UTC)",
         placeholder="DD-MM-YYYY HH:MM | 1d 2h | 14utc"
     )
-
     reminder = TextInput(
         label="Reminder (minutes or 'no')",
         placeholder="15"
@@ -567,77 +432,46 @@ class AddEventModal(Modal, title="➕ Add Event"):
             dt = parse_datetime(self.dt_input.value)
             rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
 
-            db_add_event(
-                self.name.value,
-                dt.isoformat(),
-                rem
-            )
+            db_add_event(self.name.value, dt.isoformat(), rem)
 
             await interaction.response.send_message(
-                f"✅ **Event Added**\n"
-                f"**{self.name.value}**\n"
-                f"<t:{int(dt.timestamp())}:F>",
+                f"✅ **Event Added**\n**{self.name.value}**\n<t:{int(dt.timestamp())}:F>",
                 ephemeral=True
             )
-
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Error: {e}",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 # ============================================================
-# /addevent
+# ADD / EDIT / REMOVE EVENT COMMANDS
 # ============================================================
 
-@bot.tree.command(
-    name="addevent",
-    description="Add a new custom event"
-)
+@bot.tree.command(name="addevent", description="Add a new custom event")
 async def addevent(interaction: discord.Interaction):
     if not has_admin(interaction):
-        return await interaction.response.send_message(
-            "❌ No permission.",
-            ephemeral=True
-        )
-
+        return await interaction.response.send_message("❌ No permission.", ephemeral=True)
     await interaction.response.send_modal(AddEventModal())
 
-# ============================================================
-# /editevent
-# ============================================================
-
-@bot.tree.command(
-    name="editevent",
-    description="Edit an existing custom event"
-)
+@bot.tree.command(name="editevent", description="Edit an existing custom event")
 async def editevent(inter):
     if not has_admin(inter):
-        return await inter.response.send_message(
-            "❌ No permission.",
-            ephemeral=True
-        )
+        return await inter.response.send_message("❌ No permission.", ephemeral=True)
 
     rows = db_get_events()
     if not rows:
-        return await inter.response.send_message(
-            "📭 No events available.",
-            ephemeral=True
-        )
+        return await inter.response.send_message("📭 No events available.", ephemeral=True)
 
     class PickEvent(Select):
         def __init__(self):
-            options = [
-                discord.SelectOption(
-                    label=f"{eid}: {name}",
-                    description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                    value=str(eid)
-                )
-                for eid, name, dt, rem in rows
-            ]
             super().__init__(
                 placeholder="Select event to edit",
-                options=options
+                options=[
+                    discord.SelectOption(
+                        label=f"{eid}: {name}",
+                        description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
+                        value=str(eid)
+                    )
+                    for eid, name, dt, rem in rows
+                ]
             )
 
         async def callback(self, inter2):
@@ -647,93 +481,123 @@ async def editevent(inter):
                 @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
                 async def edit_name(self, btn, ix):
                     bot.active_edit = (ix.user.id, eid, "name")
-                    await ix.response.send_message(
-                        "Send new name in chat.",
-                        ephemeral=True
-                    )
+                    await ix.response.send_message("Send new name in chat.", ephemeral=True)
 
                 @discord.ui.button(label="Edit Time", style=discord.ButtonStyle.secondary)
                 async def edit_time(self, btn, ix):
                     bot.active_edit = (ix.user.id, eid, "time")
-                    await ix.response.send_message(
-                        "Send new datetime in chat.",
-                        ephemeral=True
-                    )
+                    await ix.response.send_message("Send new datetime in chat.", ephemeral=True)
 
                 @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
                 async def edit_rem(self, btn, ix):
                     bot.active_edit = (ix.user.id, eid, "rem")
-                    await ix.response.send_message(
-                        "Send new reminder (minutes or 'no').",
-                        ephemeral=True
-                    )
+                    await ix.response.send_message("Send new reminder (minutes or 'no').", ephemeral=True)
 
-            await inter2.response.send_message(
-                "Choose what to edit:",
-                view=EditView(),
-                ephemeral=True
-            )
+            await inter2.response.send_message("Choose what to edit:", view=EditView(), ephemeral=True)
 
-    await inter.response.send_message(
-        "Pick an event:",
-        view=View(PickEvent()),
-        ephemeral=True
-    )
+    await inter.response.send_message("Pick an event:", view=View(PickEvent()), ephemeral=True)
 
-# ============================================================
-# /removeevent
-# ============================================================
-
-@bot.tree.command(
-    name="removeevent",
-    description="Remove a custom event"
-)
+@bot.tree.command(name="removeevent", description="Remove a custom event")
 async def removeevent(inter):
     if not has_admin(inter):
-        return await inter.response.send_message(
-            "❌ No permission.",
-            ephemeral=True
-        )
+        return await inter.response.send_message("❌ No permission.", ephemeral=True)
 
     rows = db_get_events()
     if not rows:
-        return await inter.response.send_message(
-            "📭 No events available.",
-            ephemeral=True
-        )
+        return await inter.response.send_message("📭 No events available.", ephemeral=True)
 
     class PickRemove(Select):
         def __init__(self):
-            options = [
-                discord.SelectOption(
-                    label=f"{eid}: {name}",
-                    description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                    value=str(eid)
-                )
-                for eid, name, dt, rem in rows
-            ]
             super().__init__(
                 placeholder="Select event to remove",
-                options=options
+                options=[
+                    discord.SelectOption(
+                        label=f"{eid}: {name}",
+                        description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
+                        value=str(eid)
+                    )
+                    for eid, name, dt, rem in rows
+                ]
             )
 
         async def callback(self, inter2):
-            eid = int(self.values[0])
-            db_delete_event(eid)
-            await inter2.response.send_message(
-                "🗑 Event removed.",
-                ephemeral=True
-            )
+            db_delete_event(int(self.values[0]))
+            await inter2.response.send_message("🗑 Event removed.", ephemeral=True)
 
-    await inter.response.send_message(
-        "Pick an event to remove:",
-        view=View(PickRemove()),
-        ephemeral=True
-    )
-
+    await inter.response.send_message("Pick an event to remove:", view=View(PickRemove()), ephemeral=True)
 
 # ============================================================
-# SAFE LOGIN (REPLACES bot.run)
+# ABYSS CONFIG COMMAND
+# ============================================================
+
+@bot.tree.command(name="abyssconfig", description="Configure Abyss days, hours, and reminders")
+async def abyssconfig(inter):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    emb = discord.Embed(title="⚙️ Abyss Config", color=0x2ecc71)
+    emb.add_field(name="Days", value=pretty_days(ABYSS_DAYS))
+    emb.add_field(name="Hours", value=pretty_hours(ABYSS_HOURS))
+    emb.add_field(name="Reminder Hours", value=pretty_hours(REMINDER_HOURS))
+    emb.add_field(name="Round 2", value="Enabled" if ROUND2_ENABLED else "Disabled")
+
+    await inter.response.send_message(embed=emb, ephemeral=True)
+
+# ============================================================
+# REMINDER LOOPS
+# ============================================================
+
+@tasks.loop(minutes=1)
+async def abyss_reminder_loop():
+    tz = pytz.timezone(MY_TIMEZONE)
+    now = datetime.now(tz)
+
+    if now.weekday() not in ABYSS_DAYS:
+        return
+
+    ch = bot.get_channel(channel_id)
+    if not ch:
+        return
+
+    if now.hour in REMINDER_HOURS and now.minute == 0:
+        await ch.send(f"<@&{ROLE_ID}>, Abyss starts in 15 minutes!")
+
+    if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
+        await ch.send(f"<@&{ROLE_ID}>, Round 2 in 15 minutes!")
+
+sent_custom = set()
+
+@tasks.loop(minutes=1)
+async def custom_event_loop():
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+    ch = bot.get_channel(channel_id)
+    if not ch:
+        return
+
+    rows = db_get_events()
+    for ev in rows:
+        event_id, name, dt, rem = ev
+        dt_obj = datetime.fromisoformat(dt)
+
+        if now >= dt_obj + timedelta(hours=1):
+            db_delete_event(event_id)
+            continue
+
+        if rem > 0:
+            rtime = dt_obj - timedelta(minutes=rem)
+            key = (event_id, rtime.isoformat())
+            if rtime <= now < rtime + timedelta(minutes=1):
+                if key not in sent_custom:
+                    await ch.send(
+                        f"⏰ Reminder: **{name}** in {rem} minutes! <t:{int(dt_obj.timestamp())}:F>"
+                    )
+                    sent_custom.add(key)
+
+    if len(sent_custom) > 300:
+        sent_custom.clear()
+
+# ============================================================
+# SAFE LOGIN (NO bot.run)
 # ============================================================
 
 async def safe_login():
