@@ -201,7 +201,7 @@ event_emojis = {"Range Forge":"🏹","Melee Wheel":"⚔️","Melee Forge":"🔨"
 
 start_date = date(2025, 9, 16)
 
-@bot.tree.command(name="weeklyevent")
+@bot.tree.command(name="weeklyevent", description="Shows list of weekly events (Forge/Wheel)")
 async def weeklyevent(inter):
     today = date.today()
     sunday = start_date - timedelta(days=start_date.weekday()+1)
@@ -379,7 +379,7 @@ class AbyssConfigView(View):
 
         await inter.response.send_message("Saved!", ephemeral=True)
 
-@bot.tree.command(name="abyssconfig")
+@bot.tree.command(name="abyssconfig", description="Edit Rules for abyss")
 async def abyssconfig(inter):
     if inter.user.id!=OWNER_ID:
         return await inter.response.send_message("❌ Owner only.", ephemeral=True)
@@ -397,7 +397,7 @@ async def abyssconfig(inter):
 # CUSTOM EVENTS (SQLITE VERSION)
 # ============================================================
 
-@bot.tree.command(name="kvkevent")
+@bot.tree.command(name="kvkevent", description="Display Kvk Events Like (Pass...etc)")
 async def kvkevent(inter):
     now=datetime.utcnow()
     events=db_get_events()
@@ -524,7 +524,7 @@ class AddEventModal(Modal, title="➕ Add Event"):
 # /addevent COMMAND (UNCHANGED UI, JUST FIXED)
 # ============================================================
 
-@bot.tree.command(name="addevent")
+@bot.tree.command(name="addevent", description="Add a custom scheduled event.")
 async def addevent(interaction: discord.Interaction):
     if not has_admin(interaction):
         return await interaction.response.send_message("❌ No permission.", ephemeral=True)
@@ -624,48 +624,74 @@ async def on_message(msg):
         return
 
 # REMOVE EVENT
-@bot.tree.command(name="removeevent")
+@bot.tree.command(name="removeevent", description="Remove a custom scheduled event.")
 async def removeevent(inter):
     if not has_admin(inter):
-        return await inter.response.send_message("No permission.", ephemeral=True)
+        return await inter.response.send_message("❌ No permission.", ephemeral=True)
 
-    rows=db_get_events()
+    rows = db_get_events()
     if not rows:
-        return await inter.response.send_message("No events to remove.", ephemeral=True)
+        return await inter.response.send_message("📭 No events to remove.", ephemeral=True)
 
-    class PickR(Select):
+    # Build dropdown options
+    options = []
+    for event_id, name, dt, rem in rows:
+        try:
+            dt_fmt = datetime.fromisoformat(dt).strftime("%d-%m %H:%M")
+        except:
+            dt_fmt = "Invalid date"
+        options.append(
+            discord.SelectOption(
+                label=f"{event_id}: {name}",
+                description=dt_fmt,
+                value=str(event_id)
+            )
+        )
+
+    class RemoveSelect(discord.ui.Select):
         def __init__(self):
-            opts=[]
-            for row in rows:
-                event_id,name,dt,rem=row
-                opts.append(
-                    discord.SelectOption(
-                        label=f"{event_id}: {name}",
-                        description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                        value=str(event_id)
-                    )
-                )
-            super().__init__(options=opts,placeholder="Choose event")
+            super().__init__(
+                placeholder="Choose an event to delete…",
+                min_values=1,
+                max_values=1,
+                options=options
+            )
 
-        async def callback(self,inter2):
-            eid=int(self.values[0])
+        async def callback(self, interaction: discord.Interaction):
+            eid = int(self.values[0])
 
-            class Conf(View):
-                @discord.ui.button(label="YES",style=discord.ButtonStyle.danger)
-                async def y(btn,ix):
+            class ConfirmDelete(discord.ui.View):
+                @discord.ui.button(label="YES", style=discord.ButtonStyle.danger)
+                async def yes(self, interaction2: discord.Interaction, button):
                     db_delete_event(eid)
-                    await ix.response.send_message("Deleted ✔")
-                    await log_action(f"Deleted: {eid}")
+                    await interaction2.response.edit_message(
+                        content=f"🗑️ Event **{eid}** deleted.",
+                        view=None
+                    )
+                    await log_action(f"Deleted event ID: {eid}")
 
-                @discord.ui.button(label="NO",style=discord.ButtonStyle.secondary)
-                async def n(btn,ix):
-                    await ix.response.send_message("Cancelled.",ephemeral=True)
+                @discord.ui.button(label="NO", style=discord.ButtonStyle.secondary)
+                async def no(self, interaction2: discord.Interaction, button):
+                    await interaction2.response.edit_message(
+                        content="❌ Cancelled.",
+                        view=None
+                    )
 
-            await inter2.response.send_message("Confirm?",view=Conf(),ephemeral=True)
+            await interaction.response.edit_message(
+                content=f"Confirm delete **event {eid}**?",
+                view=ConfirmDelete()
+            )
 
-    v=View()
-    v.add_item(PickR())
-    await inter.response.send_message("Select event:",view=v,ephemeral=True)
+    class RemoveView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=120)
+            self.add_item(RemoveSelect())
+
+    await inter.response.send_message(
+        "Select an event:",
+        view=RemoveView(),
+        ephemeral=True
+    )
 
 # ============================================================
 # REMINDER LOOPS
@@ -729,6 +755,7 @@ if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
