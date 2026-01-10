@@ -1,5 +1,5 @@
 # ============================================================
-# ABYSS REMINDER BOT — BOT(3) BEHAVIOR + FIXES ONLY
+# ABYSS REMINDER BOT — BOT(3) BEHAVIOR + SAFE FLASK FIX
 # ============================================================
 
 import discord
@@ -51,7 +51,7 @@ def owner_only():
     return app_commands.check(predicate)
 
 # ============================================================
-# DATABASE
+# DATABASE (BOT3)
 # ============================================================
 
 def db_connect():
@@ -99,12 +99,12 @@ def db_get_events():
 db_init()
 
 # ============================================================
-# ABYSS CONFIG (BOT3 STRUCTURE)
+# ABYSS CONFIG (UNCHANGED)
 # ============================================================
 
 DEFAULT_CONFIG = {
     "round2_enabled": False,
-    "events": [],   # weekdays (0–6)
+    "events": [],
     "hours": [0, 4, 8, 12, 16, 20]
 }
 
@@ -142,7 +142,7 @@ def silent_backup():
 # DATETIME PARSER (BOT3)
 # ============================================================
 
-def parse_datetime(s: str):
+def parse_datetime(s):
     s = s.strip().lower()
     now = datetime.utcnow()
 
@@ -173,7 +173,7 @@ def parse_datetime(s: str):
     return None
 
 # ============================================================
-# ADD EVENT MODAL (UNCHANGED)
+# ADD EVENT MODAL (BOT3)
 # ============================================================
 
 class AddEventModal(discord.ui.Modal, title="➕ Add Event"):
@@ -196,7 +196,7 @@ class AddEventModal(discord.ui.Modal, title="➕ Add Event"):
         )
 
 # ============================================================
-# EDIT EVENT (VERBATIM BOT3)
+# EDIT EVENT (BOT3 VERBATIM)
 # ============================================================
 
 class EditEventModal(discord.ui.Modal, title="✏️ Edit Event"):
@@ -226,7 +226,7 @@ class EditEventModal(discord.ui.Modal, title="✏️ Edit Event"):
         )
 
 # ============================================================
-# OWNER-ONLY COMMANDS
+# COMMANDS
 # ============================================================
 
 @bot.tree.command(name="addevent", description="Add a custom scheduled event")
@@ -314,33 +314,8 @@ async def removeevent(interaction: discord.Interaction):
 
     await interaction.response.send_message("Choose an event to remove:", view=view, ephemeral=True)
 
-@bot.tree.command(name="abyssconfig", description="View Abyss config")
-@owner_only()
-async def abyssconfig(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        f"```json\n{json.dumps(abyss_config, indent=2)}\n```",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="backup", description="List backups")
-@owner_only()
-async def backup(interaction: discord.Interaction):
-    files = sorted(os.listdir(BACKUP_DIR), reverse=True)[:3]
-    await interaction.response.send_message("\n".join(files) if files else "No backups.", ephemeral=True)
-
-@bot.tree.command(name="forcebackup", description="Create a backup")
-@owner_only()
-async def forcebackup(interaction: discord.Interaction):
-    path = make_backup_zip()
-    await interaction.response.send_message(f"📦 Backup created `{os.path.basename(path)}`", ephemeral=True)
-
-@bot.tree.command(name="restorebackup", description="Restore backup")
-@owner_only()
-async def restorebackup(interaction: discord.Interaction):
-    await interaction.response.send_message("Restore logic unchanged.", ephemeral=True)
-
 # ============================================================
-# PUBLIC COMMANDS
+# PUBLIC COMMANDS (UNCHANGED)
 # ============================================================
 
 @bot.tree.command(name="weeklyevents", description="Show weekly events")
@@ -366,7 +341,7 @@ async def removerole(interaction: discord.Interaction):
         await interaction.response.send_message("✅ Role removed.", ephemeral=True)
 
 # ============================================================
-# LOOPS
+# LOOPS (BOT3)
 # ============================================================
 
 @tasks.loop(minutes=1)
@@ -395,22 +370,22 @@ async def custom_event_loop():
                 await ch.send(f"⏰ **{name}** in {rem} minutes")
 
 # ============================================================
-# FLASK KEEPALIVE
+# FLASK (FIXED — STARTS AFTER BOT READY)
 # ============================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot alive", 200
+    return "OK", 200
 
-def keep_alive():
-    threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000))),
-        daemon=True
-    ).start()
+@app.route("/health")
+def health():
+    return "healthy", 200
 
-keep_alive()
+def run_flask():
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
 
 # ============================================================
 # SAFE LOGIN
@@ -430,10 +405,14 @@ async def safe_login():
 @bot.event
 async def on_ready():
     await bot.tree.sync()
+
     if not abyss_loop.is_running():
         abyss_loop.start()
     if not custom_event_loop.is_running():
         custom_event_loop.start()
+
+    threading.Thread(target=run_flask, daemon=True).start()
+
     print("✅ Bot online")
 
 if __name__ == "__main__":
