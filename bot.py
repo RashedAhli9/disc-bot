@@ -537,7 +537,6 @@ class AbyssConfigView(View):
         self.rem = rem
         self.round2 = round2
 
-        # Days selector
         self.day_sel = Select(
             placeholder="Select Abyss Days",
             min_values=1,
@@ -554,7 +553,6 @@ class AbyssConfigView(View):
         self.day_sel.callback = self.cb_days
         self.add_item(self.day_sel)
 
-        # Hours selector
         self.hour_sel = Select(
             placeholder="Select Abyss Hours",
             min_values=1,
@@ -571,7 +569,6 @@ class AbyssConfigView(View):
         self.hour_sel.callback = self.cb_hours
         self.add_item(self.hour_sel)
 
-        # Reminder selector
         self.rem_sel = Select(
             placeholder="Reminder Hours",
             min_values=0,
@@ -588,7 +585,6 @@ class AbyssConfigView(View):
         self.rem_sel.callback = self.cb_rem
         self.add_item(self.rem_sel)
 
-        # Round 2 toggle
         self.round_btn = Button(
             label=f"Round 2: {'ON' if round2 else 'OFF'}",
             style=discord.ButtonStyle.success if round2 else discord.ButtonStyle.danger
@@ -596,40 +592,41 @@ class AbyssConfigView(View):
         self.round_btn.callback = self.toggle_round2
         self.add_item(self.round_btn)
 
-   async def cb_days(self, interaction):
-    global ABYSS_DAYS
-    self.days = [int(v) for v in self.day_sel.values]
-    ABYSS_DAYS = self.days
-    cfg["days"] = self.days
-    save_json(ABYSS_CONFIG_FILE, cfg)
-    await interaction.response.send_message("Days updated ✔", ephemeral=True)
+    async def cb_days(self, interaction):
+        global ABYSS_DAYS
+        self.days = [int(v) for v in self.day_sel.values]
+        ABYSS_DAYS = self.days
+        cfg["days"] = self.days
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message("Days updated ✔", ephemeral=True)
 
-async def cb_hours(self, interaction):
-    global ABYSS_HOURS
-    self.hours = [int(v) for v in self.hour_sel.values]
-    ABYSS_HOURS = self.hours
-    cfg["hours"] = self.hours
-    save_json(ABYSS_CONFIG_FILE, cfg)
-    await interaction.response.send_message("Hours updated ✔", ephemeral=True)
+    async def cb_hours(self, interaction):
+        global ABYSS_HOURS
+        self.hours = [int(v) for v in self.hour_sel.values]
+        ABYSS_HOURS = self.hours
+        cfg["hours"] = self.hours
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message("Hours updated ✔", ephemeral=True)
 
-async def cb_rem(self, interaction):
-    global REMINDER_HOURS
-    self.rem = [int(v) for v in self.rem_sel.values]
-    REMINDER_HOURS = self.rem
-    cfg["reminder_hours"] = self.rem
-    save_json(ABYSS_CONFIG_FILE, cfg)
-    await interaction.response.send_message("Reminder hours updated ✔", ephemeral=True)
+    async def cb_rem(self, interaction):
+        global REMINDER_HOURS
+        self.rem = [int(v) for v in self.rem_sel.values]
+        REMINDER_HOURS = self.rem
+        cfg["reminder_hours"] = self.rem
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message("Reminder hours updated ✔", ephemeral=True)
 
-async def toggle_round2(self, interaction):
-    global ROUND2_ENABLED
-    self.round2 = not self.round2
-    ROUND2_ENABLED = self.round2
-    cfg["round2"] = self.round2
-    save_json(ABYSS_CONFIG_FILE, cfg)
-    await interaction.response.send_message(
-        f"Round 2 {'enabled' if self.round2 else 'disabled'} ✔",
-        ephemeral=True
-    )
+    async def toggle_round2(self, interaction):
+        global ROUND2_ENABLED
+        self.round2 = not self.round2
+        ROUND2_ENABLED = self.round2
+        cfg["round2"] = self.round2
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message(
+            f"Round 2 {'enabled' if self.round2 else 'disabled'} ✔",
+            ephemeral=True
+        )
+
 
 
 @bot.tree.command(name="abyssconfig", description="Configure Abyss days, hours, and reminders")
@@ -736,6 +733,7 @@ async def safe_login():
 
 if __name__ == "__main__":
     asyncio.run(safe_login())
+
 
 
 
