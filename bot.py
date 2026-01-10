@@ -632,41 +632,36 @@ def admin_or_owner():
 # PUBLIC ROLE COMMANDS
 # ============================================================
 
-@bot.tree.command(name="addrole", description="Adds the Abyss notification role to yourself.")
+@bot.tree.command(name="addrole", description="Give yourself the Abyss role")
 async def addrole(interaction: discord.Interaction):
-    role = interaction.guild.get_role(PUBLIC_ROLE_ID)
+    guild = interaction.guild
+    role = guild.get_role(ROLE_ID)
 
     if not role:
         return await interaction.response.send_message("❌ Role not found.", ephemeral=True)
-
-    if role in interaction.user.roles:
-        return await interaction.response.send_message("⚠️ You already have this role.", ephemeral=True)
 
     try:
         await interaction.user.add_roles(role)
         await interaction.response.send_message("✅ Role added!", ephemeral=True)
-    except:
-        await interaction.response.send_message("❌ I do not have permission to add that role.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 
 
-@bot.tree.command(name="removerole", description="Removes the Abyss notification role from yourself.")
+
+@bot.tree.command(name="removerole", description="Remove the Abyss role from yourself")
 async def removerole(interaction: discord.Interaction):
-    role = interaction.guild.get_role(PUBLIC_ROLE_ID)
+    guild = interaction.guild
+    role = guild.get_role(ROLE_ID)
 
     if not role:
         return await interaction.response.send_message("❌ Role not found.", ephemeral=True)
 
-    if role not in interaction.user.roles:
-        return await interaction.response.send_message("⚠️ You don't have this role.", ephemeral=True)
-
     try:
         await interaction.user.remove_roles(role)
         await interaction.response.send_message("✅ Role removed!", ephemeral=True)
-    except:
-        await interaction.response.send_message("❌ I do not have permission to remove that role.", ephemeral=True)
-
-
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 # ============================================================
 # RESTRICT OWNER/ADMIN COMMANDS
@@ -1016,3 +1011,4 @@ if __name__ == "__main__":
         print("❌ Missing DISCORD_BOT_TOKEN")
     else:
         asyncio.run(safe_login())
+
