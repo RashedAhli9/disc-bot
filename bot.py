@@ -330,6 +330,15 @@ async def on_ready():
     ch = bot.get_channel(update_channel_id)
     if ch:
         await ch.send("🤖 Bot restarted successfully.")
+@bot.event
+async def on_disconnect():
+    try:
+        session = bot.http._HTTPClient__session
+        if session and not session.closed:
+            await session.close()
+            print("🔌 HTTP session closed cleanly.")
+    except Exception as e:
+        print("⚠️ Failed to close HTTP session:", e)
 
 # ============================================================
 # WEEKLY EVENTS
@@ -748,6 +757,7 @@ async def safe_login():
         except Exception as e:
             print(f"[Fatal Login Error] {e}")
             await asyncio.sleep(120)
+
 
 
 
