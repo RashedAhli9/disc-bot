@@ -30,7 +30,7 @@ ABYSS_CONFIG_FILE = "abyss_config.json"
 # SQLITE DATABASE INIT
 # ============================================================
 
-DB = "events.db"
+DB = os.path.join(os.path.dirname(__file__), "events.db")
 
 def init_db():
     conn = sqlite3.connect(DB)
@@ -239,6 +239,49 @@ async def weeklyevent(inter):
         msg+=f"{nums[i]} {emoji} **{nm}** — <t:{int(base_dt.timestamp())}:F>\n{st}\n\n"
 
     await inter.response.send_message(msg)
+
+
+
+@bot.tree.command(name="addrole", description="Receive the Abyss notification role.")
+async def addrole(inter):
+    role_id = 1413532222396301322
+    role = inter.guild.get_role(role_id)
+
+    if role is None:
+        return await inter.response.send_message("❌ Role not found in this server.", ephemeral=True)
+
+    # If user already has the role
+    if role in inter.user.roles:
+        return await inter.response.send_message("You already have this role!", ephemeral=True)
+
+    try:
+        await inter.user.add_roles(role)
+        await inter.response.send_message(f"✅ Role **{role.name}** added successfully!", ephemeral=True)
+    except discord.Forbidden:
+        await inter.response.send_message("❌ I don't have permission to give that role.", ephemeral=True)
+    except Exception as e:
+        await inter.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="removerole", description="Remove the Abyss notification role from yourself.")
+async def removerole(inter):
+    role_id = 1413532222396301322
+    role = inter.guild.get_role(role_id)
+
+    if role is None:
+        return await inter.response.send_message("❌ Role not found in this server.", ephemeral=True)
+
+    # If user doesn't have the role
+    if role not in inter.user.roles:
+        return await inter.response.send_message("You don't have this role.", ephemeral=True)
+
+    try:
+        await inter.user.remove_roles(role)
+        await inter.response.send_message(f"✅ Role **{role.name}** removed successfully!", ephemeral=True)
+    except discord.Forbidden:
+        await inter.response.send_message("❌ I don't have permission to remove that role.", ephemeral=True)
+    except Exception as e:
+        await inter.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 # ============================================================
 # ABYSS CONFIG VIEW (unchanged)
@@ -686,6 +729,7 @@ if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
