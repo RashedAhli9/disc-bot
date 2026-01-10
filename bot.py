@@ -632,36 +632,41 @@ def admin_or_owner():
 # PUBLIC ROLE COMMANDS
 # ============================================================
 
-@bot.tree.command(name="addrole", description="Give yourself the Abyss role")
+@bot.tree.command(name="addrole", description="Adds the Abyss notification role to yourself.")
 async def addrole(interaction: discord.Interaction):
-    guild = interaction.guild
-    role = guild.get_role(ROLE_ID)
+    role = interaction.guild.get_role(PUBLIC_ROLE_ID)
 
     if not role:
         return await interaction.response.send_message("❌ Role not found.", ephemeral=True)
+
+    if role in interaction.user.roles:
+        return await interaction.response.send_message("⚠️ You already have this role.", ephemeral=True)
 
     try:
         await interaction.user.add_roles(role)
         await interaction.response.send_message("✅ Role added!", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+    except:
+        await interaction.response.send_message("❌ I do not have permission to add that role.", ephemeral=True)
 
 
 
-
-@bot.tree.command(name="removerole", description="Remove the Abyss role from yourself")
+@bot.tree.command(name="removerole", description="Removes the Abyss notification role from yourself.")
 async def removerole(interaction: discord.Interaction):
-    guild = interaction.guild
-    role = guild.get_role(ROLE_ID)
+    role = interaction.guild.get_role(PUBLIC_ROLE_ID)
 
     if not role:
         return await interaction.response.send_message("❌ Role not found.", ephemeral=True)
 
+    if role not in interaction.user.roles:
+        return await interaction.response.send_message("⚠️ You don't have this role.", ephemeral=True)
+
     try:
         await interaction.user.remove_roles(role)
         await interaction.response.send_message("✅ Role removed!", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+    except:
+        await interaction.response.send_message("❌ I do not have permission to remove that role.", ephemeral=True)
+
+
 
 # ============================================================
 # RESTRICT OWNER/ADMIN COMMANDS
@@ -1005,10 +1010,85 @@ async def safe_login():
 # RUN BOT WITH SAFE LOGIN
 # ============================================================
 
-if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-    if not TOKEN:
-        print("❌ Missing DISCORD_BOT_TOKEN")
-    else:
-        asyncio.run(safe_login())
+# ============================================================
+# === FINAL APPENDED PATCH (SAFE LOGIN + BACKUP + FLASK)
+# === DO NOT ADD ANYTHING BELOW THIS
+# ============================================================
 
+# -------------------------------
+# SILENT BACKUP WRAPPER (HOOK)
+# -------------------------------
+
+def _silent_backup_wrapper():
+    try:
+        make_backup_zip()
+    except Exception as e:
+        print(f"[Backup] {e}")
+
+# Override DB mutators WITHOUT touching original code
+_original_db_add_event = db_add_event
+def db_add_event(name, dt, reminder):
+    _original_db_add_event(name, dt, reminder)
+    _silent_backup_wrapper()
+
+_original_db_update_event = db_update_event
+def db_update_event(eid, name, dt, reminder):
+    _original_db_update_event(eid, name, dt, reminder)
+    _silent_backup_wrapper()
+
+_original_db_delete_event = db_delete_event
+def db_delete_event(eid):
+    _original_db_delete_event(eid)
+    _silent_backup_wrapper()
+
+# -------------------------------
+# FINAL FLASK KEEPALIVE
+# -------------------------------
+
+_final_app = Flask("final_keepalive")
+
+@_final_app.route("/")
+def _final_home():
+    return "Bot alive (final)", 200
+
+def _final_run_web():
+    port = int(os.getenv("PORT", 8000))
+    _final_app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=_final_run_web, daemon=True).start()
+
+# -------------------------------
+# FINAL SAFE LOGIN (OVERRIDES ALL)
+# -------------------------------
+
+async def safe_login():
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        print("❌ DISCORD_BOT_TOKEN not set")
+        return
+
+    delay = 5
+    max_delay = 120
+
+    while True:
+        try:
+            print(f"[SafeLogin] Attempting login (delay={delay}s)")
+            await bot.start(token)
+            break
+        except discord.HTTPException as e:
+            if e.status == 429:
+                print("[SafeLogin] Discord rate limit hit (429)")
+            else:
+                print(f"[SafeLogin] HTTP error: {e}")
+        except Exception as e:
+            print(f"[SafeLogin] Unexpected error: {e}")
+
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay)
+
+# -------------------------------
+# FORCE SAFE LOGIN ENTRYPOINT
+# -------------------------------
+
+if __name__ == "__main__":
+    asyncio.run(safe_login())
