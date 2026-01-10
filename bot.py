@@ -533,95 +533,121 @@ async def addevent(interaction: discord.Interaction):
 
 
 # EDIT EVENT
-@bot.tree.command(name="editevent")
+@bot.tree.command(name="editevent", description="Edit a custom scheduled event.")
 async def editevent(inter):
     if not has_admin(inter):
-        return await inter.response.send_message("No permission.", ephemeral=True)
+        return await inter.response.send_message("❌ No permission.", ephemeral=True)
 
-    rows=db_get_events()
+    rows = db_get_events()
     if not rows:
-        return await inter.response.send_message("No events available.", ephemeral=True)
+        return await inter.response.send_message("📭 No events to edit.", ephemeral=True)
 
-    class Pick(Select):
+    # Build dropdown
+    options = []
+    for event_id, name, dt, rem in rows:
+        try:
+            dt_fmt = datetime.fromisoformat(dt).strftime("%d-%m %H:%M")
+        except:
+            dt_fmt = "Invalid date"
+
+        options.append(
+            discord.SelectOption(
+                label=f"{event_id}: {name}",
+                description=f"{dt_fmt} | Reminder: {rem}m",
+                value=str(event_id)
+            )
+        )
+
+    class EventSelect(discord.ui.Select):
         def __init__(self):
-            opts=[]
-            for row in rows:
-                event_id,name,dt,rem=row
-                opts.append(
-                    discord.SelectOption(
-                        label=f"{event_id}: {name}",
-                        description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                        value=str(event_id)
-                    )
-                )
-            super().__init__(options=opts,placeholder="Select event")
+            super().__init__(
+                placeholder="Choose an event to edit…",
+                min_values=1,
+                max_values=1,
+                options=options
+            )
 
-        async def callback(self,inter2):
-            eid=int(self.values[0])
+        async def callback(self, interaction: discord.Interaction):
+            eid = int(self.values[0])
 
-            class Editor(View):
-                @discord.ui.button(label="Edit Name",style=discord.ButtonStyle.primary)
-                async def a(btn,ix):
-                    await ix.response.send_message("Enter new name:",ephemeral=True)
-                    bot.active_edit=(ix.user.id,eid,"name")
+            class EditMenu(discord.ui.View):
+                def __init__(self, event_id):
+                    super().__init__(timeout=120)
+                    self.event_id = event_id
 
-                @discord.ui.button(label="Edit Time",style=discord.ButtonStyle.secondary)
-                async def b(btn,ix):
-                    await ix.response.send_message("Enter new datetime:",ephemeral=True)
-                    bot.active_edit=(ix.user.id,eid,"time")
+                # -------- EDIT NAME ----------
+                @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
+                async def edit_name(self, interaction2: discord.Interaction, button):
+                    class NameModal(discord.ui.Modal, title="Edit Event Name"):
+                        new_name = discord.ui.TextInput(label="New Event Name")
 
-                @discord.ui.button(label="Edit Reminder",style=discord.ButtonStyle.success)
-                async def c(btn,ix):
-                    await ix.response.send_message("Enter reminder (minutes or 'no'):",ephemeral=True)
-                    bot.active_edit=(ix.user.id,eid,"rem")
-            await inter2.response.send_message("Choose field:",view=Editor(),ephemeral=True)
+                        async def on_submit(self, inter3: discord.Interaction):
+                            db_update_event(eid, name=str(self.new_name))
+                            await inter3.response.send_message("✔ Name updated.", ephemeral=True)
+                            await log_action(f"Edited event {eid}: name changed")
 
-    view=View()
-    view.add_item(Pick())
-    await inter.response.send_message("Select event:",view=view,ephemeral=True)
+                    await interaction2.response.send_modal(NameModal())
 
-@bot.event
-async def on_message(msg):
-    if msg.author.bot: return
-    if bot.active_edit is None: return
+                # -------- EDIT DATE ----------
+                @discord.ui.button(label="Edit Datetime", style=discord.ButtonStyle.secondary)
+                async def edit_time(self, interaction2: discord.Interaction, button):
+                    class TimeModal(discord.ui.Modal, title="Edit Datetime"):
+                        new_dt = discord.ui.TextInput(
+                            label="New Datetime",
+                            placeholder="DD-MM-YYYY HH:MM or 1d2h or 14utc"
+                        )
 
-    uid,eid,field=bot.active_edit
-    if msg.author.id!=uid:
-        return
+                        async def on_submit(self, inter3: discord.Interaction):
+                            try:
+                                new_time = parse_datetime(self.new_dt.value)
+                                db_update_event(eid, dt=new_time.isoformat())
+                                await inter3.response.send_message("✔ Time updated.", ephemeral=True)
+                                await log_action(f"Edited event {eid}: time changed")
+                            except:
+                                await inter3.response.send_message("❌ Invalid datetime.", ephemeral=True)
 
-    events=db_get_events()
-    if not any(ev[0]==eid for ev in events):
-        bot.active_edit=None
-        return
+                    await interaction2.response.send_modal(TimeModal())
 
-    if field=="name":
-        db_update_event(eid,name=msg.content)
-        await msg.channel.send("Updated ✔")
-        bot.active_edit=None
-        return
+                # -------- EDIT REMINDER ----------
+                @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
+                async def edit_reminder(self, interaction2: discord.Interaction, button):
+                    class ReminderModal(discord.ui.Modal, title="Edit Reminder"):
+                        new_rem = discord.ui.TextInput(
+                            label="New Reminder",
+                            placeholder="Minutes or 'no'"
+                        )
 
-    if field=="time":
-        try:
-            dt=parse_datetime(msg.content).isoformat()
-            db_update_event(eid,dt=dt)
-            await msg.channel.send("Updated ✔")
-        except:
-            await msg.channel.send("Invalid datetime.")
-        bot.active_edit=None
-        return
+                        async def on_submit(self, inter3: discord.Interaction):
+                            try:
+                                if self.new_rem.value.lower() == "no":
+                                    db_update_event(eid, reminder=0)
+                                else:
+                                    db_update_event(eid, reminder=int(self.new_rem.value))
 
-    if field=="rem":
-        try:
-            if msg.content.lower()=="no":
-                db_update_event(eid,reminder=0)
-            else:
-                r=int(msg.content)
-                db_update_event(eid,reminder=r)
-            await msg.channel.send("Updated ✔")
-        except:
-            await msg.channel.send("Invalid reminder.")
-        bot.active_edit=None
-        return
+                                await inter3.response.send_message("✔ Reminder updated.", ephemeral=True)
+                                await log_action(f"Edited event {eid}: reminder changed")
+                            except:
+                                await inter3.response.send_message("❌ Invalid reminder.", ephemeral=True)
+
+                    await interaction2.response.send_modal(ReminderModal())
+
+            await interaction.response.send_message(
+                f"Editing event **{eid}**",
+                view=EditMenu(eid),
+                ephemeral=True
+            )
+
+    class EditView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=120)
+            self.add_item(EventSelect())
+
+    await inter.response.send_message(
+        "Select an event to edit:",
+        view=EditView(),
+        ephemeral=True
+    )
+
 
 # REMOVE EVENT
 @bot.tree.command(name="removeevent", description="Remove a custom scheduled event.")
@@ -755,6 +781,7 @@ if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
