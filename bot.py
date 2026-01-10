@@ -879,30 +879,70 @@ async def importconfig(inter):
 # RUN BOT
 # ============================================================
 
+# ============================================================
+# FLASK KEEP-ALIVE SERVER (FOR KOYEB HEALTH CHECKS)
+# ============================================================
+
 from flask import Flask
 import threading
+import asyncio
+import sys
 
-app = Flask('')
+app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
     return "Bot alive", 200
 
 def run_web():
-    app.run(host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))  # IMPORTANT: use Koyeb port
+    app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
     thread = threading.Thread(target=run_web)
     thread.start()
 
-# Start web server BEFORE bot login
+# Start keep-alive server BEFORE bot login
 keep_alive()
+
+
+# ============================================================
+# SAFE LOGIN MODE (PROTECTS AGAINST DISCORD RATE LIMIT 429)
+# ============================================================
+
+async def safe_bot_start():
+    print("🛡️ Safe Login Mode Active — delaying bot login by 3 seconds...")
+    await asyncio.sleep(3)
+
+    try:
+        print("🔌 Attempting Discord login (first attempt)...")
+        await bot.start(TOKEN)
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            print("⚠️ Discord rate limit detected! Waiting 10 seconds and retrying...")
+            await asyncio.sleep(10)
+
+            try:
+                print("🔄 Retrying Discord login (second attempt)...")
+                await bot.start(TOKEN)
+            except Exception as e2:
+                print("❌ Second login attempt failed. Stopping to avoid restart spam:", e2)
+                sys.exit(1)
+        else:
+            print("❌ Bot failed to start:", e)
+            sys.exit(1)
+
+
+# ============================================================
+# RUN BOT SAFELY
+# ============================================================
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
-    bot.run(TOKEN)
+    asyncio.run(safe_bot_start())
+
 
 
 
