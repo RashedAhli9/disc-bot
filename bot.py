@@ -475,27 +475,32 @@ async def editevent(inter):
             )
 
         async def callback(self, inter2):
-            eid = int(self.values[0])
+    await inter2.response.defer(ephemeral=True)
 
-            class EditView(View):
-                @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
-                async def edit_name(self, btn, ix):
-                    bot.active_edit = (ix.user.id, eid, "name")
-                    await ix.response.send_message("Send new name in chat.", ephemeral=True)
+    eid = int(self.values[0])
 
-                @discord.ui.button(label="Edit Time", style=discord.ButtonStyle.secondary)
-                async def edit_time(self, btn, ix):
-                    bot.active_edit = (ix.user.id, eid, "time")
-                    await ix.response.send_message("Send new datetime in chat.", ephemeral=True)
+    class EditView(View):
+        @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
+        async def edit_name(self, btn, ix):
+            bot.active_edit = (ix.user.id, eid, "name")
+            await ix.response.send_message("Send new name in chat.", ephemeral=True)
 
-                @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
-                async def edit_rem(self, btn, ix):
-                    bot.active_edit = (ix.user.id, eid, "rem")
-                    await ix.response.send_message("Send new reminder (minutes or 'no').", ephemeral=True)
+        @discord.ui.button(label="Edit Time", style=discord.ButtonStyle.secondary)
+        async def edit_time(self, btn, ix):
+            bot.active_edit = (ix.user.id, eid, "time")
+            await ix.response.send_message("Send new datetime in chat.", ephemeral=True)
 
-            await inter2.response.send_message("Choose what to edit:", view=EditView(), ephemeral=True)
+        @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
+        async def edit_rem(self, btn, ix):
+            bot.active_edit = (ix.user.id, eid, "rem")
+            await ix.response.send_message("Send new reminder (minutes or 'no').", ephemeral=True)
 
-    await inter.response.send_message("Pick an event:", view=View(PickEvent()), ephemeral=True)
+    await inter2.followup.send(
+        "Choose what to edit:",
+        view=EditView(),
+        ephemeral=True
+    )
+
 
 @bot.tree.command(name="removeevent", description="Remove a custom event")
 async def removeevent(inter):
@@ -521,10 +526,15 @@ async def removeevent(inter):
             )
 
         async def callback(self, inter2):
-            db_delete_event(int(self.values[0]))
-            await inter2.response.send_message("🗑 Event removed.", ephemeral=True)
+    await inter2.response.defer(ephemeral=True)
 
-    await inter.response.send_message("Pick an event to remove:", view=View(PickRemove()), ephemeral=True)
+    db_delete_event(int(self.values[0]))
+
+    await inter2.followup.send(
+        "🗑 Event removed.",
+        ephemeral=True
+    )
+
 
 # ============================================================
 # ABYSS CONFIG COMMAND
@@ -733,6 +743,7 @@ async def safe_login():
 
 if __name__ == "__main__":
     asyncio.run(safe_login())
+
 
 
 
