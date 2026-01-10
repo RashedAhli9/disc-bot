@@ -529,6 +529,99 @@ async def removeevent(inter):
 # ============================================================
 # ABYSS CONFIG COMMAND
 # ============================================================
+class AbyssConfigView(View):
+    def __init__(self, days, hours, rem, round2):
+        super().__init__(timeout=300)
+        self.days = days
+        self.hours = hours
+        self.rem = rem
+        self.round2 = round2
+
+        # Days selector
+        self.day_sel = Select(
+            placeholder="Select Abyss Days",
+            min_values=1,
+            max_values=7,
+            options=[
+                discord.SelectOption(
+                    label=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i],
+                    value=str(i),
+                    default=(i in days)
+                )
+                for i in range(7)
+            ]
+        )
+        self.day_sel.callback = self.cb_days
+        self.add_item(self.day_sel)
+
+        # Hours selector
+        self.hour_sel = Select(
+            placeholder="Select Abyss Hours",
+            min_values=1,
+            max_values=6,
+            options=[
+                discord.SelectOption(
+                    label=f"{h:02}:00 UTC",
+                    value=str(h),
+                    default=(h in hours)
+                )
+                for h in [0,4,8,12,16,20]
+            ]
+        )
+        self.hour_sel.callback = self.cb_hours
+        self.add_item(self.hour_sel)
+
+        # Reminder selector
+        self.rem_sel = Select(
+            placeholder="Reminder Hours",
+            min_values=0,
+            max_values=len(hours),
+            options=[
+                discord.SelectOption(
+                    label=f"{h:02}:00 UTC",
+                    value=str(h),
+                    default=(h in rem)
+                )
+                for h in hours
+            ]
+        )
+        self.rem_sel.callback = self.cb_rem
+        self.add_item(self.rem_sel)
+
+        # Round 2 toggle
+        self.round_btn = Button(
+            label=f"Round 2: {'ON' if round2 else 'OFF'}",
+            style=discord.ButtonStyle.success if round2 else discord.ButtonStyle.danger
+        )
+        self.round_btn.callback = self.toggle_round2
+        self.add_item(self.round_btn)
+
+    async def cb_days(self, interaction):
+        self.days = [int(v) for v in self.day_sel.values]
+        cfg["days"] = self.days
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message("Days updated ✔", ephemeral=True)
+
+    async def cb_hours(self, interaction):
+        self.hours = [int(v) for v in self.hour_sel.values]
+        cfg["hours"] = self.hours
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message("Hours updated ✔", ephemeral=True)
+
+    async def cb_rem(self, interaction):
+        self.rem = [int(v) for v in self.rem_sel.values]
+        cfg["reminder_hours"] = self.rem
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message("Reminder hours updated ✔", ephemeral=True)
+
+    async def toggle_round2(self, interaction):
+        self.round2 = not self.round2
+        cfg["round2"] = self.round2
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message(
+            f"Round 2 {'enabled' if self.round2 else 'disabled'} ✔",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="abyssconfig", description="Configure Abyss days, hours, and reminders")
 async def abyssconfig(inter):
@@ -634,4 +727,5 @@ async def safe_login():
 
 if __name__ == "__main__":
     asyncio.run(safe_login())
+
 
