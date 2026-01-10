@@ -758,8 +758,13 @@ async def safe_login():
             print(f"[Fatal Login Error] {e}")
             await asyncio.sleep(120)
 
+if __name__ == "__main__":
+    asyncio.run(safe_login())
 
-
+    # KEEP PROCESS ALIVE (REQUIRED FOR KOYEB)
+    import time
+    while True:
+        time.sleep(3600)
 
 
 
