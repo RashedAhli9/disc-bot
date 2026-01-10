@@ -772,6 +772,109 @@ async def custom_event_loop():
     if len(sent_custom)>300:
         sent_custom.clear()
 
+
+# ============================================================
+# EXPORT / IMPORT CONFIG (FULL RESTORED VERSION + LOOP RESTART)
+# ============================================================
+
+@bot.tree.command(name="exportconfig", description="Export abyss config + event database")
+async def exportconfig(inter):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    try:
+        mem_zip = io.BytesIO()
+        with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+            if os.path.exists(ABYSS_CONFIG_FILE):
+                z.write(ABYSS_CONFIG_FILE, arcname="abyss_config.json")
+
+            if os.path.exists(DB):
+                z.write(DB, arcname="events.db")
+
+        mem_zip.seek(0)
+
+        await inter.response.send_message(
+            "📦 **Export complete!** Your backup is ready.",
+            file=discord.File(mem_zip, filename="abyss_backup.zip"),
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await inter.response.send_message(f"❌ Error exporting: `{e}`", ephemeral=True)
+
+
+
+@bot.tree.command(name="importconfig", description="Import abyss config + event database")
+async def importconfig(inter):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    await inter.response.send_message(
+        "📥 Upload your `abyss_backup.zip` now.", ephemeral=True
+    )
+
+    def check(msg):
+        return msg.author.id == inter.user.id and msg.attachments
+
+    try:
+        msg = await bot.wait_for("message", check=check, timeout=60)
+    except asyncio.TimeoutError:
+        return await inter.followup.send("❌ Timed out. No file uploaded.", ephemeral=True)
+
+    attachment = msg.attachments[0]
+
+    if not attachment.filename.endswith(".zip"):
+        return await inter.followup.send("❌ Please upload a valid ZIP file.", ephemeral=True)
+
+    try:
+        # Load ZIP file into memory
+        data = await attachment.read()
+        zip_bytes = io.BytesIO(data)
+
+        with zipfile.ZipFile(zip_bytes, "r") as z:
+
+            # Extract abyss_config.json
+            if "abyss_config.json" in z.namelist():
+                z.extract("abyss_config.json", path=".")
+                new_cfg = load_json("abyss_config.json", DEFAULT_ABYSS)
+
+                # Update globals
+                global ABYSS_DAYS, ABYSS_HOURS, REMINDER_HOURS, ROUND2_ENABLED, cfg
+                ABYSS_DAYS = new_cfg["days"]
+                ABYSS_HOURS = new_cfg["hours"]
+                REMINDER_HOURS = new_cfg["reminder_hours"]
+                ROUND2_ENABLED = new_cfg["round2"]
+                cfg = new_cfg
+
+            # Extract events.db
+            if "events.db" in z.namelist():
+                z.extract("events.db", path=".")
+
+        # ===============================
+        # 🔄 RESTART LOOPS IMMEDIATELY
+        # ===============================
+        try:
+            if abyss_reminder_loop.is_running():
+                abyss_reminder_loop.restart()
+            else:
+                abyss_reminder_loop.start()
+
+            if custom_event_loop.is_running():
+                custom_event_loop.restart()
+            else:
+                custom_event_loop.start()
+
+        except Exception as e:
+            print("Loop restart error:", e)
+
+        await inter.followup.send(
+            "✅ **Import successful!** Config + events restored.\n🔄 Loops restarted.",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await inter.followup.send(f"❌ Import failed: `{e}`", ephemeral=True)
+
 # ============================================================
 # RUN BOT
 # ============================================================
@@ -800,6 +903,7 @@ if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
