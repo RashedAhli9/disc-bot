@@ -776,11 +776,31 @@ async def custom_event_loop():
 # RUN BOT
 # ============================================================
 
-TOKEN=os.getenv("DISCORD_BOT_TOKEN")
+from flask import Flask
+import threading
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot alive", 200
+
+def run_web():
+    app.run(host="0.0.0.0", port=8000)
+
+def keep_alive():
+    thread = threading.Thread(target=run_web)
+    thread.start()
+
+# Start web server BEFORE bot login
+keep_alive()
+
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     print("❌ Missing DISCORD_BOT_TOKEN")
 else:
     bot.run(TOKEN)
+
 
 
 
