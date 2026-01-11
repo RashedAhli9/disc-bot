@@ -311,7 +311,7 @@ async def restorebackup(inter):
         )
 
         await asyncio.sleep(2)
-        os._exit(0)  # auto-restart on Koyeb
+       # auto-restart on Koyeb
 
     select.callback = cb
     view = View(timeout=60)
@@ -790,6 +790,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
