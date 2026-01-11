@@ -507,7 +507,7 @@ async def editevent(inter: discord.Interaction):
 
         _, old_name, old_dt, old_rem = event
 
-               class EditEventModal(Modal, title="Edit Event"):
+        class EditEventModal(Modal, title="Edit Event"):
             name = TextInput(label="Event Name", default=old_name)
             datetime = TextInput(
                 label="Date & Time (YYYY-MM-DD HH:MM)",
@@ -550,6 +550,17 @@ async def editevent(inter: discord.Interaction):
                         ephemeral=True
                     )
 
+        await i.response.send_modal(EditEventModal())
+
+    select.callback = select_callback
+    view = View()
+    view.add_item(select)
+
+    await inter.response.send_message(
+        "Select an event to edit:",
+        view=view,
+        ephemeral=True
+    )
 
 
 
@@ -814,6 +825,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
