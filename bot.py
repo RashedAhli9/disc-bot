@@ -479,96 +479,106 @@ class AddEventModal(Modal, title="➕ Add Event"):
 # ADD / EDIT / REMOVE EVENT COMMANDS
 # ============================================================
 
-@bot.tree.command(name="addevent", description="Add a new custom event")
-async def addevent(interaction: discord.Interaction):
-    if not has_admin(interaction):
-        return await interaction.response.send_message("❌ No permission.", ephemeral=True)
-    await interaction.response.send_modal(AddEventModal())
+@bot.tree.command(name="editevent", description="Edit an existing event")
+async def editevent(inter: discord.Interaction):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
-@bot.tree.command(name="editevent", description="Edit an existing custom event")
-async def editevent(inter):
-    if not has_admin(inter):
-        return await inter.response.send_message("❌ No permission.", ephemeral=True)
+    events = db_get_events()
+    if not events:
+        return await inter.response.send_message("❌ No events available.", ephemeral=True)
 
-    rows = db_get_events()
-    if not rows:
-        return await inter.response.send_message("📭 No events available.", ephemeral=True)
-
-class PickEvent(Select):
-    def __init__(self):
-        super().__init__(
-            placeholder="Select event to edit",
-            options=[
-                discord.SelectOption(
-                    label=f"{eid}: {name}",
-                    description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                    value=str(eid)
-                )
-                for eid, name, dt, rem in rows
-            ]
+    options = [
+        discord.SelectOption(
+            label=f"{name} ({dt})",
+            value=str(event_id)
         )
+        for event_id, name, dt, rem in events
+    ]
 
-    async def callback(self, inter2):
-        await inter2.response.defer(ephemeral=True)
+    select = Select(
+        placeholder="Select an event to edit",
+        options=options
+    )
 
-        eid = int(self.values[0])
+    async def select_callback(i: discord.Interaction):
+        event_id = int(select.values[0])
+        event = next(e for e in events if e[0] == event_id)
 
-        class EditView(View):
-            @discord.ui.button(label="Edit Name", style=discord.ButtonStyle.primary)
-            async def edit_name(self, btn, ix):
-                bot.active_edit = (ix.user.id, eid, "name")
-                await ix.response.send_message("Send new name in chat.", ephemeral=True)
+        _, old_name, old_dt, old_rem = event
 
-            @discord.ui.button(label="Edit Time", style=discord.ButtonStyle.secondary)
-            async def edit_time(self, btn, ix):
-                bot.active_edit = (ix.user.id, eid, "time")
-                await ix.response.send_message("Send new datetime in chat.", ephemeral=True)
+        class EditEventModal(Modal, title="Edit Event"):
+            name = TextInput(label="Event Name", default=old_name)
+            datetime = TextInput(label="Date & Time (YYYY-MM-DD HH:MM)", default=old_dt)
+            reminder = TextInput(label="Reminder (hours before)", default=str(old_rem))
 
-            @discord.ui.button(label="Edit Reminder", style=discord.ButtonStyle.success)
-            async def edit_rem(self, btn, ix):
-                bot.active_edit = (ix.user.id, eid, "rem")
-                await ix.response.send_message("Send new reminder (minutes or 'no').", ephemeral=True)
+            async def on_submit(self, modal_inter: discord.Interaction):
+                db_update_event(
+                    event_id,
+                    name=str(self.name),
+                    dt=str(self.datetime),
+                    reminder=int(self.reminder)
+                )
+                await modal_inter.response.send_message(
+                    "✅ Event updated successfully.",
+                    ephemeral=True
+                )
 
-        await inter2.followup.send(
-            "Choose what to edit:",
-            view=EditView(),
+        await i.response.send_modal(EditEventModal())
+
+    select.callback = select_callback
+    view = View()
+    view.add_item(select)
+
+    await inter.response.send_message(
+        "Select an event to edit:",
+        view=view,
+        ephemeral=True
+    )
+
+
+
+
+@bot.tree.command(name="removeevent", description="Remove an existing event")
+async def removeevent(inter: discord.Interaction):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    events = db_get_events()
+    if not events:
+        return await inter.response.send_message("❌ No events available.", ephemeral=True)
+
+    options = [
+        discord.SelectOption(
+            label=f"{name} ({dt})",
+            value=str(event_id)
+        )
+        for event_id, name, dt, rem in events
+    ]
+
+    select = Select(
+        placeholder="Select an event to remove",
+        options=options
+    )
+
+    async def select_callback(i: discord.Interaction):
+        event_id = int(select.values[0])
+        db_delete_event(event_id)
+        await i.response.send_message(
+            "🗑️ Event removed successfully.",
             ephemeral=True
         )
 
+    select.callback = select_callback
+    view = View()
+    view.add_item(select)
 
+    await inter.response.send_message(
+        "Select an event to remove:",
+        view=view,
+        ephemeral=True
+    )
 
-@bot.tree.command(name="removeevent", description="Remove a custom event")
-async def removeevent(inter):
-    if not has_admin(inter):
-        return await inter.response.send_message("❌ No permission.", ephemeral=True)
-
-    rows = db_get_events()
-    if not rows:
-        return await inter.response.send_message("📭 No events available.", ephemeral=True)
-
-class PickRemove(Select):
-    def __init__(self):
-        super().__init__(
-            placeholder="Select event to remove",
-            options=[
-                discord.SelectOption(
-                    label=f"{eid}: {name}",
-                    description=datetime.fromisoformat(dt).strftime("%d-%m %H:%M"),
-                    value=str(eid)
-                )
-                for eid, name, dt, rem in rows
-            ]
-        )
-
-    async def callback(self, inter2):
-        await inter2.response.defer(ephemeral=True)
-
-        db_delete_event(int(self.values[0]))
-
-        await inter2.followup.send(
-            "🗑 Event removed.",
-            ephemeral=True
-        )
 
 # ============================================================
 # ABYSS CONFIG COMMAND
@@ -790,6 +800,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
