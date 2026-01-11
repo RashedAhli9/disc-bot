@@ -507,24 +507,27 @@ async def editevent(inter: discord.Interaction):
 
         _, old_name, old_dt, old_rem = event
 
-        class EditEventModal(Modal, title="Edit Event"):
+               class EditEventModal(Modal, title="Edit Event"):
             name = TextInput(label="Event Name", default=old_name)
             datetime = TextInput(
                 label="Date & Time (YYYY-MM-DD HH:MM)",
                 default=old_dt.replace("T", " ")[:16]
             )
-            reminder = TextInput(label="Reminder (hours before)", default=str(old_rem))
+            reminder = TextInput(
+                label="Reminder (hours before)",
+                default=str(old_rem)
+            )
 
             async def on_submit(self, modal_inter: discord.Interaction):
                 try:
-                    dt_str = str(self.datetime).strip()
+                    dt_str = self.datetime.value.strip()
                     datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
 
-                    rem = int(str(self.reminder).strip())
+                    rem = int(self.reminder.value.strip())
 
                     db_update_event(
                         event_id,
-                        name=str(self.name).strip(),
+                        name=self.name.value.strip(),
                         dt=dt_str,
                         reminder=rem
                     )
@@ -811,6 +814,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
