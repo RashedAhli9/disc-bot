@@ -37,6 +37,7 @@ from discord.ui import View, Select, Button, Modal, TextInput
 import io
 import zipfile
 import asyncio
+import aiohttp
 
 # ============================================================
 # GLOBAL CONFIG
@@ -289,66 +290,80 @@ async def restorebackup(inter):
     if not files:
         return await inter.response.send_message("❌ No backups found.", ephemeral=True)
 
+    await inter.response.defer(ephemeral=True)  # ✅ CRITICAL
+
     select = Select(
-        placeholder="Select backup to restore",
-        options=[discord.SelectOption(label=f, value=f) for f in files[:MAX_BACKUPS]]
-    )
-async def cb(i):
-    path = os.path.join(BACKUP_DIR, select.values[0])
-
-    with zipfile.ZipFile(path, "r") as z:
-        z.extractall(".")
-
-    await i.response.send_message(
-        f"♻️ Restored `{select.values[0]}`. Restarting bot...",
-        ephemeral=True
+        placeholder="Select a backup to restore",
+        options=[discord.SelectOption(label=f, value=f) for f in files]
     )
 
-    # Give Discord time to send the response
-    await asyncio.sleep(2)
+    async def cb(i):
+        await i.response.defer(ephemeral=True)
 
-    # Clean shutdown → Koyeb will restart container
-    print("🔁 Restarting after restore...")
-    os._exit(0)
+        path = os.path.join(BACKUP_DIR, select.values[0])
 
+        with zipfile.ZipFile(path, "r") as z:
+            z.extractall(".")
+
+        await i.followup.send(
+            f"♻️ Restored `{select.values[0]}`. Restarting bot...",
+            ephemeral=True
+        )
+
+        await asyncio.sleep(2)
+        os._exit(0)  # auto-restart on Koyeb
 
     select.callback = cb
-    view = View()
+    view = View(timeout=60)
     view.add_item(select)
 
-    await inter.response.send_message(
-        "Choose a backup:",
-        view=view,
-        ephemeral=True
-    )
+    await inter.followup.send("Choose a backup to restore:", view=view, ephemeral=True)
+
 # ============================================================
 # ON READY
 # ============================================================
 
+
+@tasks.loop(minutes=5)
+async def self_ping():
+    try:
+        url = os.getenv("KOYEB_PUBLIC_URL")
+        if not url:
+            return
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                pass
+    except Exception as e:
+        print("[Self Ping Error]", e)
+
+@bot.event
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+
+    # Sync commands once
     try:
         synced = await bot.tree.sync()
         print("Synced", len(synced))
     except Exception as e:
         print("Sync failed:", e)
 
-    abyss_reminder_loop.start()
-    custom_event_loop.start()
+    # ✅ START SELF-PING (CRITICAL)
+    if not self_ping.is_running():
+        self_ping.start()
+
+    # ✅ SAFE LOOP STARTS
+    if not abyss_reminder_loop.is_running():
+        abyss_reminder_loop.start()
+
+    if not custom_event_loop.is_running():
+        custom_event_loop.start()
 
     ch = bot.get_channel(update_channel_id)
     if ch:
         await ch.send("🤖 Bot restarted successfully.")
-@bot.event
-async def on_disconnect():
-    try:
-        session = bot.http._HTTPClient__session
-        if session and not session.closed:
-            await session.close()
-            print("🔌 HTTP session closed cleanly.")
-    except Exception as e:
-        print("⚠️ Failed to close HTTP session:", e)
+
 
 # ============================================================
 # WEEKLY EVENTS
@@ -775,6 +790,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
