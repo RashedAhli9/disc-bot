@@ -50,7 +50,8 @@ ROLE_ID = 1413532222396301322
 BACKUP_CHANNEL_ID = 1444604637377204295
 
 ABYSS_CONFIG_FILE = "abyss_config.json"
-DB = "events.db"
+DB = os.path.abspath("events.db")
+
 
 BACKUP_DIR = "backups"
 MAX_BACKUPS = 10
@@ -292,15 +293,24 @@ async def restorebackup(inter):
         placeholder="Select backup to restore",
         options=[discord.SelectOption(label=f, value=f) for f in files[:MAX_BACKUPS]]
     )
+async def cb(i):
+    path = os.path.join(BACKUP_DIR, select.values[0])
 
-    async def cb(i):
-        path = os.path.join(BACKUP_DIR, select.values[0])
-        with zipfile.ZipFile(path, "r") as z:
-            z.extractall(".")
-        await i.response.send_message(
-            f"♻️ Restored `{select.values[0]}`. Restart the bot.",
-            ephemeral=True
-        )
+    with zipfile.ZipFile(path, "r") as z:
+        z.extractall(".")
+
+    await i.response.send_message(
+        f"♻️ Restored `{select.values[0]}`. Restarting bot...",
+        ephemeral=True
+    )
+
+    # Give Discord time to send the response
+    await asyncio.sleep(2)
+
+    # Clean shutdown → Koyeb will restart container
+    print("🔁 Restarting after restore...")
+    os._exit(0)
+
 
     select.callback = cb
     view = View()
@@ -765,6 +775,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
