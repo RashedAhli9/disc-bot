@@ -449,7 +449,6 @@ async def kvkevent(inter):
 # ============================================================
 # ADD EVENT MODAL
 # ============================================================
-
 class AddEventModal(Modal, title="➕ Add Event"):
     name = TextInput(label="Event Name", placeholder="e.g. Pass 1 Opens")
     dt_input = TextInput(
@@ -473,7 +472,19 @@ class AddEventModal(Modal, title="➕ Add Event"):
                 ephemeral=True
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"❌ Error: {e}",
+                ephemeral=True
+            )
+
+
+@bot.tree.command(name="addevent", description="Add a custom event")
+async def addevent(inter: discord.Interaction):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    await inter.response.send_modal(AddEventModal())
+
 
 # ============================================================
 # ADD / EDIT / REMOVE EVENT COMMANDS
@@ -825,6 +836,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
