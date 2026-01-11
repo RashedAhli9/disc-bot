@@ -507,34 +507,47 @@ async def editevent(inter: discord.Interaction):
 
         _, old_name, old_dt, old_rem = event
 
-        class EditEventModal(Modal, title="Edit Event"):
-            name = TextInput(label="Event Name", default=old_name)
-            datetime = TextInput(label="Date & Time (YYYY-MM-DD HH:MM)", default=old_dt)
-            reminder = TextInput(label="Reminder (hours before)", default=str(old_rem))
-
-            async def on_submit(self, modal_inter: discord.Interaction):
-                db_update_event(
-                    event_id,
-                    name=str(self.name),
-                    dt=str(self.datetime),
-                    reminder=int(self.reminder)
-                )
-                await modal_inter.response.send_message(
-                    "✅ Event updated successfully.",
-                    ephemeral=True
-                )
-
-        await i.response.send_modal(EditEventModal())
-
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-
-    await inter.response.send_message(
-        "Select an event to edit:",
-        view=view,
-        ephemeral=True
+       class EditEventModal(Modal, title="Edit Event"):
+    name = TextInput(label="Event Name", default=old_name)
+    datetime = TextInput(
+        label="Date & Time (YYYY-MM-DD HH:MM)",
+        default=old_dt.replace("T", " ")[:16]
     )
+    reminder = TextInput(label="Reminder (hours before)", default=str(old_rem))
+
+    async def on_submit(self, modal_inter: discord.Interaction):
+        try:
+            # Validate datetime
+            dt_str = str(self.datetime).strip()
+            datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+
+            # Validate reminder
+            rem = int(str(self.reminder).strip())
+
+            db_update_event(
+                event_id,
+                name=str(self.name).strip(),
+                dt=dt_str,
+                reminder=rem
+            )
+
+            await modal_inter.response.send_message(
+                "✅ Event updated successfully.",
+                ephemeral=True
+            )
+
+        except ValueError:
+            await modal_inter.response.send_message(
+                "❌ Invalid date or reminder format.\nUse `YYYY-MM-DD HH:MM` and a number.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            print("[EditEvent Error]", e)
+            await modal_inter.response.send_message(
+                "❌ Failed to update event.",
+                ephemeral=True
+            )
 
 
 
@@ -800,6 +813,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
