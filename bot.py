@@ -784,20 +784,26 @@ async def custom_event_loop():
         event_id, name, dt, rem = ev
         dt_obj = datetime.fromisoformat(dt)
 
+        # Delete events 1 hour after they pass
         if now >= dt_obj + timedelta(hours=1):
             db_delete_event(event_id)
             continue
 
+        # Reminder logic (robust, restart-safe)
         if rem > 0:
-            rtime = dt_obj - timedelta(minutes=rem)
-            key = (event_id, rtime.isoformat())
-            if rtime <= now < rtime + timedelta(minutes=1):
-                if key not in sent_custom:
-                    await ch.send(
-                        f"⏰ Reminder: **{name}** in {rem} minutes! <t:{int(dt_obj.timestamp())}:F>"
-                    )
-                    sent_custom.add(key)
+            rtime = (dt_obj - timedelta(minutes=rem)).replace(
+                second=0,
+                microsecond=0
+            )
 
+            if now >= rtime and event_id not in sent_custom:
+                await ch.send(
+                    f"⏰ Reminder: **{name}** in {rem} minutes! "
+                    f"<t:{int(dt_obj.timestamp())}:F>"
+                )
+                sent_custom.add(event_id)
+
+    # Prevent memory growth
     if len(sent_custom) > 300:
         sent_custom.clear()
 
@@ -836,6 +842,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
