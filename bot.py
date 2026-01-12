@@ -461,31 +461,35 @@ class AddEventModal(Modal, title="➕ Add Event"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
 
-        try:
-            dt = parse_datetime(self.dt_input.value)
-            rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
+    try:
+        dt = parse_datetime(self.dt_input.value)
 
-            db_add_event(
-                self.name.value.strip(),
-                dt.isoformat(),
-                rem
-            )
+        # Round event time to the nearest minute
+        dt = dt.replace(second=0, microsecond=0)
 
-            await interaction.followup.send(
-                f"✅ **Event Added**\n"
-                f"**{self.name.value}**\n"
-                f"<t:{int(dt.timestamp())}:F>",
-                ephemeral=True
-            )
+        rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
 
-        except Exception as e:
-            print("[AddEvent Error]", e)
-            await interaction.followup.send(
-                "❌ Failed to add event.",
-                ephemeral=True
-            )
+        db_add_event(
+            self.name.value.strip(),
+            dt.isoformat(),
+            rem
+        )
+
+        await interaction.followup.send(
+            f"✅ **Event Added**\n"
+            f"**{self.name.value}**\n"
+            f"<t:{int(dt.timestamp())}:F>",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            "❌ Failed to add event.",
+            ephemeral=True
+        )
+)
 
 
 
@@ -543,7 +547,11 @@ async def editevent(inter: discord.Interaction):
             async def on_submit(self, modal_inter: discord.Interaction):
                 try:
                     dt_str = self.datetime.value.strip()
-                    datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+
+                    # Parse and round to minute precision
+                    dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+                    dt_obj = dt_obj.replace(second=0, microsecond=0)
+                    dt_str = dt_obj.isoformat(timespec="minutes")
 
                     rem = int(self.reminder.value.strip())
 
@@ -571,6 +579,7 @@ async def editevent(inter: discord.Interaction):
                         "❌ Failed to update event.",
                         ephemeral=True
                     )
+
 
         await i.response.send_modal(EditEventModal())
 
@@ -853,6 +862,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
