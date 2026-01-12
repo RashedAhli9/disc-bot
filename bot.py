@@ -450,7 +450,10 @@ async def kvkevent(inter):
 # ADD EVENT MODAL
 # ============================================================
 class AddEventModal(Modal, title="➕ Add Event"):
-    name = TextInput(label="Event Name", placeholder="e.g. Pass 1 Opens")
+    name = TextInput(
+        label="Event Name",
+        placeholder="e.g. Pass 1 Opens"
+    )
     dt_input = TextInput(
         label="Datetime (UTC)",
         placeholder="DD-MM-YYYY HH:MM | 1d 2h | 14utc"
@@ -460,36 +463,40 @@ class AddEventModal(Modal, title="➕ Add Event"):
         placeholder="15"
     )
 
-   async def on_submit(self, interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
 
-    try:
-        dt = parse_datetime(self.dt_input.value)
+        try:
+            dt = parse_datetime(self.dt_input.value)
 
-        # Round event time to the nearest minute
-        dt = dt.replace(second=0, microsecond=0)
+            # Round event time to minute precision
+            dt = dt.replace(second=0, microsecond=0)
 
-        rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
+            rem = (
+                0
+                if self.reminder.value.lower() == "no"
+                else int(self.reminder.value)
+            )
 
-        db_add_event(
-            self.name.value.strip(),
-            dt.isoformat(),
-            rem
-        )
+            db_add_event(
+                self.name.value.strip(),
+                dt.isoformat(),
+                rem
+            )
 
-        await interaction.followup.send(
-            f"✅ **Event Added**\n"
-            f"**{self.name.value}**\n"
-            f"<t:{int(dt.timestamp())}:F>",
-            ephemeral=True
-        )
+            await interaction.followup.send(
+                f"✅ **Event Added**\n"
+                f"**{self.name.value}**\n"
+                f"<t:{int(dt.timestamp())}:F>",
+                ephemeral=True
+            )
 
-    except Exception as e:
-        await interaction.followup.send(
-            "❌ Failed to add event.",
-            ephemeral=True
-        )
-
+        except Exception as e:
+            print("[AddEvent Error]", e)
+            await interaction.followup.send(
+                "❌ Failed to add event.",
+                ephemeral=True
+            )
 
 @bot.tree.command(name="addevent", description="Add a custom event")
 async def addevent(inter: discord.Interaction):
@@ -860,6 +867,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
