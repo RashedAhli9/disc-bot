@@ -460,7 +460,7 @@ class AddEventModal(Modal, title="➕ Add Event"):
         placeholder="15"
     )
 
-    async def on_submit(self, interaction: discord.Interaction):
+   async def on_submit(self, interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -489,8 +489,6 @@ class AddEventModal(Modal, title="➕ Add Event"):
             "❌ Failed to add event.",
             ephemeral=True
         )
-)
-
 
 
 @bot.tree.command(name="addevent", description="Add a custom event")
@@ -862,6 +860,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
