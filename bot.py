@@ -461,21 +461,32 @@ class AddEventModal(Modal, title="➕ Add Event"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         try:
             dt = parse_datetime(self.dt_input.value)
             rem = 0 if self.reminder.value.lower() == "no" else int(self.reminder.value)
 
-            db_add_event(self.name.value, dt.isoformat(), rem)
+            db_add_event(
+                self.name.value.strip(),
+                dt.isoformat(),
+                rem
+            )
 
-            await interaction.response.send_message(
-                f"✅ **Event Added**\n**{self.name.value}**\n<t:{int(dt.timestamp())}:F>",
+            await interaction.followup.send(
+                f"✅ **Event Added**\n"
+                f"**{self.name.value}**\n"
+                f"<t:{int(dt.timestamp())}:F>",
                 ephemeral=True
             )
+
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Error: {e}",
+            print("[AddEvent Error]", e)
+            await interaction.followup.send(
+                "❌ Failed to add event.",
                 ephemeral=True
             )
+
 
 
 @bot.tree.command(name="addevent", description="Add a custom event")
@@ -842,6 +853,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
