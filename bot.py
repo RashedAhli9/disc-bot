@@ -38,6 +38,7 @@ import io
 import zipfile
 import asyncio
 import aiohttp
+import shutil
 
 # ============================================================
 # GLOBAL CONFIG
@@ -51,9 +52,12 @@ ROLE_ID = 1413532222396301322
 BACKUP_CHANNEL_ID = 1444604637377204295
 
 ABYSS_CONFIG_FILE = "abyss_config.json"
-DB = os.path.abspath("events.db")
+DB = "/data/events.db"
 
-
+# One-time DB migration (repo -> Railway volume)
+if not os.path.exists(DB) and os.path.exists("events.db"):
+    shutil.copy("events.db", DB)
+    
 BACKUP_DIR = "backups"
 MAX_BACKUPS = 10
 os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -867,6 +871,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
