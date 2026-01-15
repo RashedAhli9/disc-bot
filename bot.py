@@ -14,7 +14,9 @@ def home():
 
 @app.route("/health")
 def health():
+    print("[HEALTH CHECK] ping received")
     return "healthy", 200
+
 
 def run_flask():
     port = int(os.environ.get("PORT", 8000))
@@ -869,6 +871,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
