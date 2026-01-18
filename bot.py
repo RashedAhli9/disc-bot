@@ -442,6 +442,24 @@ async def weeklyevent(inter):
 # ============================================================
 # KVK / CUSTOM EVENTS DISPLAY
 # ============================================================
+@bot.tree.command(name="checkdb", description="check DB")
+async def dbdump(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message(
+            "Owner only.", ephemeral=True
+        )
+
+    rows = db_get_events()
+    if not rows:
+        return await interaction.response.send_message(
+            "DB is empty.", ephemeral=True
+        )
+
+    msg = "\n".join(str(r) for r in rows)
+    await interaction.response.send_message(
+        f"```{msg}```", ephemeral=True
+    )
+
 
 @bot.tree.command(name="kvkevent", description="Show upcoming custom scheduled events")
 async def kvkevent(inter):
@@ -888,6 +906,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
