@@ -73,14 +73,26 @@ def has_admin(inter):
     return any(r.permissions.administrator for r in inter.user.roles)
 
 def parse_datetime(input_str):
+    input_str = input_str.strip()
+    now = datetime.utcnow()
+
+    # Case 1: full date + HH:MM
     try:
         return datetime.strptime(input_str, "%d-%m-%Y %H:%M")
     except:
         pass
 
-    now = datetime.utcnow()
-    d = h = m = 0
+    # Case 2: full date + HHutc
+    if "-" in input_str and "utc" in input_str:
+        date_part, time_part = input_str.split()
+        base_date = datetime.strptime(date_part, "%d-%m-%Y")
+        hour = int(time_part.replace("utc", ""))
+        return base_date.replace(
+            hour=hour, minute=0, second=0, microsecond=0
+        )
 
+    # Relative parsing
+    d = h = m = 0
     for part in input_str.lower().split():
         if part.endswith("d"):
             d = int(part[:-1])
@@ -88,11 +100,14 @@ def parse_datetime(input_str):
             h = int(part[:-1])
         elif part.endswith("m"):
             m = int(part[:-1])
-        elif part.endswith("utc") and "-" not in input_str:
-            hh = int(part.replace("utc", ""))
-            return now.replace(hour=hh, minute=0, second=0, microsecond=0)
+        elif part.endswith("utc"):
+            hour = int(part.replace("utc", ""))
+            return now.replace(
+                hour=hour, minute=0, second=0, microsecond=0
+            )
 
     return now + timedelta(days=d, hours=h, minutes=m)
+
 
 def day_name(i):
     return ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i]
@@ -873,6 +888,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
