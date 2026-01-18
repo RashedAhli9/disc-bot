@@ -56,15 +56,6 @@ BACKUP_CHANNEL_ID = 1444604637377204295
 
 ABYSS_CONFIG_FILE = "abyss_config.json"
 DB = "/data/events.db"
-# ---- STARTUP DB CHECK ----
-print("[STARTUP] DB path:", DB)
-print("[STARTUP] DB exists:", os.path.exists(DB))
-
-if os.path.exists(DB):
-    print("[STARTUP] DB size (bytes):", os.path.getsize(DB))
-else:
-    print("[STARTUP] DB will be created on first write")
-# --------------------------
 
 
     
@@ -97,7 +88,7 @@ def parse_datetime(input_str):
             h = int(part[:-1])
         elif part.endswith("m"):
             m = int(part[:-1])
-        elif part.endswith("utc"):
+        elif part.endswith("utc") and "-" not in input_str:
             hh = int(part.replace("utc", ""))
             return now.replace(hour=hh, minute=0, second=0, microsecond=0)
 
@@ -882,6 +873,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
