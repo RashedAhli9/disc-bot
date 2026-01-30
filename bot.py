@@ -53,7 +53,7 @@ update_channel_id = 1332676174995918859
 OWNER_ID = 1084884048884797490
 ROLE_ID = 1413532222396301322
 BACKUP_CHANNEL_ID = 1444604637377204295
-
+ABYSS_ROLE_ID = 1413532222396301322
 ABYSS_CONFIG_FILE = "abyss_config.json"
 DB = "/data/events.db"
 
@@ -117,6 +117,27 @@ def pretty_days(days):
 
 def pretty_hours(hours):
     return ", ".join(f"{h:02}:00" for h in sorted(hours))
+
+
+async def dm_abyss_role(bot: discord.Client, embed: discord.Embed):
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        print("[ABYSS] Guild not found")
+        return
+
+    role = guild.get_role(ABYSS_ROLE_ID)
+    if not role:
+        print("[ABYSS] Abyss role not found")
+        return
+
+    for member in role.members:
+        try:
+            await member.send(embed=embed)
+        except discord.Forbidden:
+            # User has DMs disabled
+            continue
+        except discord.HTTPException as e:
+            print(f"[ABYSS] DM failed for {member.id}: {e}")
 
 # ============================================================
 # BACKUP SYSTEM
@@ -638,6 +659,42 @@ async def editevent(inter: discord.Interaction):
     )
 
 
+@bot.tree.command(name="addrole", description="Get the Abyss role")
+async def addrole(interaction: discord.Interaction):
+    role = interaction.guild.get_role(ABYSS_ROLE_ID)
+    if not role:
+        return await interaction.response.send_message(
+            "❌ Abyss role not found.", ephemeral=True
+        )
+
+    if role in interaction.user.roles:
+        return await interaction.response.send_message(
+            "⚠️ You already have the Abyss role.", ephemeral=True
+        )
+
+    await interaction.user.add_roles(role)
+    await interaction.response.send_message(
+        "✅ Abyss role added! You will now receive Abyss reminders.",
+        ephemeral=True
+    )
+@bot.tree.command(name="removerole", description="Remove the Abyss role")
+async def removerole(interaction: discord.Interaction):
+    role = interaction.guild.get_role(ABYSS_ROLE_ID)
+    if not role:
+        return await interaction.response.send_message(
+            "❌ Abyss role not found.", ephemeral=True
+        )
+
+    if role not in interaction.user.roles:
+        return await interaction.response.send_message(
+            "⚠️ You don’t have the Abyss role.", ephemeral=True
+        )
+
+    await interaction.user.remove_roles(role)
+    await interaction.response.send_message(
+        "✅ Abyss role removed. You will no longer receive Abyss reminders.",
+        ephemeral=True
+    )
 
 @bot.tree.command(name="removeevent", description="Remove an existing event")
 async def removeevent(inter: discord.Interaction):
@@ -824,15 +881,23 @@ async def abyss_reminder_loop():
     if now.weekday() not in ABYSS_DAYS:
         return
 
-    ch = bot.get_channel(channel_id)
-    if not ch:
-        return
-
+    # Abyss start reminder
     if now.hour in REMINDER_HOURS and now.minute == 0:
-        await ch.send(f"<@&{ROLE_ID}>, Abyss starts in 15 minutes!")
+        embed = discord.Embed(
+            title="🕒 Abyss Reminder",
+            description="Abyss starts in **15 minutes**!",
+            color=0xE74C3C
+        )
+        await dm_abyss_role(bot, embed)
 
+    # Round 2 reminder
     if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
-        await ch.send(f"<@&{ROLE_ID}>, Round 2 in 15 minutes!")
+        embed = discord.Embed(
+            title="🕒 Abyss Reminder",
+            description="Round 2 starts in **15 minutes**!",
+            color=0xF1C40F
+        )
+        await dm_abyss_role(bot, embed)
 
 sent_custom = set()
 
@@ -906,6 +971,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
