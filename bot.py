@@ -119,35 +119,22 @@ def pretty_hours(hours):
     return ", ".join(f"{h:02}:00" for h in sorted(hours))
 
 
-async def dm_abyss_role(bot: discord.Client, embed: discord.Embed):
-    guild = bot.get_guild(GUILD_ID)
-    print("[DM DEBUG] guild:", guild)
-
-    if not guild:
-        print("[DM DEBUG] ❌ Guild not found")
-        return
-
+async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
     role = guild.get_role(ABYSS_ROLE_ID)
-    print("[DM DEBUG] role:", role)
-
     if not role:
-        print("[DM DEBUG] ❌ Role not found")
+        print("[ABYSS] Role not found in guild:", guild.id)
         return
 
-    sent = 0
     async for member in guild.fetch_members(limit=None):
         if role in member.roles:
-            print("[DM DEBUG] trying DM ->", member.name)
             try:
                 dm = await member.create_dm()
                 await dm.send(embed=embed)
-                sent += 1
             except discord.Forbidden:
-                print("[DM DEBUG] ❌ DMs blocked for", member.name)
+                continue
             except Exception as e:
-                print("[DM DEBUG] ❌ DM error", member.name, e)
+                print("[ABYSS] DM error:", e)
 
-    print(f"[DM DEBUG] sent to {sent} members")
 
 
 # ============================================================
@@ -594,19 +581,17 @@ async def testdm(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="🧪 Abyss DM Test",
-        description=(
-            "This is a **test DM** for Abyss reminders.\n\n"
-            "If you received this message, DM delivery is working ✅"
-        ),
+        description="If you received this, Abyss DMs are working ✅",
         color=0x2ECC71
     )
 
     await interaction.response.send_message(
-        "📨 Sending test DMs to all Abyss role members…",
+        "📨 Sending test DMs to Abyss role members…",
         ephemeral=True
     )
 
-    await dm_abyss_role(bot, embed)
+    await dm_abyss_role(interaction.guild, embed)
+
 
 
 @bot.tree.command(name="editevent", description="Edit an existing event")
@@ -927,7 +912,10 @@ async def abyss_reminder_loop():
             description="Abyss starts in **15 minutes**!",
             color=0xE74C3C
         )
-        await dm_abyss_role(bot, embed)
+        guild = bot.get_guild(channel_id and bot.get_channel(channel_id).guild.id)
+        if guild:
+            await dm_abyss_role(guild, embed)
+
 
     # Round 2 reminder
     if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
@@ -1010,6 +998,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
