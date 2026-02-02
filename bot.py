@@ -130,14 +130,16 @@ async def dm_abyss_role(bot: discord.Client, embed: discord.Embed):
         print("[ABYSS] Abyss role not found")
         return
 
-    for member in role.members:
-        try:
-            await member.send(embed=embed)
-        except discord.Forbidden:
-            # User has DMs disabled
-            continue
-        except discord.HTTPException as e:
-            print(f"[ABYSS] DM failed for {member.id}: {e}")
+    # FORCE fetch members (not cache)
+    async for member in guild.fetch_members(limit=None):
+        if role in member.roles:
+            try:
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                continue
+            except discord.HTTPException as e:
+                print(f"[ABYSS] DM failed for {member.id}: {e}")
+
 
 # ============================================================
 # BACKUP SYSTEM
@@ -285,6 +287,10 @@ ROUND2_ENABLED = cfg["round2"]
 # ============================================================
 
 intents = discord.Intents.default()
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.active_edit = None
@@ -569,6 +575,30 @@ async def addevent(inter: discord.Interaction):
 # ============================================================
 # ADD / EDIT / REMOVE EVENT COMMANDS
 # ============================================================
+
+@bot.tree.command(name="testdm", description="Owner-only: test Abyss role DMs")
+async def testdm(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message(
+            "❌ Owner only.", ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="🧪 Abyss DM Test",
+        description=(
+            "This is a **test DM** for Abyss reminders.\n\n"
+            "If you received this message, DM delivery is working ✅"
+        ),
+        color=0x2ECC71
+    )
+
+    await interaction.response.send_message(
+        "📨 Sending test DMs to all Abyss role members…",
+        ephemeral=True
+    )
+
+    await dm_abyss_role(bot, embed)
+
 
 @bot.tree.command(name="editevent", description="Edit an existing event")
 async def editevent(inter: discord.Interaction):
@@ -971,6 +1001,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
