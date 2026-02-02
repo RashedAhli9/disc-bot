@@ -121,24 +121,33 @@ def pretty_hours(hours):
 
 async def dm_abyss_role(bot: discord.Client, embed: discord.Embed):
     guild = bot.get_guild(GUILD_ID)
+    print("[DM DEBUG] guild:", guild)
+
     if not guild:
-        print("[ABYSS] Guild not found")
+        print("[DM DEBUG] ❌ Guild not found")
         return
 
     role = guild.get_role(ABYSS_ROLE_ID)
+    print("[DM DEBUG] role:", role)
+
     if not role:
-        print("[ABYSS] Abyss role not found")
+        print("[DM DEBUG] ❌ Role not found")
         return
 
-    # FORCE fetch members (not cache)
+    sent = 0
     async for member in guild.fetch_members(limit=None):
         if role in member.roles:
+            print("[DM DEBUG] trying DM ->", member.name)
             try:
-                await member.send(embed=embed)
+                dm = await member.create_dm()
+                await dm.send(embed=embed)
+                sent += 1
             except discord.Forbidden:
-                continue
-            except discord.HTTPException as e:
-                print(f"[ABYSS] DM failed for {member.id}: {e}")
+                print("[DM DEBUG] ❌ DMs blocked for", member.name)
+            except Exception as e:
+                print("[DM DEBUG] ❌ DM error", member.name, e)
+
+    print(f"[DM DEBUG] sent to {sent} members")
 
 
 # ============================================================
@@ -1001,6 +1010,7 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
 
 
 
