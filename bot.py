@@ -125,15 +125,21 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
         print("[ABYSS] Role not found in guild:", guild.id)
         return
 
+    count = 0
     async for member in guild.fetch_members(limit=None):
         if role in member.roles:
             try:
                 dm = await member.create_dm()
                 await dm.send(embed=embed)
+                count += 1
+                # Rate limiting - wait 0.5 seconds between DMs to prevent hitting rate limits
+                await asyncio.sleep(0.5)
             except discord.Forbidden:
                 continue
             except Exception as e:
                 print("[ABYSS] DM error:", e)
+    
+    print(f"[ABYSS] Sent DM to {count} members with role {ABYSS_ROLE_ID}")
 
 
 
@@ -383,12 +389,19 @@ async def self_ping():
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
+    # Set bot status/activity
+    activity = discord.Activity(
+        type=discord.ActivityType.watching,
+        name="Abyss events ⚔️"
+    )
+    await bot.change_presence(activity=activity)
+
     # Sync commands once
     try:
         synced = await bot.tree.sync()
-        print("Synced", len(synced))
+        print(f"✅ Synced {len(synced)} commands")
     except Exception as e:
-        print("Sync failed:", e)
+        print(f"❌ Command sync failed: {e}")
 
     # ✅ START SELF-PING (CRITICAL)
     if not self_ping.is_running():
@@ -404,6 +417,41 @@ async def on_ready():
     ch = bot.get_channel(update_channel_id)
     if ch:
         await ch.send("🤖 Bot restarted successfully.")
+
+
+# ============================================================
+# HELP COMMAND
+# ============================================================
+
+@bot.tree.command(name="help", description="Show all available commands")
+async def help_cmd(inter):
+    embed = discord.Embed(
+        title="📖 Bot Commands",
+        description="All available commands for Abyss management",
+        color=0x3498db
+    )
+    
+    embed.add_field(
+        name="👤 Role Management",
+        value="`/addrole` - Get Abyss reminders\n`/removerole` - Stop Abyss reminders",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📅 Events",
+        value="`/weeklyevent` - Show current weekly events\n`/kvkevent` - Show custom events",
+        inline=False
+    )
+    
+    if inter.user.id == OWNER_ID:
+        embed.add_field(
+            name="⚙️ Admin Commands",
+            value="`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now",
+            inline=False
+        )
+    
+    embed.set_footer(text="Use / to see all commands")
+    await inter.response.send_message(embed=embed, ephemeral=True)
 
 
 # ============================================================
@@ -530,6 +578,13 @@ class AddEventModal(Modal, title="➕ Add Event"):
 
             # Round event time to minute precision
             dt = dt.replace(second=0, microsecond=0)
+
+            # Validate event is in the future
+            if dt <= datetime.utcnow():
+                return await interaction.followup.send(
+                    "❌ Event must be in the future!",
+                    ephemeral=True
+                )
 
             rem = (
                 0
@@ -896,71 +951,81 @@ async def abyssconfig(inter):
 
 @tasks.loop(minutes=1)
 async def abyss_reminder_loop():
-    tz = pytz.timezone(MY_TIMEZONE)
-    now = datetime.now(tz)
+    try:
+        tz = pytz.timezone(MY_TIMEZONE)
+        now = datetime.now(tz)
 
-    if now.weekday() not in ABYSS_DAYS:
-        return
+        if now.weekday() not in ABYSS_DAYS:
+            return
 
-    # Abyss start reminder
-    if now.hour in REMINDER_HOURS and now.minute == 0:
-        embed = discord.Embed(
-            title="🕒 Abyss Reminder",
-            description="Abyss starts in **15 minutes**!",
-            color=0xE74C3C
-        )
-        ch = bot.get_channel(channel_id)
-        if ch and ch.guild:
-            await dm_abyss_role(ch.guild, embed)
+        # Abyss start reminder
+        if now.hour in REMINDER_HOURS and now.minute == 0:
+            embed = discord.Embed(
+                title="🕒 Abyss Reminder",
+                description="Abyss starts in **15 minutes**!",
+                color=0xE74C3C
+            )
+            ch = bot.get_channel(channel_id)
+            if ch and ch.guild:
+                await dm_abyss_role(ch.guild, embed)
+            else:
+                print("[ABYSS REMINDER] Warning: Channel not found or no guild")
 
 
-    # Round 2 reminder
-    if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
-        embed = discord.Embed(
-            title="🕒 Abyss Reminder",
-            description="Round 2 starts in **15 minutes**!",
-            color=0xF1C40F
-        )
-        ch = bot.get_channel(channel_id)
-        if ch and ch.guild:
-            await dm_abyss_role(ch.guild, embed)
+        # Round 2 reminder
+        if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
+            embed = discord.Embed(
+                title="🕒 Abyss Reminder",
+                description="Round 2 starts in **15 minutes**!",
+                color=0xF1C40F
+            )
+            ch = bot.get_channel(channel_id)
+            if ch and ch.guild:
+                await dm_abyss_role(ch.guild, embed)
+            else:
+                print("[ABYSS REMINDER] Warning: Channel not found or no guild")
+    except Exception as e:
+        print(f"[ABYSS REMINDER ERROR] {type(e).__name__}: {e}")
 
 sent_custom = set()
 
 @tasks.loop(minutes=1)
 async def custom_event_loop():
-    now = datetime.utcnow().replace(second=0, microsecond=0)
-    ch = bot.get_channel(channel_id)
-    if not ch:
-        return
+    try:
+        now = datetime.utcnow().replace(second=0, microsecond=0)
+        ch = bot.get_channel(channel_id)
+        if not ch:
+            return
 
-    rows = db_get_events()
-    for ev in rows:
-        event_id, name, dt, rem = ev
-        dt_obj = datetime.fromisoformat(dt)
+        rows = db_get_events()
+        for ev in rows:
+            event_id, name, dt, rem = ev
+            dt_obj = datetime.fromisoformat(dt)
 
-        # Delete events 1 hour after they pass
-        if now >= dt_obj + timedelta(hours=1):
-            db_delete_event(event_id)
-            continue
+            # Delete events 1 hour after they pass
+            if now >= dt_obj + timedelta(hours=1):
+                db_delete_event(event_id)
+                continue
 
-        # Reminder logic (robust, restart-safe)
-        if rem > 0:
-            rtime = (dt_obj - timedelta(minutes=rem)).replace(
-                second=0,
-                microsecond=0
-            )
-
-            if now >= rtime and event_id not in sent_custom:
-                await ch.send(
-                    f"⏰ Reminder: **{name}** in {rem} minutes! "
-                    f"<t:{int(dt_obj.timestamp())}:F>"
+            # Reminder logic (robust, restart-safe)
+            if rem > 0:
+                rtime = (dt_obj - timedelta(minutes=rem)).replace(
+                    second=0,
+                    microsecond=0
                 )
-                sent_custom.add(event_id)
 
-    # Prevent memory growth
-    if len(sent_custom) > 300:
-        sent_custom.clear()
+                if now >= rtime and event_id not in sent_custom:
+                    await ch.send(
+                        f"⏰ Reminder: **{name}** in {rem} minutes! "
+                        f"<t:{int(dt_obj.timestamp())}:F>"
+                    )
+                    sent_custom.add(event_id)
+
+        # Prevent memory growth
+        if len(sent_custom) > 300:
+            sent_custom.clear()
+    except Exception as e:
+        print(f"[CUSTOM EVENT LOOP ERROR] {type(e).__name__}: {e}")
 
 # ============================================================
 # SAFE LOGIN (NO bot.run)
