@@ -284,10 +284,8 @@ ROUND2_ENABLED = cfg["round2"]
 
 intents = discord.Intents.default()
 intents.members = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.active_edit = None
 
@@ -381,7 +379,6 @@ async def self_ping():
     except Exception as e:
         print("[Self Ping Error]", e)
 
-@bot.event
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -912,9 +909,9 @@ async def abyss_reminder_loop():
             description="Abyss starts in **15 minutes**!",
             color=0xE74C3C
         )
-        guild = bot.get_guild(channel_id and bot.get_channel(channel_id).guild.id)
-        if guild:
-            await dm_abyss_role(guild, embed)
+        ch = bot.get_channel(channel_id)
+        if ch and ch.guild:
+            await dm_abyss_role(ch.guild, embed)
 
 
     # Round 2 reminder
@@ -924,7 +921,9 @@ async def abyss_reminder_loop():
             description="Round 2 starts in **15 minutes**!",
             color=0xF1C40F
         )
-        await dm_abyss_role(bot, embed)
+        ch = bot.get_channel(channel_id)
+        if ch and ch.guild:
+            await dm_abyss_role(ch.guild, embed)
 
 sent_custom = set()
 
