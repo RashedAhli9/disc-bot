@@ -1016,7 +1016,7 @@ async def custom_event_loop():
 
                 if now >= rtime and event_id not in sent_custom:
                     await ch.send(
-                        f"⏰ Reminder: **{name}** in {rem} minutes! "
+                        f"<@&1412464184746053693> ⏰ Reminder: **{name}** in {rem} minutes! "
                         f"<t:{int(dt_obj.timestamp())}:F>"
                     )
                     sent_custom.add(event_id)
@@ -1062,34 +1062,3 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
