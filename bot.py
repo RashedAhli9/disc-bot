@@ -209,50 +209,52 @@ CACHE_EXPIRY_HOURS = 72  # 3 days
 async def fetch_highest_power(account_id):
     """
     Fetch the HIGHEST POWER from the normal profile page (no date range)
+    Uses the authenticated Call of Stats session
     Returns the highest power value as int, or None if not found
     """
     import re
     
     try:
+        # Use the authenticated session instead of creating a new one
+        session = await get_callofstats_session()
         url = f"https://callofstats.com/lord/{account_id}"
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
-            async with session.get(url, allow_redirects=True) as response:
-                if response.status != 200:
-                    print(f"[HIGHEST POWER] Failed to fetch {url}: {response.status}")
-                    return None
-                
-                html = await response.text()
-                
-                # Try multiple patterns
-                patterns = [
-                    r'Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
-                    r'<span class="subtle">Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
-                    r'Highest Power.*?([0-9,]+)',
-                ]
-                
-                for i, pattern in enumerate(patterns):
-                    match = re.search(pattern, html, re.DOTALL)
-                    if match:
-                        power_str = match.group(1).replace(",", "")
-                        try:
-                            highest_power = int(power_str)
-                            print(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i})")
-                            return highest_power
-                        except Exception as e:
-                            print(f"[HIGHEST POWER] Failed to parse: {e}")
-                
-                # Debug: show section around "Highest Power"
-                idx = html.find("Highest Power")
-                if idx != -1:
-                    debug_html = html[max(0, idx-200):min(len(html), idx+400)]
-                    print(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{debug_html}")
-                else:
-                    print(f"[HIGHEST POWER] 'Highest Power' not found in HTML at all")
-                    # Show first 3000 chars
-                    print(f"[HIGHEST POWER DEBUG] First 3000 chars:\n{html[:3000]}")
-                
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status != 200:
+                print(f"[HIGHEST POWER] Failed to fetch {url}: {response.status}")
                 return None
+            
+            html = await response.text()
+            
+            # Try multiple patterns
+            patterns = [
+                r'Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
+                r'<span class="subtle">Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
+                r'Highest Power.*?([0-9,]+)',
+            ]
+            
+            for i, pattern in enumerate(patterns):
+                match = re.search(pattern, html, re.DOTALL)
+                if match:
+                    power_str = match.group(1).replace(",", "")
+                    try:
+                        highest_power = int(power_str)
+                        print(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i})")
+                        return highest_power
+                    except Exception as e:
+                        print(f"[HIGHEST POWER] Failed to parse: {e}")
+            
+            # Debug: show section around "Highest Power"
+            idx = html.find("Highest Power")
+            if idx != -1:
+                debug_html = html[max(0, idx-200):min(len(html), idx+400)]
+                print(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{debug_html}")
+            else:
+                print(f"[HIGHEST POWER] 'Highest Power' not found in HTML at all")
+                # Show first 3000 chars
+                print(f"[HIGHEST POWER DEBUG] First 3000 chars:\n{html[:3000]}")
+            
+            return None
     
     except Exception as e:
         print(f"[HIGHEST POWER ERROR] {account_id}: {e}")
@@ -294,59 +296,61 @@ async def fetch_highest_power(account_id):
 async def fetch_current_t_kills(account_id):
     """
     Fetch the CURRENT T5-T1 kill totals for a lord (no date range)
+    Uses the authenticated Call of Stats session
     Returns dict: {"t5": 123456, "t4": 234567, ...} or empty dict if not found
     """
     import re
     
     try:
+        # Use the authenticated session instead of creating a new one
+        session = await get_callofstats_session()
         url = f"https://callofstats.com/lord/{account_id}"
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
-            async with session.get(url, allow_redirects=True) as response:
-                if response.status != 200:
-                    print(f"[CURRENT T-KILLS] Failed to fetch {url}: {response.status}")
-                    return {}
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status != 200:
+                print(f"[CURRENT T-KILLS] Failed to fetch {url}: {response.status}")
+                return {}
+            
+            html = await response.text()
+            
+            t_kills = {}
+            
+            # Look for T5 Kills pattern - very flexible
+            for tier in ["T5", "T4", "T3", "T2", "T1"]:
+                # Try multiple patterns
+                patterns = [
+                    f'{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
+                    f'<span class="subtle">{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
+                    f'{tier} Kills.*?([0-9,]+)',
+                ]
                 
-                html = await response.text()
-                
-                t_kills = {}
-                
-                # Look for T5 Kills pattern - very flexible
-                for tier in ["T5", "T4", "T3", "T2", "T1"]:
-                    # Try multiple patterns
-                    patterns = [
-                        f'{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
-                        f'<span class="subtle">{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
-                        f'{tier} Kills.*?([0-9,]+)',
-                    ]
-                    
-                    match = None
-                    for pattern in patterns:
-                        match = re.search(pattern, html, re.DOTALL)
-                        if match:
-                            break
-                    
+                match = None
+                for pattern in patterns:
+                    match = re.search(pattern, html, re.DOTALL)
                     if match:
-                        kills_str = match.group(1).replace(",", "")
-                        try:
-                            t_kills[tier.lower()] = int(kills_str)
-                            print(f"[CURRENT T-KILLS] Parsed {tier}: {kills_str}")
-                        except Exception as e:
-                            print(f"[CURRENT T-KILLS] Failed to parse {tier}: {e}")
-                    else:
-                        print(f"[CURRENT T-KILLS] Pattern not found for {tier}")
-                        # Debug
-                        idx = html.find(f"{tier} Kills")
-                        if idx != -1:
-                            debug_html = html[max(0, idx-100):min(len(html), idx+300)]
-                            print(f"[CURRENT T-KILLS DEBUG {tier}]:\n{debug_html}")
+                        break
                 
-                if t_kills:
-                    print(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
-                    return t_kills
+                if match:
+                    kills_str = match.group(1).replace(",", "")
+                    try:
+                        t_kills[tier.lower()] = int(kills_str)
+                        print(f"[CURRENT T-KILLS] Parsed {tier}: {kills_str}")
+                    except Exception as e:
+                        print(f"[CURRENT T-KILLS] Failed to parse {tier}: {e}")
                 else:
-                    print(f"[CURRENT T-KILLS] Could not parse any T-kills for {account_id}")
-                    return {}
+                    print(f"[CURRENT T-KILLS] Pattern not found for {tier}")
+                    # Debug
+                    idx = html.find(f"{tier} Kills")
+                    if idx != -1:
+                        debug_html = html[max(0, idx-100):min(len(html), idx+300)]
+                        print(f"[CURRENT T-KILLS DEBUG {tier}]:\n{debug_html}")
+            
+            if t_kills:
+                print(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
+                return t_kills
+            else:
+                print(f"[CURRENT T-KILLS] Could not parse any T-kills for {account_id}")
+                return {}
     except Exception as e:
         print(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
         import traceback
