@@ -1149,6 +1149,7 @@ async def progress(ctx, user_input: str = None):
         # Build text output - MATCH REFERENCE FORMAT
         lord_name = stats.get("lord_name", "Unknown")
         output = f"```✅ Progress Report for {lord_name} for season {season_name}\n"
+        output += f"\n"  # Line break before Power
         
         # Power - with highest power + season gain on ONE line
         if highest_power or power_gain:
@@ -1182,40 +1183,86 @@ async def progress(ctx, user_input: str = None):
         
         # Kill Breakdown - show current total + season gain
         output += f"⚔️ Kill Breakdown\n"
+        
+        # Calculate total kills (current + gains)
+        total_t_current = 0
+        total_t_gain = 0
+        
         if stats.get("t5_gain"):
             t5_current = current_t_kills.get("t5")
             if t5_current:
                 output += f"T5: {t5_current:,} ({stats['t5_gain']})\n"
+                total_t_current += t5_current
             else:
                 output += f"T5: {stats['t5_gain']}\n"
+            # Add gain to total
+            t5_gain_str = stats['t5_gain'].replace("+", "").replace(",", "")
+            try:
+                total_t_gain += int(t5_gain_str) if t5_gain_str.lstrip("-").isdigit() else 0
+            except:
+                pass
         
         if stats.get("t4_gain"):
             t4_current = current_t_kills.get("t4")
             if t4_current:
                 output += f"T4: {t4_current:,} ({stats['t4_gain']})\n"
+                total_t_current += t4_current
             else:
                 output += f"T4: {stats['t4_gain']}\n"
+            # Add gain to total
+            t4_gain_str = stats['t4_gain'].replace("+", "").replace(",", "")
+            try:
+                total_t_gain += int(t4_gain_str) if t4_gain_str.lstrip("-").isdigit() else 0
+            except:
+                pass
         
         if stats.get("t3_gain"):
             t3_current = current_t_kills.get("t3")
             if t3_current:
                 output += f"T3: {t3_current:,} ({stats['t3_gain']})\n"
+                total_t_current += t3_current
             else:
                 output += f"T3: {stats['t3_gain']}\n"
+            # Add gain to total
+            t3_gain_str = stats['t3_gain'].replace("+", "").replace(",", "")
+            try:
+                total_t_gain += int(t3_gain_str) if t3_gain_str.lstrip("-").isdigit() else 0
+            except:
+                pass
         
         if stats.get("t2_gain"):
             t2_current = current_t_kills.get("t2")
             if t2_current:
                 output += f"T2: {t2_current:,} ({stats['t2_gain']})\n"
+                total_t_current += t2_current
             else:
                 output += f"T2: {stats['t2_gain']}\n"
+            # Add gain to total
+            t2_gain_str = stats['t2_gain'].replace("+", "").replace(",", "")
+            try:
+                total_t_gain += int(t2_gain_str) if t2_gain_str.lstrip("-").isdigit() else 0
+            except:
+                pass
         
         if stats.get("t1_gain"):
             t1_current = current_t_kills.get("t1")
             if t1_current:
                 output += f"T1: {t1_current:,} ({stats['t1_gain']})\n"
+                total_t_current += t1_current
             else:
                 output += f"T1: {stats['t1_gain']}\n"
+            # Add gain to total
+            t1_gain_str = stats['t1_gain'].replace("+", "").replace(",", "")
+            try:
+                total_t_gain += int(t1_gain_str) if t1_gain_str.lstrip("-").isdigit() else 0
+            except:
+                pass
+        
+        # Add total T-kills
+        if total_t_current > 0:
+            output += f"Total: {total_t_current:,} (+{total_t_gain:,})\n"
+        elif total_t_gain > 0:
+            output += f"Total: +{total_t_gain:,}\n"
         
         output += f"\n"
         
