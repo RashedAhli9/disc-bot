@@ -947,8 +947,14 @@ async def on_ready():
 async def help_cmd(inter):
     embed = discord.Embed(
         title="📖 Bot Commands",
-        description="All available commands for Abyss management",
+        description="All available commands for Abyss management and season tracking",
         color=0x3498db
+    )
+    
+    embed.add_field(
+        name="📊 Season Stats Commands (use ! prefix)",
+        value="`!progress [username]` - View your or another lord's season stats\n`!compare lord1 lord2` - Compare two lords side by side\n`!topmana` - Top mana gathered this season\n`!topdeaths` - Most deaths this season\n`!topmerits` - Highest merits this season\n`!rss` - Top resource spenders",
+        inline=False
     )
     
     embed.add_field(
@@ -966,11 +972,11 @@ async def help_cmd(inter):
     if inter.user.id == OWNER_ID:
         embed.add_field(
             name="⚙️ Admin Commands",
-            value="`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now",
+            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch all stats and cache",
             inline=False
         )
     
-    embed.set_footer(text="Use / to see all commands")
+    embed.set_footer(text="Use / to see all slash commands or ! for text commands")
     await inter.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1746,26 +1752,36 @@ async def compare(ctx, user1: str = None, user2: str = None):
         if not stats1 or not stats2:
             return await msg.edit(content="❌ Failed to fetch stats")
         
-        # Get current power for both
+        # Get highest power and T-kills for both
         power1 = await fetch_highest_power(account_id1)
         power2 = await fetch_highest_power(account_id2)
+        t_kills1 = await fetch_current_t_kills(account_id1)
+        t_kills2 = await fetch_current_t_kills(account_id2)
         
-        # Build comparison - COMPACT
+        # Build comparison - IMPROVED FORMATTING
         name1 = stats1.get("lord_name", "Unknown")
         name2 = stats2.get("lord_name", "Unknown")
         
-        output = f"```⚔️ {name1} vs {name2}\n"
+        output = f"```⚔️ {name1} vs {name2}\n\n"
         
-        # Power - one line
+        # Power - side by side
         if power1 and power2:
-            output += f"⚡ Power: {name1}: {power1:,} | {name2}: {power2:,}\n"
+            output += f"⚡ Power\n"
+            output += f"{name1}: {power1:,}\n"
+            output += f"{name2}: {power2:,}\n"
+            output += f"\n"
         
-        # Merits - one line
+        # Merits - side by side
         m1 = stats1.get("merits", "+0")
         m2 = stats2.get("merits", "+0")
-        output += f"🏅 Merits: {name1}: {m1} | {name2}: {m2}\n"
+        mp1 = stats1.get("merits_pct", "0%")
+        mp2 = stats2.get("merits_pct", "0%")
+        output += f"🏅 Merits\n"
+        output += f"{name1}: {m1} ({mp1})\n"
+        output += f"{name2}: {m2} ({mp2})\n"
+        output += f"\n"
         
-        # Kills, Deaths, Healed - compact
+        # Kills + Total T-kills combined
         k1 = stats1.get("kills_gain", "+0")
         k2 = stats2.get("kills_gain", "+0")
         d1 = stats1.get("deads_gain", "+0")
@@ -1773,20 +1789,75 @@ async def compare(ctx, user1: str = None, user2: str = None):
         h1 = stats1.get("healed_gain", "+0")
         h2 = stats2.get("healed_gain", "+0")
         
-        output += f"⚔️ K: {name1}: {k1} | {name2}: {k2}\n"
-        output += f"💀 D: {name1}: {d1} | {name2}: {d2}\n"
-        output += f"❤️ H: {name1}: {h1} | {name2}: {h2}\n"
+        # Calculate total T-kills
+        total_t1 = sum(t_kills1.values()) if t_kills1 else 0
+        total_t2 = sum(t_kills2.values()) if t_kills2 else 0
         
-        # Mana Gathered - one line
+        output += f"⚔️ Kills\n"
+        output += f"{name1}: {total_t1:,} ({k1})\n"
+        output += f"{name2}: {total_t2:,} ({k2})\n"
+        output += f"\n"
+        
+        output += f"💀 Deaths\n"
+        output += f"{name1}: {d1}\n"
+        output += f"{name2}: {d2}\n"
+        output += f"\n"
+        
+        output += f"❤️ Healed\n"
+        output += f"{name1}: {h1}\n"
+        output += f"{name2}: {h2}\n"
+        output += f"\n"
+        
+        # T-Tier Breakdown
+        output += f"T5 Kills\n"
+        t5_1 = t_kills1.get("t5", 0)
+        t5_2 = t_kills2.get("t5", 0)
+        output += f"{name1}: {t5_1:,}\n"
+        output += f"{name2}: {t5_2:,}\n"
+        output += f"\n"
+        
+        output += f"T4 Kills\n"
+        t4_1 = t_kills1.get("t4", 0)
+        t4_2 = t_kills2.get("t4", 0)
+        output += f"{name1}: {t4_1:,}\n"
+        output += f"{name2}: {t4_2:,}\n"
+        output += f"\n"
+        
+        output += f"T3 Kills\n"
+        t3_1 = t_kills1.get("t3", 0)
+        t3_2 = t_kills2.get("t3", 0)
+        output += f"{name1}: {t3_1:,}\n"
+        output += f"{name2}: {t3_2:,}\n"
+        output += f"\n"
+        
+        output += f"T2 Kills\n"
+        t2_1 = t_kills1.get("t2", 0)
+        t2_2 = t_kills2.get("t2", 0)
+        output += f"{name1}: {t2_1:,}\n"
+        output += f"{name2}: {t2_2:,}\n"
+        output += f"\n"
+        
+        output += f"T1 Kills\n"
+        t1_1 = t_kills1.get("t1", 0)
+        t1_2 = t_kills2.get("t1", 0)
+        output += f"{name1}: {t1_1:,}\n"
+        output += f"{name2}: {t1_2:,}\n"
+        output += f"\n"
+        
+        # Mana Gathered
         mg1 = stats1.get("mana_gathered", "+0")
         mg2 = stats2.get("mana_gathered", "+0")
-        output += f"💧 Mana: {name1}: {mg1} | {name2}: {mg2}\n"
+        output += f"💧 Mana Gathered\n"
+        output += f"{name1}: {mg1}\n"
+        output += f"{name2}: {mg2}\n"
         
         output += f"```"
         
         await msg.edit(content=output)
     except Exception as e:
         print(f"[COMPARE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         await msg.edit(content=f"❌ Error: {str(e)}")
 
 
