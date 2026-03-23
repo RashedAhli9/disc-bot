@@ -206,7 +206,44 @@ def get_all_lords_from_guild(guild):
 _stats_cache = {}
 CACHE_EXPIRY_HOURS = 72  # 3 days
 
-async def fetch_current_power(account_id):
+async def fetch_highest_power(account_id):
+    """
+    Fetch the HIGHEST POWER from the normal profile page (no date range)
+    Returns the highest power value as int, or None if not found
+    """
+    import re
+    
+    try:
+        url = f"https://callofstats.com/lord/{account_id}"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    print(f"[HIGHEST POWER] Failed to fetch {url}: {response.status}")
+                    return None
+                
+                html = await response.text()
+                
+                # Look for: <span class="subtle">Highest Power</span> ... <div class="value">154,135,640</div>
+                pattern = r'<span class="subtle">Highest Power</span>[\s\n]*<div class="value">([0-9,]+)</div>'
+                match = re.search(pattern, html, re.DOTALL)
+                
+                if match:
+                    power_str = match.group(1).replace(",", "")
+                    try:
+                        highest_power = int(power_str)
+                        print(f"[HIGHEST POWER] {account_id} = {highest_power:,}")
+                        return highest_power
+                    except Exception as e:
+                        print(f"[HIGHEST POWER] Failed to parse: {e}")
+                        return None
+                else:
+                    print(f"[HIGHEST POWER] Pattern not found for {account_id}")
+                    return None
+    
+    except Exception as e:
+        print(f"[HIGHEST POWER ERROR] {account_id}: {e}")
+        return None
     """
     Fetch the CURRENT highest power for a lord (no date range)
     Returns the power number as int
@@ -1025,12 +1062,16 @@ async def progress(ctx, user_input: str = None):
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
         
-        # Get current highest power
-        current_power = await fetch_current_power(account_id)
+        # Get highest power from normal profile
+        highest_power = await fetch_highest_power(account_id)
+        
+        # Get current T-kills from normal profile
+        current_t_kills = await fetch_current_t_kills(account_id)
         
         # Debug: log what we parsed
         print(f"[PROGRESS] Parsed stats: {stats}")
-        print(f"[PROGRESS] Current power: {current_power}")
+        print(f"[PROGRESS] Highest power: {highest_power}")
+        print(f"[PROGRESS] Current T-kills: {current_t_kills}")
         
         # Get rankings for all stats
         power_rank = await get_rankings_for_stat(ctx, "power_gain", start_date, end_date_used)
@@ -1055,8 +1096,6 @@ async def progress(ctx, user_input: str = None):
         deads_rank_str = f" (#{deads_rank[account_id][0]})" if account_id in deads_rank else ""
         healed_rank_str = f" (#{healed_rank[account_id][0]})" if account_id in healed_rank else ""
         
-        # Get current T-tier kill totals from main profile
-        current_t_kills = await fetch_current_t_kills(account_id)
         
         # Calculate totals for RSS
         total_spent = 0
@@ -1080,35 +1119,33 @@ async def progress(ctx, user_input: str = None):
         lord_name = stats.get("lord_name", "Unknown")
         output = f"```✅ Progress Report for {lord_name} for season {season_name}\n"
         
-        # Power - with current total + season gain
-        if current_power:
-            output += f"⚡ Power\n"
-            if power_gain:
-                output += f"{current_power:,} (+{power_gain:,}){power_rank_str}\n"
-            else:
-                output += f"{current_power:,}{power_rank_str}\n"
+        # Power - with highest power + season gain on ONE line
+        if highest_power or power_gain:
+            output += f"⚡ Power "
+            if highest_power and power_gain:
+                output += f"{highest_power:,} (+{power_gain:,}){power_rank_str}\n"
+            elif highest_power:
+                output += f"{highest_power:,}{power_rank_str}\n"
+            elif power_gain:
+                output += f"{power_gain}{power_rank_str}\n"
         
-        # Merits - with ranking
+        # Merits - with ranking on ONE line
         if stats.get("merits") and stats.get("merits_pct"):
-            output += f"🏅 Merits\n"
-            output += f"{stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
+            output += f"🏅 Merits {stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
         
         output += f"\n"
         
-        # Kills - own line
+        # Kills - one line
         if stats.get("kills_gain"):
-            output += f"⚔️ Kills\n"
-            output += f"{stats['kills_gain']}{kills_rank_str}\n"
+            output += f"⚔️ Kills {stats['kills_gain']}{kills_rank_str}\n"
         
-        # Deaths - own line
+        # Deaths - one line
         if stats.get("deads_gain"):
-            output += f"💀 Deaths\n"
-            output += f"{stats['deads_gain']}{deads_rank_str}\n"
+            output += f"💀 Deaths {stats['deads_gain']}{deads_rank_str}\n"
         
-        # Healed - own line
+        # Healed - one line
         if stats.get("healed_gain"):
-            output += f"❤️ Healed\n"
-            output += f"{stats['healed_gain']}{healed_rank_str}\n"
+            output += f"❤️ Healed {stats['healed_gain']}{healed_rank_str}\n"
         
         output += f"\n"
         
@@ -1632,8 +1669,8 @@ async def compare(ctx, user1: str = None, user2: str = None):
             return await msg.edit(content="❌ Failed to fetch stats")
         
         # Get current power for both
-        power1 = await fetch_current_power(account_id1)
-        power2 = await fetch_current_power(account_id2)
+        power1 = await fetch_highest_power(account_id1)
+        power2 = await fetch_highest_power(account_id2)
         
         # Build comparison - COMPACT
         name1 = stats1.get("lord_name", "Unknown")
