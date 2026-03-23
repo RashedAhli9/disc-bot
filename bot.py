@@ -1099,14 +1099,6 @@ async def topmana(ctx):
     
     output += f"```"
     await ctx.send(output)
-        medal = medals[i] if i < 3 else f"{i+1}."
-        embed.add_field(
-            name=f"{medal} {lord['name']}",
-            value=f"**{lord['mana_str']}** mana",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
 
 
 @bot.command(name="topdeaths")
@@ -1164,14 +1156,6 @@ async def topdeaths(ctx):
     
     output += f"```"
     await ctx.send(output)
-        medal = medals[i] if i < 3 else f"{i+1}."
-        embed.add_field(
-            name=f"{medal} {lord['name']}",
-            value=f"**{lord['deaths_str']}** deaths",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
 
 
 # ============================================================
