@@ -198,6 +198,21 @@ def init_db():
             reminder INTEGER NOT NULL
         );
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS seasons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            season_name TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS lords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lord_name TEXT NOT NULL,
+            account_id TEXT NOT NULL UNIQUE
+        );
+    """)
     conn.commit()
     conn.close()
 
@@ -247,6 +262,207 @@ def db_delete_event(event_id):
     silent_backup()
 
 init_db()
+
+# ============================================================
+# SEASON TRACKER DATABASE FUNCTIONS
+# ============================================================
+
+def db_add_season(season_name, start_date):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    created_at = datetime.utcnow().isoformat()
+    c.execute(
+        "INSERT INTO seasons (season_name, start_date, created_at) VALUES (?, ?, ?)",
+        (season_name, start_date, created_at)
+    )
+    conn.commit()
+    conn.close()
+    silent_backup()
+
+def db_get_current_season():
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_add_lord(lord_name, account_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO lords (lord_name, account_id) VALUES (?, ?)",
+        (lord_name, account_id)
+    )
+    conn.commit()
+    conn.close()
+    silent_backup()
+
+def db_get_all_lords():
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, lord_name, account_id FROM lords ORDER BY lord_name ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_lord(account_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, lord_name, account_id FROM lords WHERE account_id=?", (account_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+# ============================================================
+# CALLOFSTATS LOGIN & STATS FETCHING
+# ============================================================
+
+async def login_callofstats(session):
+    """Login to callofstats and return session"""
+    username = os.getenv("CALLOFSTATS_USERNAME")
+    password = os.getenv("CALLOFSTATS_PASSWORD")
+    
+    if not username or not password:
+        print("[CALLOFSTATS] Missing credentials in env variables")
+        return None
+    
+    try:
+        # Get login page first
+        async with session.get("https://callofstats.com/login") as resp:
+            pass
+        
+        # Login
+        async with session.post(
+            "https://callofstats.com/login",
+            data={"username": username, "password": password}
+        ) as resp:
+            if resp.status == 200:
+                print("[CALLOFSTATS] Login successful")
+                return session
+            else:
+                print(f"[CALLOFSTATS] Login failed: {resp.status}")
+                return None
+    except Exception as e:
+        print(f"[CALLOFSTATS] Login error: {e}")
+        return None
+
+async def fetch_stats(start_date, end_date):
+    """Fetch player stats from callofstats"""
+    account_id = os.getenv("CALLOFSTATS_ACCOUNT_ID")
+    if not account_id:
+        print("[CALLOFSTATS] Missing CALLOFSTATS_ACCOUNT_ID")
+        return None
+    
+    return await fetch_stats_for_account(account_id, start_date, end_date)
+
+async def fetch_stats_for_account(account_id, start_date, end_date):
+    """Fetch player stats from callofstats for a specific account"""
+    if not account_id:
+        print("[CALLOFSTATS] Missing account_id")
+        return None
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            session = await login_callofstats(session)
+            if not session:
+                return None
+            
+            url = f"https://callofstats.com/lord/{account_id}?start_date={start_date}&end_date={end_date}"
+            
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    return parse_stats(html)
+                else:
+                    print(f"[CALLOFSTATS] Fetch failed: {resp.status}")
+                    return None
+    except Exception as e:
+        print(f"[CALLOFSTATS] Fetch error: {e}")
+        return None
+
+def parse_stats(html):
+    """Parse stats from HTML"""
+    import re
+    
+    stats = {
+        "power": None,
+        "power_gain": None,
+        "merits": None,
+        "merits_pct": None,
+        "kills_gain": None,
+        "deads_gain": None,
+        "healed_gain": None,
+        "t5_gain": None,
+        "t4_gain": None,
+        "t3_gain": None,
+        "t2_gain": None,
+        "t1_gain": None,
+        "gold_spent": None,
+        "wood_spent": None,
+        "ore_spent": None,
+        "mana_spent": None,
+        "rss_spent_total": None,
+        "gold_gathered": None,
+        "wood_gathered": None,
+        "ore_gathered": None,
+        "mana_gathered": None,
+        "rss_gathered_total": None
+    }
+    
+    try:
+        # Parse Power
+        power_match = re.search(r'Power[^0-9]*(\d+,?\d+,?\d+)[^0-9]+\(([^)]+)\)', html)
+        if power_match:
+            stats["power"] = power_match.group(1)
+            stats["power_gain"] = power_match.group(2)
+        
+        # Parse Merits
+        merits_match = re.search(r'Merits[^0-9]*(\d+,?\d+)[^0-9]+\(([^%]+%)\)', html)
+        if merits_match:
+            stats["merits"] = merits_match.group(1)
+            stats["merits_pct"] = merits_match.group(2)
+        
+        # Parse Kills
+        kills_match = re.search(r'Kills[^+]*\+(\d+,?\d+)', html)
+        if kills_match:
+            stats["kills_gain"] = kills_match.group(1)
+        
+        # Parse Deads
+        deads_match = re.search(r'Deads[^+]*\+(\d+,?\d+)', html)
+        if deads_match:
+            stats["deads_gain"] = deads_match.group(1)
+        
+        # Parse Healed
+        healed_match = re.search(r'Healed[^+]*\+(\d+,?\d+)', html)
+        if healed_match:
+            stats["healed_gain"] = healed_match.group(1)
+        
+        # Parse T5-T1 kills
+        t5_match = re.search(r'T5:[^+]*\+(\d+,?\d+)', html)
+        if t5_match:
+            stats["t5_gain"] = t5_match.group(1)
+        
+        t4_match = re.search(r'T4:[^+]*\+(\d+,?\d+)', html)
+        if t4_match:
+            stats["t4_gain"] = t4_match.group(1)
+        
+        t3_match = re.search(r'T3:[^+]*\+(\d+,?\d+)', html)
+        if t3_match:
+            stats["t3_gain"] = t3_match.group(1)
+        
+        t2_match = re.search(r'T2:[^+]*\+(\d+,?\d+)', html)
+        if t2_match:
+            stats["t2_gain"] = t2_match.group(1)
+        
+        t1_match = re.search(r'T1:[^+]*\+(\d+,?\d+)', html)
+        if t1_match:
+            stats["t1_gain"] = t1_match.group(1)
+        
+        return stats
+    except Exception as e:
+        print(f"[PARSE STATS] Error: {e}")
+        return None
 
 # ============================================================
 # DEFAULT ABYSS CONFIG
@@ -452,6 +668,318 @@ async def help_cmd(inter):
     
     embed.set_footer(text="Use / to see all commands")
     await inter.response.send_message(embed=embed, ephemeral=True)
+
+
+# ============================================================
+# SEASON TRACKING COMMANDS
+# ============================================================
+
+class NewSeasonModal(Modal, title="📅 New Season"):
+    season_name = TextInput(
+        label="Season Name",
+        placeholder="e.g., S053, Season 5, Spring 2026"
+    )
+    start_date = TextInput(
+        label="Start Date (YYYY-MM-DD)",
+        placeholder="2025-12-01"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # Validate date format
+            start_dt = datetime.strptime(self.start_date.value.strip(), "%Y-%m-%d")
+            
+            # Store season
+            db_add_season(self.season_name.value.strip(), self.start_date.value.strip())
+            
+            await interaction.followup.send(
+                f"✅ **Season Started!**\n"
+                f"**Name:** {self.season_name.value}\n"
+                f"**Start Date:** {self.start_date.value}\n\n"
+                f"Use `!progress` to check your season stats!",
+                ephemeral=True
+            )
+        except ValueError:
+            await interaction.followup.send(
+                "❌ Invalid date format. Use YYYY-MM-DD (e.g., 2025-12-01)",
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"[NEW SEASON ERROR] {e}")
+            await interaction.followup.send(
+                "❌ Failed to create season.",
+                ephemeral=True
+            )
+
+@bot.tree.command(name="newseason", description="Start a new season and track progress")
+async def newseason(inter: discord.Interaction):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    await inter.response.send_modal(NewSeasonModal())
+
+
+@bot.command(name="progress")
+async def progress(ctx):
+    """Check season progress"""
+    season = db_get_current_season()
+    
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    
+    await ctx.send("⏳ Fetching stats from callofstats...")
+    
+    # Get today's date
+    today = date.today().isoformat()
+    
+    try:
+        stats = await fetch_stats(start_date, today)
+        
+        if not stats:
+            return await ctx.send("❌ Failed to fetch stats. Check bot logs.")
+        
+        # Build embed
+        embed = discord.Embed(
+            title=f"📊 {season_name} Progress",
+            description=f"Season started: {start_date}",
+            color=0x3498db
+        )
+        
+        # Power
+        if stats["power"] and stats["power_gain"]:
+            embed.add_field(
+                name="⚡ Power",
+                value=f"**{stats['power']}** (+{stats['power_gain']})",
+                inline=False
+            )
+        
+        # Merits
+        if stats["merits"] and stats["merits_pct"]:
+            embed.add_field(
+                name="🏅 Merits",
+                value=f"**{stats['merits']}** ({stats['merits_pct']})",
+                inline=False
+            )
+        
+        # Combat stats in one row
+        combat_text = ""
+        if stats["kills_gain"]:
+            combat_text += f"⚔️ Kills: **+{stats['kills_gain']}**\n"
+        if stats["deads_gain"]:
+            combat_text += f"💀 Deaths: **+{stats['deads_gain']}**\n"
+        if stats["healed_gain"]:
+            combat_text += f"❤️ Healed: **+{stats['healed_gain']}**"
+        
+        if combat_text:
+            embed.add_field(name="🔥 Combat", value=combat_text.strip(), inline=False)
+        
+        # Kill Breakdown
+        kb_text = ""
+        if stats["t5_gain"]:
+            kb_text += f"T5: **+{stats['t5_gain']}**\n"
+        if stats["t4_gain"]:
+            kb_text += f"T4: **+{stats['t4_gain']}**\n"
+        if stats["t3_gain"]:
+            kb_text += f"T3: **+{stats['t3_gain']}**\n"
+        if stats["t2_gain"]:
+            kb_text += f"T2: **+{stats['t2_gain']}**\n"
+        if stats["t1_gain"]:
+            kb_text += f"T1: **+{stats['t1_gain']}**"
+        
+        if kb_text:
+            embed.add_field(name="🗡️ Kill Breakdown", value=kb_text.strip(), inline=False)
+        
+        # RSS Spent
+        rss_spent_text = ""
+        if stats["gold_spent"]:
+            rss_spent_text += f"🟡 Gold: **{stats['gold_spent']}**\n"
+        if stats["wood_spent"]:
+            rss_spent_text += f"🟤 Wood: **{stats['wood_spent']}**\n"
+        if stats["ore_spent"]:
+            rss_spent_text += f"⚫ Ore: **{stats['ore_spent']}**\n"
+        if stats["mana_spent"]:
+            rss_spent_text += f"🔵 Mana: **{stats['mana_spent']}**\n"
+        if stats["rss_spent_total"]:
+            rss_spent_text += f"**Total: {stats['rss_spent_total']}**"
+        
+        if rss_spent_text:
+            embed.add_field(name="💸 RSS Spent", value=rss_spent_text.strip(), inline=False)
+        
+        # RSS Gathered
+        rss_gathered_text = ""
+        if stats["gold_gathered"]:
+            rss_gathered_text += f"🟡 Gold: **{stats['gold_gathered']}**\n"
+        if stats["wood_gathered"]:
+            rss_gathered_text += f"🟤 Wood: **{stats['wood_gathered']}**\n"
+        if stats["ore_gathered"]:
+            rss_gathered_text += f"⚫ Ore: **{stats['ore_gathered']}**\n"
+        if stats["mana_gathered"]:
+            rss_gathered_text += f"🔵 Mana: **{stats['mana_gathered']}**\n"
+        if stats["rss_gathered_total"]:
+            rss_gathered_text += f"**Total: {stats['rss_gathered_total']}**"
+        
+        if rss_gathered_text:
+            embed.add_field(name="📦 RSS Gathered", value=rss_gathered_text.strip(), inline=False)
+        
+        embed.set_footer(text=f"Last updated: {today}")
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        print(f"[PROGRESS ERROR] {e}")
+        await ctx.send(f"❌ Error: {str(e)}")
+
+
+@bot.tree.command(name="addlord", description="Add a lord to track for season leaderboards")
+async def addlord(inter: discord.Interaction, name: str, account_id: str):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+    
+    await inter.response.defer(ephemeral=True)
+    
+    try:
+        # Check if season exists
+        season = db_get_current_season()
+        if not season:
+            return await inter.followup.send("❌ No season active. Use `/newseason` first.", ephemeral=True)
+        
+        # Add lord to database
+        db_add_lord(name, account_id)
+        
+        await inter.followup.send(
+            f"✅ **Lord Added!**\n"
+            f"**Name:** {name}\n"
+            f"**Account ID:** {account_id}\n\n"
+            f"Use `!topmana`, `!topdeaths`, etc. to see leaderboards!",
+            ephemeral=True
+        )
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            await inter.followup.send(f"❌ This account ID is already tracked.", ephemeral=True)
+        else:
+            print(f"[ADD LORD ERROR] {e}")
+            await inter.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@bot.command(name="topmana")
+async def topmana(ctx):
+    """Leaderboard for mana gathered this season"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    lords = db_get_all_lords()
+    if not lords:
+        return await ctx.send("❌ No lords tracked. Use `/addlord` to add them.")
+    
+    await ctx.send("⏳ Fetching leaderboard data...")
+    
+    leaderboard = []
+    
+    for lord_id, lord_name, account_id in lords:
+        try:
+            # Temporarily modify fetch_stats to accept account_id
+            stats = await fetch_stats_for_account(account_id, start_date, today)
+            if stats and stats.get("mana_gathered"):
+                # Convert mana_gathered to number for sorting
+                mana_str = stats["mana_gathered"].replace(",", "")
+                mana_num = int(mana_str) if mana_str.isdigit() else 0
+                leaderboard.append({
+                    "name": lord_name,
+                    "mana": mana_num,
+                    "mana_str": stats["mana_gathered"]
+                })
+        except Exception as e:
+            print(f"[TOPMANA ERROR] {lord_name}: {e}")
+    
+    if not leaderboard:
+        return await ctx.send("❌ No data found. Make sure lords are added and have data.")
+    
+    # Sort by mana descending
+    leaderboard.sort(key=lambda x: x["mana"], reverse=True)
+    
+    # Build embed
+    embed = discord.Embed(
+        title=f"🏆 Top Mana Gathered - {season_name}",
+        description=f"Mana gathered from {start_date} to {today}",
+        color=0x3498db
+    )
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        embed.add_field(
+            name=f"{medal} {lord['name']}",
+            value=f"**{lord['mana_str']}** mana",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="topdeaths")
+async def topdeaths(ctx):
+    """Leaderboard for most deaths this season"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    lords = db_get_all_lords()
+    if not lords:
+        return await ctx.send("❌ No lords tracked. Use `/addlord` to add them.")
+    
+    await ctx.send("⏳ Fetching leaderboard data...")
+    
+    leaderboard = []
+    
+    for lord_id, lord_name, account_id in lords:
+        try:
+            stats = await fetch_stats_for_account(account_id, start_date, today)
+            if stats and stats.get("deads_gain"):
+                # Convert deads to number for sorting
+                deaths_str = stats["deads_gain"].replace(",", "")
+                deaths_num = int(deaths_str) if deaths_str.isdigit() else 0
+                leaderboard.append({
+                    "name": lord_name,
+                    "deaths": deaths_num,
+                    "deaths_str": stats["deads_gain"]
+                })
+        except Exception as e:
+            print(f"[TOPDEATHS ERROR] {lord_name}: {e}")
+    
+    if not leaderboard:
+        return await ctx.send("❌ No data found. Make sure lords are added and have data.")
+    
+    # Sort by deaths descending
+    leaderboard.sort(key=lambda x: x["deaths"], reverse=True)
+    
+    # Build embed
+    embed = discord.Embed(
+        title=f"💀 Most Deaths - {season_name}",
+        description=f"Deaths from {start_date} to {today}",
+        color=0xe74c3c
+    )
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        embed.add_field(
+            name=f"{medal} {lord['name']}",
+            value=f"**{lord['deaths_str']}** deaths",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
 
 
 # ============================================================
