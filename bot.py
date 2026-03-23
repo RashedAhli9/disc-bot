@@ -206,6 +206,82 @@ def get_all_lords_from_guild(guild):
 _stats_cache = {}
 CACHE_EXPIRY_HOURS = 72  # 3 days
 
+async def fetch_current_power(account_id):
+    """
+    Fetch the CURRENT highest power for a lord (no date range)
+    Returns the power number as int
+    """
+    import re
+    
+    try:
+        url = f"https://callofstats.com/lord/{account_id}"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    print(f"[CURRENT POWER] Failed to fetch {url}: {response.status}")
+                    return None
+                
+                html = await response.text()
+                
+                # Look for <h2>150,000,000</h2> pattern (current highest power)
+                power_match = re.search(r'<h2[^>]*>([0-9,]+)</h2>', html)
+                if power_match:
+                    power_str = power_match.group(1).replace(",", "")
+                    power = int(power_str)
+                    print(f"[CURRENT POWER] {account_id} = {power}")
+                    return power
+                
+                print(f"[CURRENT POWER] Could not parse power for {account_id}")
+                return None
+    except Exception as e:
+        print(f"[CURRENT POWER ERROR] {account_id}: {e}")
+        return None
+
+
+async def fetch_current_t_kills(account_id):
+    """
+    Fetch the CURRENT T5-T1 kill totals for a lord (no date range)
+    Returns dict: {"t5": 123456, "t4": 234567, ...} or empty dict if not found
+    """
+    import re
+    
+    try:
+        url = f"https://callofstats.com/lord/{account_id}"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    print(f"[CURRENT T-KILLS] Failed to fetch {url}: {response.status}")
+                    return {}
+                
+                html = await response.text()
+                
+                t_kills = {}
+                
+                # Look for T5 Kills pattern
+                for tier in ["T5", "T4", "T3", "T2", "T1"]:
+                    # Pattern: <span class="subtle">T5 Kills</span> ... <div class="value">298,193,978</div>
+                    pattern = f'<span class="subtle">{tier} Kills</span>\\s*<div class="value">([0-9,]+)</div>'
+                    match = re.search(pattern, html)
+                    if match:
+                        kills_str = match.group(1).replace(",", "")
+                        try:
+                            t_kills[tier.lower()] = int(kills_str)
+                        except:
+                            pass
+                
+                if t_kills:
+                    print(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
+                    return t_kills
+                else:
+                    print(f"[CURRENT T-KILLS] Could not parse T-kills for {account_id}")
+                    return {}
+    except Exception as e:
+        print(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
+        return {}
+
+
 async def fetch_stats_with_fallback(account_id, start_date, end_date):
     """
     Fetch stats and automatically fallback to earlier dates if data is empty.
@@ -874,26 +950,59 @@ async def newseason(inter: discord.Interaction):
 
 
 @bot.command(name="progress")
-async def progress(ctx, account_id: str = None):
-    """Check season progress. Usage: !progress (uses your role) or !progress 16322115 (search specific lord)"""
+async def progress(ctx, user_input: str = None):
+    """Check season progress. Usage: !progress (uses your role) or !progress truvix (username) or !progress 16322115 (account ID)"""
     season = db_get_current_season()
     
     if not season:
         return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
-    # If no account_id provided, find from user's numeric role
-    if not account_id:
+    account_id = None
+    
+    # If no input provided, find from user's numeric role
+    if not user_input:
         for role in ctx.author.roles:
             if role.name.isdigit():
                 account_id = role.name
                 break
         
         if not account_id:
-            return await ctx.send("❌ You don't have a numeric role with your account ID.\nAsk the owner to give you a role with your account ID number (e.g., role name: `16322115`).\n\nOr use: `!progress 16322115` to search for a specific lord.")
+            return await ctx.send("❌ You don't have a numeric role with your account ID.\nAsk the owner to give you a role with your account ID number (e.g., role name: `16322115`).\n\nOr use: `!progress truvix` or `!progress 16322115`")
     
-    # Validate account_id is numeric
-    if not account_id.isdigit():
-        return await ctx.send("❌ Account ID must be numeric (e.g., `!progress 16322115`)")
+    # If input is numeric, use as account ID
+    elif user_input.isdigit():
+        account_id = user_input
+    
+    # If input is text, check username lookup
+    else:
+        username_lower = user_input.lower()
+        found_discord_id = None
+        
+        # Check if username exists in mapping
+        for username, discord_id in USERNAME_TO_DISCORD_ID.items():
+            if username.lower() == username_lower:
+                found_discord_id = discord_id
+                break
+        
+        if not found_discord_id:
+            return await ctx.send(f"❌ Username '{user_input}' not found. Available usernames: {', '.join(USERNAME_TO_DISCORD_ID.keys())}")
+        
+        # Get the member from guild and find their numeric role
+        try:
+            member = ctx.guild.get_member(found_discord_id)
+            if not member:
+                return await ctx.send(f"❌ User '{user_input}' is not in this server.")
+            
+            for role in member.roles:
+                if role.name.isdigit():
+                    account_id = role.name
+                    break
+            
+            if not account_id:
+                return await ctx.send(f"❌ User '{user_input}' doesn't have a numeric role with their account ID.")
+        except Exception as e:
+            print(f"[PROGRESS USERNAME ERROR] {e}")
+            return await ctx.send(f"❌ Error looking up user '{user_input}'")
     
     season_id, season_name, start_date, created_at = season
     
@@ -908,79 +1017,132 @@ async def progress(ctx, account_id: str = None):
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
         
+        # Get current highest power
+        current_power = await fetch_current_power(account_id)
+        
         # Debug: log what we parsed
         print(f"[PROGRESS] Parsed stats: {stats}")
+        print(f"[PROGRESS] Current power: {current_power}")
         
-        # Build text output
-        lord_name = stats.get("lord_name", "Unknown")
-        output = f"```Progress Report for {lord_name} - Season {season_name}\n\n"
+        # Get rankings for all stats
+        power_rank = await get_rankings_for_stat(ctx, "power_gain", start_date, end_date_used)
+        merits_rank = await get_rankings_for_stat(ctx, "merits", start_date, end_date_used)
+        kills_rank = await get_rankings_for_stat(ctx, "kills_gain", start_date, end_date_used)
+        deads_rank = await get_rankings_for_stat(ctx, "deads_gain", start_date, end_date_used)
+        healed_rank = await get_rankings_for_stat(ctx, "healed_gain", start_date, end_date_used)
         
-        # Power
+        # Calculate power_gain
+        power_gain = 0
         if stats["power_gain"]:
-            output += f"⚡ Power\n{stats['power_gain']}\n\n"
+            power_gain_str = stats["power_gain"].replace("+", "")
+            try:
+                power_gain = int(power_gain_str.replace(",", ""))
+            except:
+                power_gain = 0
         
-        # Merits
-        if stats["merits"] and stats["merits_pct"]:
-            output += f"🏅 Merits\n{stats['merits']} ({stats['merits_pct']})\n\n"
+        # Build ranking strings
+        power_rank_str = f" (#{power_rank[account_id][0]})" if account_id in power_rank else ""
+        merits_rank_str = f" (#{merits_rank[account_id][0]})" if account_id in merits_rank else ""
+        kills_rank_str = f" (#{kills_rank[account_id][0]})" if account_id in kills_rank else ""
+        deads_rank_str = f" (#{deads_rank[account_id][0]})" if account_id in deads_rank else ""
+        healed_rank_str = f" (#{healed_rank[account_id][0]})" if account_id in healed_rank else ""
         
-        # Kills
-        if stats["kills_gain"]:
-            output += f"⚔️ Kills\n{stats['kills_gain']}\n\n"
+        # Get current T-tier kill totals from main profile
+        current_t_kills = await fetch_current_t_kills(account_id)
         
-        # Deads
-        if stats["deads_gain"]:
-            output += f"💀 Deads\n{stats['deads_gain']}\n\n"
+        # Calculate totals for RSS
+        total_spent = 0
+        total_gathered = 0
         
-        # Healed
-        if stats["healed_gain"]:
-            output += f"❤️ Healed\n{stats['healed_gain']}\n\n"
+        for key in ["gold_spent", "wood_spent", "ore_spent", "mana_spent"]:
+            val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
+            try:
+                total_spent += int(val_str) if val_str.lstrip("-").isdigit() else 0
+            except:
+                pass
         
-        # Kill Breakdown
-        kb_parts = []
+        for key in ["gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
+            val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
+            try:
+                total_gathered += int(val_str) if val_str.lstrip("-").isdigit() else 0
+            except:
+                pass
+        
+        # Build text output - READABLE FORMAT WITH PROPER SPACING
+        lord_name = stats.get("lord_name", "Unknown")
+        output = f"```🏆 {lord_name} - Season {season_name}\n"
+        output += f"⚡ Power: {current_power:,} (+{power_gain:,}){power_rank_str}\n"
+        output += f"🏅 Merits: {stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
+        output += f"⚔️ Kills: {stats['kills_gain']}{kills_rank_str}  💀 Deaths: {stats['deads_gain']}{deads_rank_str}  ❤️ Healed: {stats['healed_gain']}{healed_rank_str}\n"
+        output += f"\n"
+        
+        # Kill Breakdown - each tier on own line
+        output += f"🗡️ Kill Breakdown\n"
         if stats["t5_gain"]:
-            kb_parts.append(f"T5: {stats['t5_gain']}")
+            t5_current = current_t_kills.get("t5")
+            if t5_current:
+                output += f"T5: {t5_current:,} ({stats['t5_gain']})\n"
+            else:
+                output += f"T5: {stats['t5_gain']}\n"
+        
         if stats["t4_gain"]:
-            kb_parts.append(f"T4: {stats['t4_gain']}")
+            t4_current = current_t_kills.get("t4")
+            if t4_current:
+                output += f"T4: {t4_current:,} ({stats['t4_gain']})\n"
+            else:
+                output += f"T4: {stats['t4_gain']}\n"
+        
         if stats["t3_gain"]:
-            kb_parts.append(f"T3: {stats['t3_gain']}")
+            t3_current = current_t_kills.get("t3")
+            if t3_current:
+                output += f"T3: {t3_current:,} ({stats['t3_gain']})\n"
+            else:
+                output += f"T3: {stats['t3_gain']}\n"
+        
         if stats["t2_gain"]:
-            kb_parts.append(f"T2: {stats['t2_gain']}")
+            t2_current = current_t_kills.get("t2")
+            if t2_current:
+                output += f"T2: {t2_current:,} ({stats['t2_gain']})\n"
+            else:
+                output += f"T2: {stats['t2_gain']}\n"
+        
         if stats["t1_gain"]:
-            kb_parts.append(f"T1: {stats['t1_gain']}")
+            t1_current = current_t_kills.get("t1")
+            if t1_current:
+                output += f"T1: {t1_current:,} ({stats['t1_gain']})\n"
+            else:
+                output += f"T1: {stats['t1_gain']}\n"
         
-        if kb_parts:
-            output += f"• Kill Breakdown\n{chr(10).join(kb_parts)}\n\n"
+        output += f"\n"
         
-        # RSS Spent
-        rss_spent_parts = []
+        # RSS Spent - each resource on own line
+        output += f"💰 RSS Spent\n"
         if stats["gold_spent"]:
-            rss_spent_parts.append(f"🪙 Gold: {stats['gold_spent']}")
+            output += f"🪙 Gold: {stats['gold_spent']}\n"
         if stats["wood_spent"]:
-            rss_spent_parts.append(f"🪵 Wood: {stats['wood_spent']}")
+            output += f"🪵 Wood: {stats['wood_spent']}\n"
         if stats["ore_spent"]:
-            rss_spent_parts.append(f"⛏️ Ore: {stats['ore_spent']}")
+            output += f"⛏️ Ore: {stats['ore_spent']}\n"
         if stats["mana_spent"]:
-            rss_spent_parts.append(f"💧 Mana: {stats['mana_spent']}")
+            output += f"💧 Mana: {stats['mana_spent']}\n"
+        output += f"Total: {total_spent:,}\n"
+        output += f"\n"
         
-        if rss_spent_parts:
-            output += f"💰 RSS Spent\n{chr(10).join(rss_spent_parts)}\n\n"
-        
-        # RSS Gathered
-        rss_gathered_parts = []
+        # RSS Gathered - each resource on own line
+        output += f"👨‍🌾 RSS Gathered\n"
         if stats["gold_gathered"]:
-            rss_gathered_parts.append(f"🪙 Gold: {stats['gold_gathered']}")
+            output += f"🪙 Gold: {stats['gold_gathered']}\n"
         if stats["wood_gathered"]:
-            rss_gathered_parts.append(f"🪵 Wood: {stats['wood_gathered']}")
+            output += f"🪵 Wood: {stats['wood_gathered']}\n"
         if stats["ore_gathered"]:
-            rss_gathered_parts.append(f"⛏️ Ore: {stats['ore_gathered']}")
+            output += f"⛏️ Ore: {stats['ore_gathered']}\n"
         if stats["mana_gathered"]:
-            rss_gathered_parts.append(f"💧 Mana: {stats['mana_gathered']}")
-        
-        if rss_gathered_parts:
-            output += f"👨‍🌾 RSS Gathered\n{chr(10).join(rss_gathered_parts)}\n\n"
+            output += f"💧 Mana: {stats['mana_gathered']}\n"
+        output += f"Total: {total_gathered:,}\n"
+        output += f"\n"
         
         # Timespan
-        output += f"📅 Timespan: {start_date} → {end_date_used}```"
+        output += f"📅 {start_date} → {end_date_used}```"
         
         await msg.edit(content=output)
         
@@ -1125,15 +1287,15 @@ async def topmana(ctx):
     # Sort by mana descending
     leaderboard.sort(key=lambda x: x["mana"], reverse=True)
     
-    # Build text output
-    output = f"```🏆 Top Mana Gathered - {season_name}\n\n"
+    # Build text output - compact
+    output = f"```🏆 Top Mana Gathered - {season_name}\n"
     medals = ["🥇", "🥈", "🥉"]
     
     for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['mana_str']}\n"
     
-    output += f"\n📅 Data from: {start_date} → {actual_end_date}```"
+    output += f"📅 {start_date} → {actual_end_date}```"
     await ctx.send(output)
 
 
@@ -1207,16 +1369,290 @@ async def topdeaths(ctx):
     # Sort by deaths descending
     leaderboard.sort(key=lambda x: x["deaths"], reverse=True)
     
-    # Build text output
-    output = f"```💀 Most Deaths - {season_name}\n\n"
+    # Build text output - compact
+    output = f"```💀 Most Deaths - {season_name}\n"
     medals = ["🥇", "🥈", "🥉"]
     
     for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['deaths_str']}\n"
     
-    output += f"\n📅 Data from: {start_date} → {actual_end_date}```"
+    output += f"📅 {start_date} → {actual_end_date}```"
     await ctx.send(output)
+
+
+@bot.command(name="topmerits")
+async def topmerits(ctx):
+    """Leaderboard for highest merits this season (auto-detects numeric roles)"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+    
+    await ctx.send(f"⏳ Fetching leaderboard data for {len(lords)} lords...")
+    
+    fetch_tasks = [fetch_stats_with_fallback(lord["account_id"], start_date, today) for lord in lords]
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    
+    leaderboard = []
+    actual_end_date = today
+    
+    for lord, result in zip(lords, results):
+        try:
+            lord_name = "Unknown"
+            merits_str = "+0"
+            merits_num = 0
+            
+            if result and not isinstance(result, Exception):
+                stats, end_date_used = result
+                actual_end_date = end_date_used
+                if stats:
+                    lord_name = stats.get("lord_name", lord["name"])
+                    if stats.get("merits"):
+                        merits_str = stats["merits"]
+                        merits_clean = merits_str.replace(",", "").replace("+", "")
+                        merits_num = int(merits_clean) if merits_clean.lstrip("-").isdigit() else 0
+            
+            leaderboard.append({"name": lord_name, "merits": merits_num, "merits_str": merits_str})
+        except Exception as e:
+            print(f"[TOPMERITS ERROR] {lord.get('account_id')}: {e}")
+            leaderboard.append({"name": lord["name"], "merits": 0, "merits_str": "+0"})
+    
+    leaderboard.sort(key=lambda x: x["merits"], reverse=True)
+    
+    output = f"```🏅 Top Merits - {season_name}\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        output += f"{medal} {lord['name']}: {lord['merits_str']}\n"
+    output += f"📅 {start_date} → {actual_end_date}```"
+    await ctx.send(output)
+
+
+@bot.command(name="rss")
+async def rss_leaderboard(ctx):
+    """Top resource spenders (total gold+wood+ore+mana spent this season)"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+    
+    await ctx.send(f"⏳ Fetching leaderboard data for {len(lords)} lords...")
+    
+    fetch_tasks = [fetch_stats_with_fallback(lord["account_id"], start_date, today) for lord in lords]
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    
+    leaderboard = []
+    actual_end_date = today
+    
+    for lord, result in zip(lords, results):
+        try:
+            lord_name = "Unknown"
+            total_rss = 0
+            
+            if result and not isinstance(result, Exception):
+                stats, end_date_used = result
+                actual_end_date = end_date_used
+                if stats:
+                    lord_name = stats.get("lord_name", lord["name"])
+                    
+                    # Sum all resources spent
+                    for key in ["gold_spent", "wood_spent", "ore_spent", "mana_spent"]:
+                        val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
+                        try:
+                            total_rss += int(val_str) if val_str.lstrip("-").isdigit() else 0
+                        except:
+                            pass
+            
+            leaderboard.append({"name": lord_name, "rss": total_rss})
+        except Exception as e:
+            print(f"[RSS ERROR] {lord.get('account_id')}: {e}")
+            leaderboard.append({"name": lord["name"], "rss": 0})
+    
+    leaderboard.sort(key=lambda x: x["rss"], reverse=True)
+    
+    output = f"```💰 Top Resource Spenders - {season_name}\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        output += f"{medal} {lord['name']}: {lord['rss']:,}\n"
+    output += f"📅 {start_date} → {actual_end_date}```"
+    await ctx.send(output)
+
+
+async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
+    """
+    Get all lords ranked by a specific stat.
+    Returns dict: {account_id: rank} where rank is 1-indexed
+    """
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return {}
+    
+    try:
+        fetch_tasks = [fetch_stats_with_fallback(lord["account_id"], start_date, end_date) for lord in lords]
+        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        
+        stats_list = []
+        for lord, result in zip(lords, results):
+            if result and not isinstance(result, Exception):
+                stats, _ = result
+                if stats and stats.get(stat_key):
+                    val_str = stats[stat_key].replace(",", "").replace("+", "")
+                    try:
+                        val = int(val_str) if val_str.lstrip("-").isdigit() else 0
+                        stats_list.append({"account_id": lord["account_id"], "value": val})
+                    except:
+                        pass
+        
+        # Sort by value descending
+        stats_list.sort(key=lambda x: x["value"], reverse=True)
+        
+        # Create rank dict
+        rankings = {}
+        for i, item in enumerate(stats_list):
+            rankings[item["account_id"]] = (i + 1, len(stats_list))
+        
+        return rankings
+    except Exception as e:
+        print(f"[RANKINGS ERROR] {e}")
+        return {}
+
+
+async def get_account_id_from_input(ctx, user_input):
+    """Helper function to resolve username or account ID to account ID"""
+    # If numeric, use as account ID
+    if user_input.isdigit():
+        return user_input
+    
+    # Check username lookup
+    username_lower = user_input.lower()
+    found_discord_id = None
+    
+    for username, discord_id in USERNAME_TO_DISCORD_ID.items():
+        if username.lower() == username_lower:
+            found_discord_id = discord_id
+            break
+    
+    if not found_discord_id:
+        return None
+    
+    # Get the member from guild and find their numeric role
+    try:
+        member = ctx.guild.get_member(found_discord_id)
+        if not member:
+            return None
+        
+        for role in member.roles:
+            if role.name.isdigit():
+                return role.name
+        return None
+    except:
+        return None
+
+
+@bot.command(name="compare")
+async def compare(ctx, user1: str = None, user2: str = None):
+    """Compare two lords side by side. Usage: !compare truvix rekz (or !compare 16322115 12345678)"""
+    if not user1 or not user2:
+        return await ctx.send("❌ Usage: `!compare truvix rekz` or `!compare 16322115 12345678`")
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    msg = await ctx.send(f"⏳ Fetching data for {user1} and {user2}...")
+    
+    try:
+        # Resolve both users
+        account_id1 = await get_account_id_from_input(ctx, user1)
+        account_id2 = await get_account_id_from_input(ctx, user2)
+        
+        if not account_id1:
+            return await msg.edit(content=f"❌ Could not find '{user1}'")
+        if not account_id2:
+            return await msg.edit(content=f"❌ Could not find '{user2}'")
+        
+        # Fetch stats for both
+        stats1, end_date1 = await fetch_stats_with_fallback(account_id1, start_date, today)
+        stats2, end_date2 = await fetch_stats_with_fallback(account_id2, start_date, today)
+        
+        if not stats1 or not stats2:
+            return await msg.edit(content="❌ Failed to fetch stats")
+        
+        # Get current power for both
+        power1 = await fetch_current_power(account_id1)
+        power2 = await fetch_current_power(account_id2)
+        
+        # Build comparison - COMPACT
+        name1 = stats1.get("lord_name", "Unknown")
+        name2 = stats2.get("lord_name", "Unknown")
+        
+        output = f"```⚔️ {name1} vs {name2}\n"
+        
+        # Power - one line
+        if power1 and power2:
+            output += f"⚡ Power: {name1}: {power1:,} | {name2}: {power2:,}\n"
+        
+        # Merits - one line
+        m1 = stats1.get("merits", "+0")
+        m2 = stats2.get("merits", "+0")
+        output += f"🏅 Merits: {name1}: {m1} | {name2}: {m2}\n"
+        
+        # Kills, Deaths, Healed - compact
+        k1 = stats1.get("kills_gain", "+0")
+        k2 = stats2.get("kills_gain", "+0")
+        d1 = stats1.get("deads_gain", "+0")
+        d2 = stats2.get("deads_gain", "+0")
+        h1 = stats1.get("healed_gain", "+0")
+        h2 = stats2.get("healed_gain", "+0")
+        
+        output += f"⚔️ K: {name1}: {k1} | {name2}: {k2}\n"
+        output += f"💀 D: {name1}: {d1} | {name2}: {d2}\n"
+        output += f"❤️ H: {name1}: {h1} | {name2}: {h2}\n"
+        
+        # Mana Gathered - one line
+        mg1 = stats1.get("mana_gathered", "+0")
+        mg2 = stats2.get("mana_gathered", "+0")
+        output += f"💧 Mana: {name1}: {mg1} | {name2}: {mg2}\n"
+        
+        output += f"```"
+        
+        await msg.edit(content=output)
+    except Exception as e:
+        print(f"[COMPARE ERROR] {e}")
+        await msg.edit(content=f"❌ Error: {str(e)}")
+
+
+# ============================================================
+# USERNAME LOOKUP (Map Discord usernames to Discord IDs)
+# ============================================================
+# Hardcoded mapping - add your members here
+# Username: Discord ID
+USERNAME_TO_DISCORD_ID = {
+    "rekz": 1084884048884797490,
+    "truvix": 797778630025019402,
+    "azrael": 663715561951461376,
+    "drakken": 401088806432014347,
+    "gato": 937458459115413565,
+    "truffles": 1285424051761713155,
+    "havi": 1244330800019804180,
+}
 
 
 # ============================================================
