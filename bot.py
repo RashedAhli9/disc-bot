@@ -848,15 +848,44 @@ async def progress(ctx):
     
     msg = await ctx.send("⏳ Fetching fresh stats from callofstats...")
     
-    # Get today's date
-    today = date.today().isoformat()
+    # Get today's date and try backwards if no data
+    from datetime import timedelta
+    today = date.today()
+    stats = None
+    end_date_used = today.isoformat()
     
     try:
-        # Fetch fresh data (ignore cache)
-        stats = await fetch_stats_for_account(account_id, start_date, today, skip_cache=True)
+        # Try today first, then go back up to 5 days
+        for days_back in range(6):
+            current_date = (today - timedelta(days=days_back)).isoformat()
+            print(f"[PROGRESS] Attempting fetch for date: {current_date}")
+            
+            stats = await fetch_stats_for_account(account_id, start_date, current_date, skip_cache=True)
+            
+            if not stats:
+                continue
+            
+            # Check if data is empty (all zeros or None)
+            has_data = False
+            for key in ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain", 
+                        "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
+                        "gold_spent", "wood_spent", "ore_spent", "mana_spent",
+                        "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
+                val = stats.get(key)
+                if val and val != "+0" and val != "0":
+                    has_data = True
+                    break
+            
+            if has_data:
+                end_date_used = current_date
+                print(f"[PROGRESS] Found data for date: {current_date}")
+                break
+            else:
+                print(f"[PROGRESS] No data for {current_date}, trying earlier date...")
+                stats = None
         
         if not stats:
-            return await msg.edit(content="❌ Failed to fetch stats. Check bot logs.")
+            return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
         
         # Debug: log what we parsed
         print(f"[PROGRESS] Parsed stats: {stats}")
@@ -929,7 +958,7 @@ async def progress(ctx):
             output += f"👨‍🌾 RSS Gathered\n{' '.join(rss_gathered_parts)}\n\n"
         
         # Timespan
-        output += f"📅 Timespan: {start_date} → {today}```"
+        output += f"📅 Timespan: {start_date} → {end_date_used}```"
         
         await msg.edit(content=output)
         
