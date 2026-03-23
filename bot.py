@@ -723,11 +723,21 @@ async def newseason(inter: discord.Interaction):
 
 @bot.command(name="progress")
 async def progress(ctx):
-    """Check season progress"""
+    """Check season progress using account ID from numeric role"""
     season = db_get_current_season()
     
     if not season:
         return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    # Find numeric role (account ID)
+    account_id = None
+    for role in ctx.author.roles:
+        if role.name.isdigit():
+            account_id = role.name
+            break
+    
+    if not account_id:
+        return await ctx.send("❌ You don't have a numeric role with your account ID.\nAsk the owner to give you a role with your account ID number (e.g., role name: `16322115`).")
     
     season_id, season_name, start_date, created_at = season
     
@@ -737,7 +747,7 @@ async def progress(ctx):
     today = date.today().isoformat()
     
     try:
-        stats = await fetch_stats(start_date, today)
+        stats = await fetch_stats_for_account(account_id, start_date, today)
         
         if not stats:
             return await ctx.send("❌ Failed to fetch stats. Check bot logs.")
@@ -1590,3 +1600,34 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
