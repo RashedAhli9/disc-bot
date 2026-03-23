@@ -982,35 +982,18 @@ async def progress(ctx):
         await ctx.send(f"❌ Error: {str(e)}")
 
 
-@bot.tree.command(name="addlord", description="Add a lord to track for season leaderboards")
-async def addlord(inter: discord.Interaction, name: str, account_id: str):
-    if inter.user.id != OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
-    
-    await inter.response.defer(ephemeral=True)
-    
-    try:
-        # Check if season exists
-        season = db_get_current_season()
-        if not season:
-            return await inter.followup.send("❌ No season active. Use `/newseason` first.", ephemeral=True)
-        
-        # Add lord to database
-        db_add_lord(name, account_id)
-        
-        await inter.followup.send(
-            f"✅ **Lord Added!**\n"
-            f"**Name:** {name}\n"
-            f"**Account ID:** {account_id}\n\n"
-            f"Use `!topmana`, `!topdeaths`, etc. to see leaderboards!",
-            ephemeral=True
-        )
-    except Exception as e:
-        if "UNIQUE constraint failed" in str(e):
-            await inter.followup.send(f"❌ This account ID is already tracked.", ephemeral=True)
-        else:
-            print(f"[ADD LORD ERROR] {e}")
-            await inter.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="addlord", description="[DEPRECATED] Use numeric roles instead")
+async def addlord_deprecated(inter: discord.Interaction):
+    """Deprecated - use numeric roles instead"""
+    await inter.response.send_message(
+        "❌ `/addlord` is deprecated!\n\n"
+        "Instead, create a Discord role with your account ID as the name (e.g., `16322115`)\n"
+        "The bot will auto-detect all numeric roles!\n\n"
+        "Use `/forcefetch` to fetch everyone's stats.",
+        ephemeral=True
+    )
 
 
 @bot.command(name="forcefetch")
@@ -1063,18 +1046,6 @@ async def forcefetch(ctx):
     embed.set_footer(text=f"Fetched: {start_date} → {today}")
     
     await ctx.send(embed=embed)
-
-
-@bot.tree.command(name="addlord", description="[DEPRECATED] Use numeric roles instead")
-async def addlord_deprecated(inter: discord.Interaction):
-    """Deprecated - use numeric roles instead"""
-    await inter.response.send_message(
-        "❌ `/addlord` is deprecated!\n\n"
-        "Instead, create a Discord role with your account ID as the name (e.g., `16322115`)\n"
-        "The bot will auto-detect everyone with numeric roles!\n\n"
-        "Use `/forcefetch` to update everyone's stats.",
-        ephemeral=True
-    )
 
 
 @bot.command(name="topmana")
