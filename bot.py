@@ -496,6 +496,7 @@ def parse_stats(html):
     import re
     
     stats = {
+        "lord_name": None,
         "power": None,
         "power_gain": None,
         "merits": None,
@@ -530,6 +531,11 @@ def parse_stats(html):
                 return match.group(1).strip()
             return None
         
+        # Extract lord name - look for <h1 class="higher-value">NAME</h1>
+        name_match = re.search(r'<h1 class="higher-value">([^<]+)</h1>', html)
+        if name_match:
+            stats["lord_name"] = name_match.group(1).strip()
+        
         # Power stats
         stats["power_gain"] = find_stat_value("Highest Power")
         
@@ -563,7 +569,7 @@ def parse_stats(html):
         
         found_count = len([v for v in stats.values() if v])
         print(f"[PARSE] Successfully parsed stats: {found_count} fields found")
-        print(f"[PARSE] Stats: {stats}")
+        print(f"[PARSE] Lord name: {stats['lord_name']}")
         return stats
     except Exception as e:
         print(f"[PARSE STATS] Error: {e}")
@@ -827,26 +833,30 @@ async def newseason(inter: discord.Interaction):
 
 
 @bot.command(name="progress")
-async def progress(ctx):
-    """Check season progress using account ID from numeric role"""
+async def progress(ctx, account_id: str = None):
+    """Check season progress. Usage: !progress (uses your role) or !progress 16322115 (search specific lord)"""
     season = db_get_current_season()
     
     if not season:
         return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
-    # Find numeric role (account ID)
-    account_id = None
-    for role in ctx.author.roles:
-        if role.name.isdigit():
-            account_id = role.name
-            break
-    
+    # If no account_id provided, find from user's numeric role
     if not account_id:
-        return await ctx.send("❌ You don't have a numeric role with your account ID.\nAsk the owner to give you a role with your account ID number (e.g., role name: `16322115`).")
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                account_id = role.name
+                break
+        
+        if not account_id:
+            return await ctx.send("❌ You don't have a numeric role with your account ID.\nAsk the owner to give you a role with your account ID number (e.g., role name: `16322115`).\n\nOr use: `!progress 16322115` to search for a specific lord.")
+    
+    # Validate account_id is numeric
+    if not account_id.isdigit():
+        return await ctx.send("❌ Account ID must be numeric (e.g., `!progress 16322115`)")
     
     season_id, season_name, start_date, created_at = season
     
-    msg = await ctx.send("⏳ Fetching fresh stats from callofstats...")
+    msg = await ctx.send(f"⏳ Fetching fresh stats for account {account_id}...")
     
     # Get today's date and try backwards if no data
     from datetime import timedelta
@@ -891,7 +901,8 @@ async def progress(ctx):
         print(f"[PROGRESS] Parsed stats: {stats}")
         
         # Build text output
-        output = f"```Progress Report for season `{season_name}`\n\n"
+        lord_name = stats.get("lord_name", "Unknown")
+        output = f"```Progress Report for {lord_name} - Season {season_name}\n\n"
         
         # Power
         if stats["power_gain"]:
@@ -927,7 +938,7 @@ async def progress(ctx):
             kb_parts.append(f"T1: {stats['t1_gain']}")
         
         if kb_parts:
-            output += f"• Kill Breakdown\n{' '.join(kb_parts)}\n\n"
+            output += f"• Kill Breakdown\n{chr(10).join(kb_parts)}\n\n"
         
         # RSS Spent
         rss_spent_parts = []
@@ -941,7 +952,7 @@ async def progress(ctx):
             rss_spent_parts.append(f"💧 Mana: {stats['mana_spent']}")
         
         if rss_spent_parts:
-            output += f"💰 RSS Spent\n{' '.join(rss_spent_parts)}\n\n"
+            output += f"💰 RSS Spent\n{chr(10).join(rss_spent_parts)}\n\n"
         
         # RSS Gathered
         rss_gathered_parts = []
@@ -955,7 +966,7 @@ async def progress(ctx):
             rss_gathered_parts.append(f"💧 Mana: {stats['mana_gathered']}")
         
         if rss_gathered_parts:
-            output += f"👨‍🌾 RSS Gathered\n{' '.join(rss_gathered_parts)}\n\n"
+            output += f"👨‍🌾 RSS Gathered\n{chr(10).join(rss_gathered_parts)}\n\n"
         
         # Timespan
         output += f"📅 Timespan: {start_date} → {end_date_used}```"
@@ -1035,7 +1046,7 @@ async def forcefetch(ctx):
 
 @bot.command(name="topmana")
 async def topmana(ctx):
-    """Leaderboard for mana gathered this season"""
+    """Leaderboard for mana gathered this season (auto-detects numeric roles)"""
     season = db_get_current_season()
     if not season:
         return await ctx.send("❌ No season active. Use `/newseason` to start one.")
@@ -1047,46 +1058,47 @@ async def topmana(ctx):
     if not lords:
         return await ctx.send("❌ No members with numeric roles found. Create roles with account IDs as names (e.g., `16322115`).")
     
-    await ctx.send("⏳ Fetching leaderboard data...")
+    await ctx.send(f"⏳ Fetching leaderboard data for {len(lords)} lords...")
     
     # Fetch all lords in parallel
     fetch_tasks = [
-        fetch_stats_for_account(account_id, start_date, today)
-        for lord_id, lord_name, account_id in lords
+        fetch_stats_for_account(lord["account_id"], start_date, today)
+        for lord in lords
     ]
     all_stats = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     
     leaderboard = []
     
-    for (lord_id, lord_name, account_id), stats in zip(lords, all_stats):
+    for lord, stats in zip(lords, all_stats):
         try:
             if stats and not isinstance(stats, Exception) and stats.get("mana_gathered"):
                 # Convert mana_gathered to number for sorting
-                mana_str = stats["mana_gathered"].replace(",", "")
-                mana_num = int(mana_str) if mana_str.isdigit() else 0
+                mana_str = stats["mana_gathered"].replace(",", "").replace("+", "")
+                mana_num = int(mana_str) if mana_str.lstrip("-").isdigit() else 0
                 leaderboard.append({
-                    "name": lord_name,
+                    "name": stats.get("lord_name", lord["name"]),
                     "mana": mana_num,
                     "mana_str": stats["mana_gathered"]
                 })
         except Exception as e:
-            print(f"[TOPMANA ERROR] {lord_name}: {e}")
+            print(f"[TOPMANA ERROR] {lord['account_id']}: {e}")
     
     if not leaderboard:
-        return await ctx.send("❌ No data found. Make sure lords are added and have data.")
+        return await ctx.send("❌ No data found. Try running `/forcefetch` first.")
     
     # Sort by mana descending
     leaderboard.sort(key=lambda x: x["mana"], reverse=True)
     
-    # Build embed
-    embed = discord.Embed(
-        title=f"🏆 Top Mana Gathered - {season_name}",
-        description=f"Mana gathered from {start_date} to {today}",
-        color=0x3498db
-    )
-    
+    # Build text output instead of embed
+    output = f"```🏆 Top Mana Gathered - {season_name}\n\n"
     medals = ["🥇", "🥈", "🥉"]
-    for i, lord in enumerate(leaderboard):
+    
+    for i, lord in enumerate(leaderboard[:10]):  # Top 10
+        medal = medals[i] if i < 3 else f"{i+1}."
+        output += f"{medal} {lord['name']}: {lord['mana_str']}\n"
+    
+    output += f"```"
+    await ctx.send(output)
         medal = medals[i] if i < 3 else f"{i+1}."
         embed.add_field(
             name=f"{medal} {lord['name']}",
@@ -1099,7 +1111,7 @@ async def topmana(ctx):
 
 @bot.command(name="topdeaths")
 async def topdeaths(ctx):
-    """Leaderboard for most deaths this season"""
+    """Leaderboard for most deaths this season (auto-detects numeric roles)"""
     season = db_get_current_season()
     if not season:
         return await ctx.send("❌ No season active. Use `/newseason` to start one.")
@@ -1111,46 +1123,47 @@ async def topdeaths(ctx):
     if not lords:
         return await ctx.send("❌ No members with numeric roles found. Create roles with account IDs as names (e.g., `16322115`).")
     
-    await ctx.send("⏳ Fetching leaderboard data...")
+    await ctx.send(f"⏳ Fetching leaderboard data for {len(lords)} lords...")
     
     # Fetch all lords in parallel
     fetch_tasks = [
-        fetch_stats_for_account(account_id, start_date, today)
-        for lord_id, lord_name, account_id in lords
+        fetch_stats_for_account(lord["account_id"], start_date, today)
+        for lord in lords
     ]
     all_stats = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     
     leaderboard = []
     
-    for (lord_id, lord_name, account_id), stats in zip(lords, all_stats):
+    for lord, stats in zip(lords, all_stats):
         try:
             if stats and not isinstance(stats, Exception) and stats.get("deads_gain"):
                 # Convert deads to number for sorting
-                deaths_str = stats["deads_gain"].replace(",", "")
-                deaths_num = int(deaths_str) if deaths_str.isdigit() else 0
+                deaths_str = stats["deads_gain"].replace(",", "").replace("+", "")
+                deaths_num = int(deaths_str) if deaths_str.lstrip("-").isdigit() else 0
                 leaderboard.append({
-                    "name": lord_name,
+                    "name": stats.get("lord_name", lord["name"]),
                     "deaths": deaths_num,
                     "deaths_str": stats["deads_gain"]
                 })
         except Exception as e:
-            print(f"[TOPDEATHS ERROR] {lord_name}: {e}")
+            print(f"[TOPDEATHS ERROR] {lord['account_id']}: {e}")
     
     if not leaderboard:
-        return await ctx.send("❌ No data found. Make sure lords are added and have data.")
+        return await ctx.send("❌ No data found. Try running `/forcefetch` first.")
     
     # Sort by deaths descending
     leaderboard.sort(key=lambda x: x["deaths"], reverse=True)
     
-    # Build embed
-    embed = discord.Embed(
-        title=f"💀 Most Deaths - {season_name}",
-        description=f"Deaths from {start_date} to {today}",
-        color=0xe74c3c
-    )
-    
+    # Build text output instead of embed
+    output = f"```💀 Most Deaths - {season_name}\n\n"
     medals = ["🥇", "🥈", "🥉"]
-    for i, lord in enumerate(leaderboard):
+    
+    for i, lord in enumerate(leaderboard[:10]):  # Top 10
+        medal = medals[i] if i < 3 else f"{i+1}."
+        output += f"{medal} {lord['name']}: {lord['deaths_str']}\n"
+    
+    output += f"```"
+    await ctx.send(output)
         medal = medals[i] if i < 3 else f"{i+1}."
         embed.add_field(
             name=f"{medal} {lord['name']}",
