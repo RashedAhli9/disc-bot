@@ -224,25 +224,40 @@ async def fetch_highest_power(account_id):
                 
                 html = await response.text()
                 
-                # Look for: <span class="subtle">Highest Power</span> ... <div class="value">154,135,640</div>
-                pattern = r'<span class="subtle">Highest Power</span>[\s\n]*<div class="value">([0-9,]+)</div>'
-                match = re.search(pattern, html, re.DOTALL)
+                # Try multiple patterns
+                patterns = [
+                    r'Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
+                    r'<span class="subtle">Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
+                    r'Highest Power.*?([0-9,]+)',
+                ]
                 
-                if match:
-                    power_str = match.group(1).replace(",", "")
-                    try:
-                        highest_power = int(power_str)
-                        print(f"[HIGHEST POWER] {account_id} = {highest_power:,}")
-                        return highest_power
-                    except Exception as e:
-                        print(f"[HIGHEST POWER] Failed to parse: {e}")
-                        return None
+                for i, pattern in enumerate(patterns):
+                    match = re.search(pattern, html, re.DOTALL)
+                    if match:
+                        power_str = match.group(1).replace(",", "")
+                        try:
+                            highest_power = int(power_str)
+                            print(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i})")
+                            return highest_power
+                        except Exception as e:
+                            print(f"[HIGHEST POWER] Failed to parse: {e}")
+                
+                # Debug: show section around "Highest Power"
+                idx = html.find("Highest Power")
+                if idx != -1:
+                    debug_html = html[max(0, idx-200):min(len(html), idx+400)]
+                    print(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{debug_html}")
                 else:
-                    print(f"[HIGHEST POWER] Pattern not found for {account_id}")
-                    return None
+                    print(f"[HIGHEST POWER] 'Highest Power' not found in HTML at all")
+                    # Show first 3000 chars
+                    print(f"[HIGHEST POWER DEBUG] First 3000 chars:\n{html[:3000]}")
+                
+                return None
     
     except Exception as e:
         print(f"[HIGHEST POWER ERROR] {account_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
     """
     Fetch the CURRENT highest power for a lord (no date range)
@@ -296,12 +311,21 @@ async def fetch_current_t_kills(account_id):
                 
                 t_kills = {}
                 
-                # Look for T5 Kills pattern - more flexible
+                # Look for T5 Kills pattern - very flexible
                 for tier in ["T5", "T4", "T3", "T2", "T1"]:
-                    # Pattern: <span class="subtle">T5 Kills</span> ... <div class="value">298,193,978</div>
-                    # Allow for any whitespace/newlines between tags
-                    pattern = f'<span class="subtle">{tier} Kills</span>[\\s\\n]*<div class="value">([0-9,]+)</div>'
-                    match = re.search(pattern, html, re.DOTALL)
+                    # Try multiple patterns
+                    patterns = [
+                        f'{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
+                        f'<span class="subtle">{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
+                        f'{tier} Kills.*?([0-9,]+)',
+                    ]
+                    
+                    match = None
+                    for pattern in patterns:
+                        match = re.search(pattern, html, re.DOTALL)
+                        if match:
+                            break
+                    
                     if match:
                         kills_str = match.group(1).replace(",", "")
                         try:
@@ -311,14 +335,17 @@ async def fetch_current_t_kills(account_id):
                             print(f"[CURRENT T-KILLS] Failed to parse {tier}: {e}")
                     else:
                         print(f"[CURRENT T-KILLS] Pattern not found for {tier}")
+                        # Debug
+                        idx = html.find(f"{tier} Kills")
+                        if idx != -1:
+                            debug_html = html[max(0, idx-100):min(len(html), idx+300)]
+                            print(f"[CURRENT T-KILLS DEBUG {tier}]:\n{debug_html}")
                 
                 if t_kills:
                     print(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
                     return t_kills
                 else:
-                    print(f"[CURRENT T-KILLS] Could not parse T-kills for {account_id}")
-                    # Debug: print first 5000 chars of HTML
-                    print(f"[DEBUG HTML] {html[:5000]}")
+                    print(f"[CURRENT T-KILLS] Could not parse any T-kills for {account_id}")
                     return {}
     except Exception as e:
         print(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
