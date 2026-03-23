@@ -1076,35 +1076,44 @@ async def progress(ctx, user_input: str = None):
             except:
                 pass
         
-        # Build text output - READABLE FORMAT WITH PROPER SPACING
+        # Build text output - MATCH REFERENCE FORMAT
         lord_name = stats.get("lord_name", "Unknown")
-        output = f"```🏆 {lord_name} - Season {season_name}\n"
+        output = f"```✅ Progress Report for {lord_name} for season {season_name}\n"
         
-        # Power - with safety check
-        if current_power and power_gain:
-            output += f"⚡ Power: {current_power:,} (+{power_gain:,}){power_rank_str}\n"
-        elif current_power:
-            output += f"⚡ Power: {current_power:,}{power_rank_str}\n"
+        # Power - with current total + season gain
+        if current_power:
+            output += f"⚡ Power\n"
+            if power_gain:
+                output += f"{current_power:,} (+{power_gain:,}){power_rank_str}\n"
+            else:
+                output += f"{current_power:,}{power_rank_str}\n"
         
-        # Merits - with safety check
+        # Merits - with ranking
         if stats.get("merits") and stats.get("merits_pct"):
-            output += f"🏅 Merits: {stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
-        
-        # Kills, Deaths, Healed
-        line = ""
-        if stats.get("kills_gain"):
-            line += f"⚔️ Kills: {stats['kills_gain']}{kills_rank_str}  "
-        if stats.get("deads_gain"):
-            line += f"💀 Deaths: {stats['deads_gain']}{deads_rank_str}  "
-        if stats.get("healed_gain"):
-            line += f"❤️ Healed: {stats['healed_gain']}{healed_rank_str}"
-        if line:
-            output += line + "\n"
+            output += f"🏅 Merits\n"
+            output += f"{stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
         
         output += f"\n"
         
-        # Kill Breakdown - each tier on own line
-        output += f"🗡️ Kill Breakdown\n"
+        # Kills - own line
+        if stats.get("kills_gain"):
+            output += f"⚔️ Kills\n"
+            output += f"{stats['kills_gain']}{kills_rank_str}\n"
+        
+        # Deaths - own line
+        if stats.get("deads_gain"):
+            output += f"💀 Deaths\n"
+            output += f"{stats['deads_gain']}{deads_rank_str}\n"
+        
+        # Healed - own line
+        if stats.get("healed_gain"):
+            output += f"❤️ Healed\n"
+            output += f"{stats['healed_gain']}{healed_rank_str}\n"
+        
+        output += f"\n"
+        
+        # Kill Breakdown - show current total + season gain
+        output += f"⚔️ Kill Breakdown\n"
         if stats.get("t5_gain"):
             t5_current = current_t_kills.get("t5")
             if t5_current:
@@ -1169,7 +1178,7 @@ async def progress(ctx, user_input: str = None):
         output += f"\n"
         
         # Timespan
-        output += f"📅 {start_date} → {end_date_used}```"
+        output += f"📅 Timespan: {start_date} → {end_date_used}```"
         
         await msg.edit(content=output)
         
