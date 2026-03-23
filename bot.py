@@ -431,7 +431,7 @@ async def fetch_stats(start_date, end_date):
     
     return await fetch_stats_for_account(account_id, start_date, end_date)
 
-async def fetch_stats_for_account(account_id, start_date, end_date):
+async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=False):
     """Fetch player stats from callofstats for a specific account (with caching)"""
     global _stats_cache
     
@@ -439,9 +439,9 @@ async def fetch_stats_for_account(account_id, start_date, end_date):
         print("[CALLOFSTATS] Missing account_id")
         return None
     
-    # Check cache first
+    # Check cache first (unless skip_cache=True)
     cache_key = f"{account_id}_{start_date}_{end_date}"
-    if cache_key in _stats_cache:
+    if not skip_cache and cache_key in _stats_cache:
         timestamp, cached_stats = _stats_cache[cache_key]
         age = (datetime.utcnow() - timestamp).total_seconds()
         if age < CACHE_DURATION:
@@ -450,6 +450,8 @@ async def fetch_stats_for_account(account_id, start_date, end_date):
         else:
             print(f"[CACHE EXPIRED] Account {account_id}, fetching fresh data")
             del _stats_cache[cache_key]
+    elif skip_cache:
+        print(f"[SKIP CACHE] Fetching fresh data for {account_id}")
     
     try:
         # Get cached session (reuses login)
@@ -844,16 +846,20 @@ async def progress(ctx):
     
     season_id, season_name, start_date, created_at = season
     
-    await ctx.send("⏳ Fetching stats from callofstats...")
+    msg = await ctx.send("⏳ Fetching fresh stats from callofstats...")
     
     # Get today's date
     today = date.today().isoformat()
     
     try:
-        stats = await fetch_stats_for_account(account_id, start_date, today)
+        # Fetch fresh data (ignore cache)
+        stats = await fetch_stats_for_account(account_id, start_date, today, skip_cache=True)
         
         if not stats:
-            return await ctx.send("❌ Failed to fetch stats. Check bot logs.")
+            return await msg.edit(content="❌ Failed to fetch stats. Check bot logs.")
+        
+        # Debug: log what we parsed
+        print(f"[PROGRESS] Parsed stats: {stats}")
         
         # Build text output
         output = f"```Progress Report for season `{season_name}`\n\n"
@@ -897,13 +903,13 @@ async def progress(ctx):
         # RSS Spent
         rss_spent_parts = []
         if stats["gold_spent"]:
-            rss_spent_parts.append(f":coin: Gold: {stats['gold_spent']}")
+            rss_spent_parts.append(f"🪙 Gold: {stats['gold_spent']}")
         if stats["wood_spent"]:
-            rss_spent_parts.append(f":wood: Wood: {stats['wood_spent']}")
+            rss_spent_parts.append(f"🪵 Wood: {stats['wood_spent']}")
         if stats["ore_spent"]:
-            rss_spent_parts.append(f":pick: Ore: {stats['ore_spent']}")
+            rss_spent_parts.append(f"⛏️ Ore: {stats['ore_spent']}")
         if stats["mana_spent"]:
-            rss_spent_parts.append(f":droplet: Mana: {stats['mana_spent']}")
+            rss_spent_parts.append(f"💧 Mana: {stats['mana_spent']}")
         
         if rss_spent_parts:
             output += f"💰 RSS Spent\n{' '.join(rss_spent_parts)}\n\n"
@@ -911,25 +917,25 @@ async def progress(ctx):
         # RSS Gathered
         rss_gathered_parts = []
         if stats["gold_gathered"]:
-            rss_gathered_parts.append(f":coin: Gold: {stats['gold_gathered']}")
+            rss_gathered_parts.append(f"🪙 Gold: {stats['gold_gathered']}")
         if stats["wood_gathered"]:
-            rss_gathered_parts.append(f":wood: Wood: {stats['wood_gathered']}")
+            rss_gathered_parts.append(f"🪵 Wood: {stats['wood_gathered']}")
         if stats["ore_gathered"]:
-            rss_gathered_parts.append(f":pick: Ore: {stats['ore_gathered']}")
+            rss_gathered_parts.append(f"⛏️ Ore: {stats['ore_gathered']}")
         if stats["mana_gathered"]:
-            rss_gathered_parts.append(f":droplet: Mana: {stats['mana_gathered']}")
+            rss_gathered_parts.append(f"💧 Mana: {stats['mana_gathered']}")
         
         if rss_gathered_parts:
-            output += f":farmer: RSS Gathered\n{' '.join(rss_gathered_parts)}\n\n"
+            output += f"👨‍🌾 RSS Gathered\n{' '.join(rss_gathered_parts)}\n\n"
         
         # Timespan
         output += f"📅 Timespan: {start_date} → {today}```"
         
-        await ctx.send(output)
+        await msg.edit(content=output)
         
     except Exception as e:
         print(f"[PROGRESS ERROR] {e}")
-        await ctx.send(f"❌ Error: {str(e)}")
+        await msg.edit(content=f"❌ Error: {str(e)}")
 
 
 
