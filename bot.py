@@ -259,26 +259,34 @@ async def fetch_current_t_kills(account_id):
                 
                 t_kills = {}
                 
-                # Look for T5 Kills pattern
+                # Look for T5 Kills pattern - more flexible
                 for tier in ["T5", "T4", "T3", "T2", "T1"]:
                     # Pattern: <span class="subtle">T5 Kills</span> ... <div class="value">298,193,978</div>
-                    pattern = f'<span class="subtle">{tier} Kills</span>\\s*<div class="value">([0-9,]+)</div>'
-                    match = re.search(pattern, html)
+                    # Allow for any whitespace/newlines between tags
+                    pattern = f'<span class="subtle">{tier} Kills</span>[\\s\\n]*<div class="value">([0-9,]+)</div>'
+                    match = re.search(pattern, html, re.DOTALL)
                     if match:
                         kills_str = match.group(1).replace(",", "")
                         try:
                             t_kills[tier.lower()] = int(kills_str)
-                        except:
-                            pass
+                            print(f"[CURRENT T-KILLS] Parsed {tier}: {kills_str}")
+                        except Exception as e:
+                            print(f"[CURRENT T-KILLS] Failed to parse {tier}: {e}")
+                    else:
+                        print(f"[CURRENT T-KILLS] Pattern not found for {tier}")
                 
                 if t_kills:
                     print(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
                     return t_kills
                 else:
                     print(f"[CURRENT T-KILLS] Could not parse T-kills for {account_id}")
+                    # Debug: print first 5000 chars of HTML
+                    print(f"[DEBUG HTML] {html[:5000]}")
                     return {}
     except Exception as e:
         print(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 
@@ -1071,42 +1079,61 @@ async def progress(ctx, user_input: str = None):
         # Build text output - READABLE FORMAT WITH PROPER SPACING
         lord_name = stats.get("lord_name", "Unknown")
         output = f"```🏆 {lord_name} - Season {season_name}\n"
-        output += f"⚡ Power: {current_power:,} (+{power_gain:,}){power_rank_str}\n"
-        output += f"🏅 Merits: {stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
-        output += f"⚔️ Kills: {stats['kills_gain']}{kills_rank_str}  💀 Deaths: {stats['deads_gain']}{deads_rank_str}  ❤️ Healed: {stats['healed_gain']}{healed_rank_str}\n"
+        
+        # Power - with safety check
+        if current_power and power_gain:
+            output += f"⚡ Power: {current_power:,} (+{power_gain:,}){power_rank_str}\n"
+        elif current_power:
+            output += f"⚡ Power: {current_power:,}{power_rank_str}\n"
+        
+        # Merits - with safety check
+        if stats.get("merits") and stats.get("merits_pct"):
+            output += f"🏅 Merits: {stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
+        
+        # Kills, Deaths, Healed
+        line = ""
+        if stats.get("kills_gain"):
+            line += f"⚔️ Kills: {stats['kills_gain']}{kills_rank_str}  "
+        if stats.get("deads_gain"):
+            line += f"💀 Deaths: {stats['deads_gain']}{deads_rank_str}  "
+        if stats.get("healed_gain"):
+            line += f"❤️ Healed: {stats['healed_gain']}{healed_rank_str}"
+        if line:
+            output += line + "\n"
+        
         output += f"\n"
         
         # Kill Breakdown - each tier on own line
         output += f"🗡️ Kill Breakdown\n"
-        if stats["t5_gain"]:
+        if stats.get("t5_gain"):
             t5_current = current_t_kills.get("t5")
             if t5_current:
                 output += f"T5: {t5_current:,} ({stats['t5_gain']})\n"
             else:
                 output += f"T5: {stats['t5_gain']}\n"
         
-        if stats["t4_gain"]:
+        if stats.get("t4_gain"):
             t4_current = current_t_kills.get("t4")
             if t4_current:
                 output += f"T4: {t4_current:,} ({stats['t4_gain']})\n"
             else:
                 output += f"T4: {stats['t4_gain']}\n"
         
-        if stats["t3_gain"]:
+        if stats.get("t3_gain"):
             t3_current = current_t_kills.get("t3")
             if t3_current:
                 output += f"T3: {t3_current:,} ({stats['t3_gain']})\n"
             else:
                 output += f"T3: {stats['t3_gain']}\n"
         
-        if stats["t2_gain"]:
+        if stats.get("t2_gain"):
             t2_current = current_t_kills.get("t2")
             if t2_current:
                 output += f"T2: {t2_current:,} ({stats['t2_gain']})\n"
             else:
                 output += f"T2: {stats['t2_gain']}\n"
         
-        if stats["t1_gain"]:
+        if stats.get("t1_gain"):
             t1_current = current_t_kills.get("t1")
             if t1_current:
                 output += f"T1: {t1_current:,} ({stats['t1_gain']})\n"
@@ -1117,26 +1144,26 @@ async def progress(ctx, user_input: str = None):
         
         # RSS Spent - each resource on own line
         output += f"💰 RSS Spent\n"
-        if stats["gold_spent"]:
+        if stats.get("gold_spent"):
             output += f"🪙 Gold: {stats['gold_spent']}\n"
-        if stats["wood_spent"]:
+        if stats.get("wood_spent"):
             output += f"🪵 Wood: {stats['wood_spent']}\n"
-        if stats["ore_spent"]:
+        if stats.get("ore_spent"):
             output += f"⛏️ Ore: {stats['ore_spent']}\n"
-        if stats["mana_spent"]:
+        if stats.get("mana_spent"):
             output += f"💧 Mana: {stats['mana_spent']}\n"
         output += f"Total: {total_spent:,}\n"
         output += f"\n"
         
         # RSS Gathered - each resource on own line
         output += f"👨‍🌾 RSS Gathered\n"
-        if stats["gold_gathered"]:
+        if stats.get("gold_gathered"):
             output += f"🪙 Gold: {stats['gold_gathered']}\n"
-        if stats["wood_gathered"]:
+        if stats.get("wood_gathered"):
             output += f"🪵 Wood: {stats['wood_gathered']}\n"
-        if stats["ore_gathered"]:
+        if stats.get("ore_gathered"):
             output += f"⛏️ Ore: {stats['ore_gathered']}\n"
-        if stats["mana_gathered"]:
+        if stats.get("mana_gathered"):
             output += f"💧 Mana: {stats['mana_gathered']}\n"
         output += f"Total: {total_gathered:,}\n"
         output += f"\n"
