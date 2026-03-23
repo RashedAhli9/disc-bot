@@ -206,7 +206,48 @@ def get_all_lords_from_guild(guild):
 _stats_cache = {}
 CACHE_EXPIRY_HOURS = 72  # 3 days
 
-def get_cached_stats(account_id, start_date, end_date):
+async def fetch_stats_with_fallback(account_id, start_date, end_date):
+    """
+    Fetch stats and automatically fallback to earlier dates if data is empty.
+    Returns (stats, actual_end_date_used)
+    """
+    from datetime import timedelta
+    
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    
+    # Try up to 5 days back
+    for days_back in range(6):
+        current_end = (end_dt - timedelta(days=days_back)).isoformat()
+        print(f"[FALLBACK] Trying date: {current_end}")
+        
+        stats = await fetch_stats_for_account(account_id, start_date, current_end, skip_cache=True)
+        
+        if not stats:
+            print(f"[FALLBACK] No stats returned for {current_end}, trying earlier")
+            continue
+        
+        # Check if any data exists (not all zeros/None)
+        has_data = False
+        for key in ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain", 
+                    "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
+                    "gold_spent", "wood_spent", "ore_spent", "mana_spent",
+                    "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
+            val = stats.get(key)
+            if val and val != "+0" and val != "0":
+                has_data = True
+                break
+        
+        if has_data:
+            print(f"[FALLBACK] Found data for {current_end}")
+            return stats, current_end
+        else:
+            print(f"[FALLBACK] All zeros for {current_end}, trying earlier")
+    
+    # Return the original stats even if empty (for last resort)
+    return stats, end_date
+
+
+
     """Get stats from cache if valid"""
     cache_key = f"{account_id}_{start_date}_{end_date}"
     if cache_key in _stats_cache:
@@ -858,41 +899,11 @@ async def progress(ctx, account_id: str = None):
     
     msg = await ctx.send(f"⏳ Fetching fresh stats for account {account_id}...")
     
-    # Get today's date and try backwards if no data
-    from datetime import timedelta
-    today = date.today()
-    stats = None
-    end_date_used = today.isoformat()
+    today = date.today().isoformat()
     
     try:
-        # Try today first, then go back up to 5 days
-        for days_back in range(6):
-            current_date = (today - timedelta(days=days_back)).isoformat()
-            print(f"[PROGRESS] Attempting fetch for date: {current_date}")
-            
-            stats = await fetch_stats_for_account(account_id, start_date, current_date, skip_cache=True)
-            
-            if not stats:
-                continue
-            
-            # Check if data is empty (all zeros or None)
-            has_data = False
-            for key in ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain", 
-                        "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
-                        "gold_spent", "wood_spent", "ore_spent", "mana_spent",
-                        "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
-                val = stats.get(key)
-                if val and val != "+0" and val != "0":
-                    has_data = True
-                    break
-            
-            if has_data:
-                end_date_used = current_date
-                print(f"[PROGRESS] Found data for date: {current_date}")
-                break
-            else:
-                print(f"[PROGRESS] No data for {current_date}, trying earlier date...")
-                stats = None
+        # Use universal fallback function
+        stats, end_date_used = await fetch_stats_with_fallback(account_id, start_date, today)
         
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
@@ -1060,35 +1071,42 @@ async def topmana(ctx):
     
     await ctx.send(f"⏳ Fetching leaderboard data for {len(lords)} lords...")
     
-    # Fetch all lords in parallel
+    # Fetch all lords in parallel with fallback
     fetch_tasks = [
-        fetch_stats_for_account(lord["account_id"], start_date, today)
+        fetch_stats_with_fallback(lord["account_id"], start_date, today)
         for lord in lords
     ]
-    all_stats = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     
     leaderboard = []
+    actual_end_date = today
     
-    for lord, stats in zip(lords, all_stats):
+    for lord, result in zip(lords, results):
         try:
             # Show all lords, even without data
             lord_name = "Unknown"
             mana_str = "+0"
             mana_num = 0
             
-            if stats and not isinstance(stats, Exception):
-                lord_name = stats.get("lord_name", lord["name"])
+            if result and not isinstance(result, Exception):
+                stats, end_date_used = result
+                actual_end_date = end_date_used
                 
-                # Get mana_gathered if it exists
-                if stats.get("mana_gathered"):
-                    mana_str = stats["mana_gathered"]
-                    mana_clean = mana_str.replace(",", "").replace("+", "")
-                    mana_num = int(mana_clean) if mana_clean.lstrip("-").isdigit() else 0
+                if stats:
+                    lord_name = stats.get("lord_name", lord["name"])
+                    
+                    # Get mana_gathered if it exists
+                    if stats.get("mana_gathered"):
+                        mana_str = stats["mana_gathered"]
+                        mana_clean = mana_str.replace(",", "").replace("+", "")
+                        mana_num = int(mana_clean) if mana_clean.lstrip("-").isdigit() else 0
+                    else:
+                        print(f"[TOPMANA DEBUG] {lord['account_id']} - mana_gathered is None")
                 else:
-                    print(f"[TOPMANA DEBUG] {lord['account_id']} - mana_gathered is None")
-                    print(f"[TOPMANA DEBUG] Full stats: {stats}")
+                    print(f"[TOPMANA ERROR] {lord['account_id']} - stats is None")
+                    lord_name = lord["name"]
             else:
-                print(f"[TOPMANA ERROR] {lord['account_id']} - stats failed: {stats}")
+                print(f"[TOPMANA ERROR] {lord['account_id']} - result failed: {result}")
                 lord_name = lord["name"]
             
             leaderboard.append({
@@ -1115,7 +1133,7 @@ async def topmana(ctx):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['mana_str']}\n"
     
-    output += f"```"
+    output += f"\n📅 Data from: {start_date} → {actual_end_date}```"
     await ctx.send(output)
 
 
@@ -1135,35 +1153,42 @@ async def topdeaths(ctx):
     
     await ctx.send(f"⏳ Fetching leaderboard data for {len(lords)} lords...")
     
-    # Fetch all lords in parallel
+    # Fetch all lords in parallel with fallback
     fetch_tasks = [
-        fetch_stats_for_account(lord["account_id"], start_date, today)
+        fetch_stats_with_fallback(lord["account_id"], start_date, today)
         for lord in lords
     ]
-    all_stats = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     
     leaderboard = []
+    actual_end_date = today
     
-    for lord, stats in zip(lords, all_stats):
+    for lord, result in zip(lords, results):
         try:
             # Show all lords, even without data
             lord_name = "Unknown"
             deaths_str = "+0"
             deaths_num = 0
             
-            if stats and not isinstance(stats, Exception):
-                lord_name = stats.get("lord_name", lord["name"])
+            if result and not isinstance(result, Exception):
+                stats, end_date_used = result
+                actual_end_date = end_date_used
                 
-                # Get deads_gain if it exists
-                if stats.get("deads_gain"):
-                    deaths_str = stats["deads_gain"]
-                    deaths_clean = deaths_str.replace(",", "").replace("+", "")
-                    deaths_num = int(deaths_clean) if deaths_clean.lstrip("-").isdigit() else 0
+                if stats:
+                    lord_name = stats.get("lord_name", lord["name"])
+                    
+                    # Get deads_gain if it exists
+                    if stats.get("deads_gain"):
+                        deaths_str = stats["deads_gain"]
+                        deaths_clean = deaths_str.replace(",", "").replace("+", "")
+                        deaths_num = int(deaths_clean) if deaths_clean.lstrip("-").isdigit() else 0
+                    else:
+                        print(f"[TOPDEATHS DEBUG] {lord['account_id']} - deads_gain is None")
                 else:
-                    print(f"[TOPDEATHS DEBUG] {lord['account_id']} - deads_gain is None")
-                    print(f"[TOPDEATHS DEBUG] Full stats: {stats}")
+                    print(f"[TOPDEATHS ERROR] {lord['account_id']} - stats is None")
+                    lord_name = lord["name"]
             else:
-                print(f"[TOPDEATHS ERROR] {lord['account_id']} - stats failed: {stats}")
+                print(f"[TOPDEATHS ERROR] {lord['account_id']} - result failed: {result}")
                 lord_name = lord["name"]
             
             leaderboard.append({
@@ -1190,7 +1215,7 @@ async def topdeaths(ctx):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['deaths_str']}\n"
     
-    output += f"```"
+    output += f"\n📅 Data from: {start_date} → {actual_end_date}```"
     await ctx.send(output)
 
 
