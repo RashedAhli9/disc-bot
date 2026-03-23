@@ -1762,113 +1762,121 @@ async def compare(ctx, user1: str = None, user2: str = None):
         name1 = stats1.get("lord_name", "Unknown")
         name2 = stats2.get("lord_name", "Unknown")
         
-        # Build comparison as EMBED
-        embed = discord.Embed(
-            title=f"⚔️ {name1} vs {name2}",
-            color=0xFF6B6B
-        )
+        # Build comparison as CODE BLOCK (ORIGINAL FORMAT)
+        name1 = stats1.get("lord_name", "Unknown")
+        name2 = stats2.get("lord_name", "Unknown")
         
-        # Power
+        output = f"```⚔️ {name1} vs {name2}\n\n"
+        
+        # Power - side by side with gain
         if power1 and power2:
-            embed.add_field(
-                name="⚡ Power",
-                value=f"{name1}: {power1:,}\n{name2}: {power2:,}",
-                inline=False
-            )
+            output += f"⚡ Power\n"
+            
+            # Get power gain from seasonal stats
+            power_gain1 = 0
+            power_gain2 = 0
+            
+            if stats1.get("power_gain"):
+                try:
+                    pg1_str = stats1.get("power_gain", "+0").replace("+", "").replace(",", "")
+                    power_gain1 = int(pg1_str)
+                except:
+                    power_gain1 = 0
+            
+            if stats2.get("power_gain"):
+                try:
+                    pg2_str = stats2.get("power_gain", "+0").replace("+", "").replace(",", "")
+                    power_gain2 = int(pg2_str)
+                except:
+                    power_gain2 = 0
+            
+            output += f"{name1}: {power1:,} (+{power_gain1:,})\n"
+            output += f"{name2}: {power2:,} (+{power_gain2:,})\n"
+            output += f"\n"
         
-        # Merits
+        # Merits - side by side
         m1 = stats1.get("merits", "+0")
         m2 = stats2.get("merits", "+0")
         mp1 = stats1.get("merits_pct", "0%")
         mp2 = stats2.get("merits_pct", "0%")
-        embed.add_field(
-            name="🏅 Merits",
-            value=f"{name1}: {m1} ({mp1})\n{name2}: {m2} ({mp2})",
-            inline=False
-        )
+        output += f"🏅 Merits\n"
+        output += f"{name1}: {m1} ({mp1})\n"
+        output += f"{name2}: {m2} ({mp2})\n"
+        output += f"\n"
         
-        # Deaths
-        d1 = stats1.get("deads_gain", "+0")
-        d2 = stats2.get("deads_gain", "+0")
-        embed.add_field(
-            name="💀 Deaths",
-            value=f"{name1}: {d1}\n{name2}: {d2}",
-            inline=False
-        )
-        
-        # Healed
-        h1 = stats1.get("healed_gain", "+0")
-        h2 = stats2.get("healed_gain", "+0")
-        embed.add_field(
-            name="❤️ Healed",
-            value=f"{name1}: {h1}\n{name2}: {h2}",
-            inline=False
-        )
-        
-        # Kills
+        # Kills + Total T-kills combined
         k1 = stats1.get("kills_gain", "+0")
         k2 = stats2.get("kills_gain", "+0")
+        d1 = stats1.get("deads_gain", "+0")
+        d2 = stats2.get("deads_gain", "+0")
+        h1 = stats1.get("healed_gain", "+0")
+        h2 = stats2.get("healed_gain", "+0")
+        
+        # Calculate total T-kills
         total_t1 = sum(t_kills1.values()) if t_kills1 else 0
         total_t2 = sum(t_kills2.values()) if t_kills2 else 0
-        embed.add_field(
-            name="⚔️ Kills",
-            value=f"{name1}: {total_t1:,} ({k1})\n{name2}: {total_t2:,} ({k2})",
-            inline=False
-        )
+        
+        output += f"💀 Deaths\n"
+        output += f"{name1}: {d1}\n"
+        output += f"{name2}: {d2}\n"
+        output += f"\n"
+        
+        output += f"❤️ Healed\n"
+        output += f"{name1}: {h1}\n"
+        output += f"{name2}: {h2}\n"
+        output += f"\n"
+        
+        output += f"⚔️ Kills\n"
+        output += f"{name1}: {total_t1:,} ({k1})\n"
+        output += f"{name2}: {total_t2:,} ({k2})\n"
+        output += f"\n"
         
         # T-Tier Breakdown
+        output += f"T5 Kills\n"
         t5_1 = t_kills1.get("t5", 0)
         t5_2 = t_kills2.get("t5", 0)
-        embed.add_field(
-            name="T5 Kills",
-            value=f"{name1}: {t5_1:,}\n{name2}: {t5_2:,}",
-            inline=False
-        )
+        output += f"{name1}: {t5_1:,}\n"
+        output += f"{name2}: {t5_2:,}\n"
+        output += f"\n"
         
+        output += f"T4 Kills\n"
         t4_1 = t_kills1.get("t4", 0)
         t4_2 = t_kills2.get("t4", 0)
-        embed.add_field(
-            name="T4 Kills",
-            value=f"{name1}: {t4_1:,}\n{name2}: {t4_2:,}",
-            inline=False
-        )
+        output += f"{name1}: {t4_1:,}\n"
+        output += f"{name2}: {t4_2:,}\n"
+        output += f"\n"
         
+        output += f"T3 Kills\n"
         t3_1 = t_kills1.get("t3", 0)
         t3_2 = t_kills2.get("t3", 0)
-        embed.add_field(
-            name="T3 Kills",
-            value=f"{name1}: {t3_1:,}\n{name2}: {t3_2:,}",
-            inline=False
-        )
+        output += f"{name1}: {t3_1:,}\n"
+        output += f"{name2}: {t3_2:,}\n"
+        output += f"\n"
         
+        output += f"T2 Kills\n"
         t2_1 = t_kills1.get("t2", 0)
         t2_2 = t_kills2.get("t2", 0)
-        embed.add_field(
-            name="T2 Kills",
-            value=f"{name1}: {t2_1:,}\n{name2}: {t2_2:,}",
-            inline=False
-        )
+        output += f"{name1}: {t2_1:,}\n"
+        output += f"{name2}: {t2_2:,}\n"
+        output += f"\n"
         
+        output += f"T1 Kills\n"
         t1_1 = t_kills1.get("t1", 0)
         t1_2 = t_kills2.get("t1", 0)
-        embed.add_field(
-            name="T1 Kills",
-            value=f"{name1}: {t1_1:,}\n{name2}: {t1_2:,}",
-            inline=False
-        )
+        output += f"{name1}: {t1_1:,}\n"
+        output += f"{name2}: {t1_2:,}\n"
+        output += f"\n"
         
         # Mana Gathered
         mg1 = stats1.get("mana_gathered", "+0")
         mg2 = stats2.get("mana_gathered", "+0")
-        embed.add_field(
-            name="💧 Mana Gathered",
-            value=f"{name1}: {mg1}\n{name2}: {mg2}",
-            inline=False
-        )
+        output += f"💧 Mana Gathered\n"
+        output += f"{name1}: {mg1}\n"
+        output += f"{name2}: {mg2}\n"
         
-        embed.set_footer(text=f"Season: {season_name}")
+        output += f"```"
         
-        await msg.edit(embed=embed)
+        await msg.edit(content=output)
     except Exception as e:
         print(f"[COMPARE ERROR] {e}")
         import traceback
