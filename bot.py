@@ -490,7 +490,7 @@ async def fetch_stats_for_account(account_id, start_date, end_date):
         return None
 
 def parse_stats(html):
-    """Parse stats from HTML"""
+    """Parse stats from HTML using proper HTML parsing"""
     import re
     
     stats = {
@@ -519,84 +519,49 @@ def parse_stats(html):
     }
     
     try:
-        # Extract numbers with +/- prefix and commas
-        def extract_number(pattern, html):
-            match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+        def find_stat_value(label_name):
+            """Find value for a stat by its label using HTML structure"""
+            # Look for: <span class="subtle">LABEL</span> ... <div class="value">VALUE</div>
+            pattern = f'<span class="subtle">{re.escape(label_name)}</span>\\s*<div class="value">([^<]+)</div>'
+            match = re.search(pattern, html)
             if match:
                 return match.group(1).strip()
             return None
         
-        # Power - look for "Highest Power" or similar
-        power_match = re.search(r'Highest\s+Power[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if power_match:
-            stats["power_gain"] = power_match.group(1)
+        # Power stats
+        stats["power_gain"] = find_stat_value("Highest Power")
         
-        # Merits - look for "Merits" label
-        merits_match = re.search(r'Merits[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if merits_match:
-            stats["merits"] = merits_match.group(1)
+        # Merits
+        stats["merits"] = find_stat_value("Merits")
+        stats["merits_pct"] = find_stat_value("Merit to Power Ratio")
         
-        # Merits percentage
-        merits_pct_match = re.search(r'Merits to Power Ratio[^+\-]*([+\-][\d.]+%)', html)
-        if merits_pct_match:
-            stats["merits_pct"] = merits_pct_match.group(1)
+        # War stats
+        stats["kills_gain"] = find_stat_value("Units Killed")
+        stats["deads_gain"] = find_stat_value("Units Dead")
+        stats["healed_gain"] = find_stat_value("Units Healed")
         
-        # Tiered Kills - T5, T4, T3, T2, T1
-        t5_match = re.search(r'T5\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if t5_match:
-            stats["t5_gain"] = t5_match.group(1)
-        
-        t4_match = re.search(r'T4\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if t4_match:
-            stats["t4_gain"] = t4_match.group(1)
-        
-        t3_match = re.search(r'T3\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if t3_match:
-            stats["t3_gain"] = t3_match.group(1)
-        
-        t2_match = re.search(r'T2\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if t2_match:
-            stats["t2_gain"] = t2_match.group(1)
-        
-        t1_match = re.search(r'T1\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if t1_match:
-            stats["t1_gain"] = t1_match.group(1)
+        # Tiered Kills
+        stats["t5_gain"] = find_stat_value("T5 Kills")
+        stats["t4_gain"] = find_stat_value("T4 Kills")
+        stats["t3_gain"] = find_stat_value("T3 Kills")
+        stats["t2_gain"] = find_stat_value("T2 Kills")
+        stats["t1_gain"] = find_stat_value("T1 Kills")
         
         # Resources Gathered
-        gold_gathered_match = re.search(r'Gold\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if gold_gathered_match:
-            stats["gold_gathered"] = gold_gathered_match.group(1)
-        
-        wood_gathered_match = re.search(r'Wood\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if wood_gathered_match:
-            stats["wood_gathered"] = wood_gathered_match.group(1)
-        
-        ore_gathered_match = re.search(r'Ore\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if ore_gathered_match:
-            stats["ore_gathered"] = ore_gathered_match.group(1)
-        
-        mana_gathered_match = re.search(r'Mana\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if mana_gathered_match:
-            stats["mana_gathered"] = mana_gathered_match.group(1)
+        stats["gold_gathered"] = find_stat_value("Gold Gathered")
+        stats["wood_gathered"] = find_stat_value("Wood Gathered")
+        stats["ore_gathered"] = find_stat_value("Ore Gathered")
+        stats["mana_gathered"] = find_stat_value("Mana Gathered")
         
         # Resources Spent
-        gold_spent_match = re.search(r'Gold\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if gold_spent_match:
-            stats["gold_spent"] = gold_spent_match.group(1)
+        stats["gold_spent"] = find_stat_value("Gold Spent")
+        stats["wood_spent"] = find_stat_value("Wood Spent")
+        stats["ore_spent"] = find_stat_value("Ore Spent")
+        stats["mana_spent"] = find_stat_value("Mana Spent")
         
-        wood_spent_match = re.search(r'Wood\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if wood_spent_match:
-            stats["wood_spent"] = wood_spent_match.group(1)
-        
-        ore_spent_match = re.search(r'Ore\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if ore_spent_match:
-            stats["ore_spent"] = ore_spent_match.group(1)
-        
-        mana_spent_match = re.search(r'Mana\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
-        if mana_spent_match:
-            stats["mana_spent"] = mana_spent_match.group(1)
-        
-        print(f"[PARSE] Successfully parsed stats: {len([s for s in stats.values() if s])} fields found")
+        found_count = len([v for v in stats.values() if v])
+        print(f"[PARSE] Successfully parsed stats: {found_count} fields found")
+        print(f"[PARSE] Stats: {stats}")
         return stats
     except Exception as e:
         print(f"[PARSE STATS] Error: {e}")
@@ -890,92 +855,77 @@ async def progress(ctx):
         if not stats:
             return await ctx.send("❌ Failed to fetch stats. Check bot logs.")
         
-        # Build embed
-        embed = discord.Embed(
-            title=f"📊 {season_name} Progress",
-            description=f"Season started: {start_date}",
-            color=0x3498db
-        )
+        # Build text output
+        output = f"```Progress Report for season `{season_name}`\n\n"
         
         # Power
-        if stats["power"] and stats["power_gain"]:
-            embed.add_field(
-                name="⚡ Power",
-                value=f"**{stats['power']}** (+{stats['power_gain']})",
-                inline=False
-            )
+        if stats["power_gain"]:
+            output += f"⚡ Power\n{stats['power_gain']}\n\n"
         
         # Merits
         if stats["merits"] and stats["merits_pct"]:
-            embed.add_field(
-                name="🏅 Merits",
-                value=f"**{stats['merits']}** ({stats['merits_pct']})",
-                inline=False
-            )
+            output += f"🏅 Merits\n{stats['merits']} ({stats['merits_pct']})\n\n"
         
-        # Combat stats in one row
-        combat_text = ""
+        # Kills
         if stats["kills_gain"]:
-            combat_text += f"⚔️ Kills: **+{stats['kills_gain']}**\n"
-        if stats["deads_gain"]:
-            combat_text += f"💀 Deaths: **+{stats['deads_gain']}**\n"
-        if stats["healed_gain"]:
-            combat_text += f"❤️ Healed: **+{stats['healed_gain']}**"
+            output += f"⚔️ Kills\n{stats['kills_gain']}\n\n"
         
-        if combat_text:
-            embed.add_field(name="🔥 Combat", value=combat_text.strip(), inline=False)
+        # Deads
+        if stats["deads_gain"]:
+            output += f"💀 Deads\n{stats['deads_gain']}\n\n"
+        
+        # Healed
+        if stats["healed_gain"]:
+            output += f"❤️ Healed\n{stats['healed_gain']}\n\n"
         
         # Kill Breakdown
-        kb_text = ""
+        kb_parts = []
         if stats["t5_gain"]:
-            kb_text += f"T5: **+{stats['t5_gain']}**\n"
+            kb_parts.append(f"T5: {stats['t5_gain']}")
         if stats["t4_gain"]:
-            kb_text += f"T4: **+{stats['t4_gain']}**\n"
+            kb_parts.append(f"T4: {stats['t4_gain']}")
         if stats["t3_gain"]:
-            kb_text += f"T3: **+{stats['t3_gain']}**\n"
+            kb_parts.append(f"T3: {stats['t3_gain']}")
         if stats["t2_gain"]:
-            kb_text += f"T2: **+{stats['t2_gain']}**\n"
+            kb_parts.append(f"T2: {stats['t2_gain']}")
         if stats["t1_gain"]:
-            kb_text += f"T1: **+{stats['t1_gain']}**"
+            kb_parts.append(f"T1: {stats['t1_gain']}")
         
-        if kb_text:
-            embed.add_field(name="🗡️ Kill Breakdown", value=kb_text.strip(), inline=False)
+        if kb_parts:
+            output += f"• Kill Breakdown\n{' '.join(kb_parts)}\n\n"
         
         # RSS Spent
-        rss_spent_text = ""
+        rss_spent_parts = []
         if stats["gold_spent"]:
-            rss_spent_text += f"🟡 Gold: **{stats['gold_spent']}**\n"
+            rss_spent_parts.append(f":coin: Gold: {stats['gold_spent']}")
         if stats["wood_spent"]:
-            rss_spent_text += f"🟤 Wood: **{stats['wood_spent']}**\n"
+            rss_spent_parts.append(f":wood: Wood: {stats['wood_spent']}")
         if stats["ore_spent"]:
-            rss_spent_text += f"⚫ Ore: **{stats['ore_spent']}**\n"
+            rss_spent_parts.append(f":pick: Ore: {stats['ore_spent']}")
         if stats["mana_spent"]:
-            rss_spent_text += f"🔵 Mana: **{stats['mana_spent']}**\n"
-        if stats["rss_spent_total"]:
-            rss_spent_text += f"**Total: {stats['rss_spent_total']}**"
+            rss_spent_parts.append(f":droplet: Mana: {stats['mana_spent']}")
         
-        if rss_spent_text:
-            embed.add_field(name="💸 RSS Spent", value=rss_spent_text.strip(), inline=False)
+        if rss_spent_parts:
+            output += f"💰 RSS Spent\n{' '.join(rss_spent_parts)}\n\n"
         
         # RSS Gathered
-        rss_gathered_text = ""
+        rss_gathered_parts = []
         if stats["gold_gathered"]:
-            rss_gathered_text += f"🟡 Gold: **{stats['gold_gathered']}**\n"
+            rss_gathered_parts.append(f":coin: Gold: {stats['gold_gathered']}")
         if stats["wood_gathered"]:
-            rss_gathered_text += f"🟤 Wood: **{stats['wood_gathered']}**\n"
+            rss_gathered_parts.append(f":wood: Wood: {stats['wood_gathered']}")
         if stats["ore_gathered"]:
-            rss_gathered_text += f"⚫ Ore: **{stats['ore_gathered']}**\n"
+            rss_gathered_parts.append(f":pick: Ore: {stats['ore_gathered']}")
         if stats["mana_gathered"]:
-            rss_gathered_text += f"🔵 Mana: **{stats['mana_gathered']}**\n"
-        if stats["rss_gathered_total"]:
-            rss_gathered_text += f"**Total: {stats['rss_gathered_total']}**"
+            rss_gathered_parts.append(f":droplet: Mana: {stats['mana_gathered']}")
         
-        if rss_gathered_text:
-            embed.add_field(name="📦 RSS Gathered", value=rss_gathered_text.strip(), inline=False)
+        if rss_gathered_parts:
+            output += f":farmer: RSS Gathered\n{' '.join(rss_gathered_parts)}\n\n"
         
-        embed.set_footer(text=f"Last updated: {today}")
+        # Timespan
+        output += f"📅 Timespan: {start_date} → {today}```"
         
-        await ctx.send(embed=embed)
+        await ctx.send(output)
         
     except Exception as e:
         print(f"[PROGRESS ERROR] {e}")
