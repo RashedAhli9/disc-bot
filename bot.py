@@ -183,6 +183,48 @@ def silent_backup():
         make_backup()
     except:
         pass
+
+def get_all_lords_from_guild(guild):
+    """Get all numeric roles (account IDs) from the guild"""
+    lords = []
+    
+    # Scan ALL roles in the server
+    for role in guild.roles:
+        if role.name.isdigit() and role.name != "@everyone":
+            lords.append({
+                "name": role.name,
+                "account_id": role.name,
+                "role": role
+            })
+    
+    return lords
+
+# ============================================================
+# CALLOFSTATS CACHE SYSTEM
+# ============================================================
+
+_stats_cache = {}
+CACHE_EXPIRY_HOURS = 72  # 3 days
+
+def get_cached_stats(account_id, start_date, end_date):
+    """Get stats from cache if valid"""
+    cache_key = f"{account_id}_{start_date}_{end_date}"
+    if cache_key in _stats_cache:
+        cached = _stats_cache[cache_key]
+        age_hours = (datetime.utcnow() - cached["timestamp"]).total_seconds() / 3600
+        if age_hours < CACHE_EXPIRY_HOURS:
+            print(f"[CACHE HIT] {account_id} (age: {int(age_hours)}h)")
+            return cached["stats"]
+        else:
+            del _stats_cache[cache_key]
+    return None
+
+def set_cached_stats(account_id, start_date, end_date, stats):
+    """Store stats in cache"""
+    cache_key = f"{account_id}_{start_date}_{end_date}"
+    _stats_cache[cache_key] = {"timestamp": datetime.utcnow(), "stats": stats}
+    print(f"[CACHE SET] {account_id}")
+
 # ============================================================
 # SQLITE DATABASE
 # ============================================================
@@ -318,8 +360,22 @@ def db_get_lord(account_id):
 # CALLOFSTATS LOGIN & STATS FETCHING
 # ============================================================
 
-async def login_callofstats(session):
-    """Login to callofstats and return session"""
+# ============================================================
+# CALLOFSTATS LOGIN & STATS FETCHING
+# ============================================================
+
+# Global session cache
+_callofstats_session = None
+_session_login_time = None
+
+# Stats cache (key: f"{account_id}_{start_date}_{end_date}", value: (timestamp, stats))
+_stats_cache = {}
+CACHE_DURATION = 600  # 10 minutes
+
+async def get_callofstats_session():
+    """Get or create cached authenticated session"""
+    global _callofstats_session, _session_login_time
+    
     username = os.getenv("CALLOFSTATS_USERNAME")
     password = os.getenv("CALLOFSTATS_PASSWORD")
     
@@ -327,23 +383,41 @@ async def login_callofstats(session):
         print("[CALLOFSTATS] Missing credentials in env variables")
         return None
     
+    # Reuse session if it exists and is less than 30 minutes old
+    if _callofstats_session and _session_login_time:
+        age = (datetime.utcnow() - _session_login_time).total_seconds()
+        if age < 1800:  # 30 minutes
+            print(f"[CALLOFSTATS] Reusing cached session (age: {int(age)}s)")
+            return _callofstats_session
+        else:
+            print("[CALLOFSTATS] Session expired, creating new one")
+            await _callofstats_session.close()
+            _callofstats_session = None
+    
+    # Create new session and login
     try:
-        # Get login page first
-        async with session.get("https://callofstats.com/login", allow_redirects=True) as resp:
-            pass
+        # Create session with timeout
+        timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)
+        session = aiohttp.ClientSession(timeout=timeout)
         
-        # Login with redirects allowed
+        print("[CALLOFSTATS] Logging in...")
         async with session.post(
             "https://callofstats.com/login",
             data={"username": username, "password": password},
             allow_redirects=True
         ) as resp:
-            if resp.status == 200:
-                print(f"[CALLOFSTATS] Login successful (final URL: {resp.url})")
-                return session
-            else:
+            if resp.status != 200:
                 print(f"[CALLOFSTATS] Login failed: {resp.status}")
+                await session.close()
                 return None
+            print("[CALLOFSTATS] Login successful (session cached)")
+        
+        _callofstats_session = session
+        _session_login_time = datetime.utcnow()
+        return session
+    except asyncio.TimeoutError:
+        print("[CALLOFSTATS] Login timed out (30 seconds)")
+        return None
     except Exception as e:
         print(f"[CALLOFSTATS] Login error: {e}")
         return None
@@ -358,44 +432,59 @@ async def fetch_stats(start_date, end_date):
     return await fetch_stats_for_account(account_id, start_date, end_date)
 
 async def fetch_stats_for_account(account_id, start_date, end_date):
-    """Fetch player stats from callofstats for a specific account"""
+    """Fetch player stats from callofstats for a specific account (with caching)"""
+    global _stats_cache
+    
     if not account_id:
         print("[CALLOFSTATS] Missing account_id")
         return None
     
+    # Check cache first
+    cache_key = f"{account_id}_{start_date}_{end_date}"
+    if cache_key in _stats_cache:
+        timestamp, cached_stats = _stats_cache[cache_key]
+        age = (datetime.utcnow() - timestamp).total_seconds()
+        if age < CACHE_DURATION:
+            print(f"[CACHE HIT] Account {account_id} (age: {int(age)}s)")
+            return cached_stats
+        else:
+            print(f"[CACHE EXPIRED] Account {account_id}, fetching fresh data")
+            del _stats_cache[cache_key]
+    
     try:
-        async with aiohttp.ClientSession() as session:
-            # Step 1: Login to callofstats
-            username = os.getenv("CALLOFSTATS_USERNAME")
-            password = os.getenv("CALLOFSTATS_PASSWORD")
-            
-            if not username or not password:
-                print("[CALLOFSTATS] Missing credentials in env variables")
+        # Get cached session (reuses login)
+        session = await get_callofstats_session()
+        if not session:
+            return None
+        
+        # Format dates properly
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_date_formatted = start_dt.strftime("%Y-%m-%d")
+            end_date_formatted = end_dt.strftime("%Y-%m-%d")
+        except:
+            start_date_formatted = start_date
+            end_date_formatted = end_date
+        
+        url = f"https://callofstats.com/lord/{account_id}?start_date={start_date_formatted}&end_date={end_date_formatted}"
+        print(f"[CALLOFSTATS] Fetching: {url}")
+        
+        async with session.get(url, allow_redirects=True) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                print(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
+                stats = parse_stats(html)
+                
+                # Cache the result
+                _stats_cache[cache_key] = (datetime.utcnow(), stats)
+                return stats
+            else:
+                print(f"[CALLOFSTATS] Fetch failed: {resp.status}")
                 return None
-            
-            print("[CALLOFSTATS] Logging in...")
-            async with session.post(
-                "https://callofstats.com/login",
-                data={"username": username, "password": password},
-                allow_redirects=True
-            ) as resp:
-                if resp.status != 200:
-                    print(f"[CALLOFSTATS] Login failed: {resp.status}")
-                    return None
-                print("[CALLOFSTATS] Login successful")
-            
-            # Step 2: Fetch lord stats page with authenticated session
-            url = f"https://callofstats.com/lord/{account_id}?start_date={start_date}&end_date={end_date}"
-            print(f"[CALLOFSTATS] Fetching: {url}")
-            
-            async with session.get(url, allow_redirects=True) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    print(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
-                    return parse_stats(html)
-                else:
-                    print(f"[CALLOFSTATS] Fetch failed: {resp.status}")
-                    return None
+    except asyncio.TimeoutError:
+        print("[CALLOFSTATS] Request timed out (30 seconds)")
+        return None
     except Exception as e:
         print(f"[CALLOFSTATS] Fetch error: {e}")
         return None
@@ -430,54 +519,84 @@ def parse_stats(html):
     }
     
     try:
-        # Parse Power
-        power_match = re.search(r'Power[^0-9]*(\d+,?\d+,?\d+)[^0-9]+\(([^)]+)\)', html)
-        if power_match:
-            stats["power"] = power_match.group(1)
-            stats["power_gain"] = power_match.group(2)
+        # Extract numbers with +/- prefix and commas
+        def extract_number(pattern, html):
+            match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            return None
         
-        # Parse Merits
-        merits_match = re.search(r'Merits[^0-9]*(\d+,?\d+)[^0-9]+\(([^%]+%)\)', html)
+        # Power - look for "Highest Power" or similar
+        power_match = re.search(r'Highest\s+Power[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if power_match:
+            stats["power_gain"] = power_match.group(1)
+        
+        # Merits - look for "Merits" label
+        merits_match = re.search(r'Merits[^+\-]*([+\-]\d+(?:,\d+)*)', html)
         if merits_match:
             stats["merits"] = merits_match.group(1)
-            stats["merits_pct"] = merits_match.group(2)
         
-        # Parse Kills
-        kills_match = re.search(r'Kills[^+]*\+(\d+,?\d+)', html)
-        if kills_match:
-            stats["kills_gain"] = kills_match.group(1)
+        # Merits percentage
+        merits_pct_match = re.search(r'Merits to Power Ratio[^+\-]*([+\-][\d.]+%)', html)
+        if merits_pct_match:
+            stats["merits_pct"] = merits_pct_match.group(1)
         
-        # Parse Deads
-        deads_match = re.search(r'Deads[^+]*\+(\d+,?\d+)', html)
-        if deads_match:
-            stats["deads_gain"] = deads_match.group(1)
-        
-        # Parse Healed
-        healed_match = re.search(r'Healed[^+]*\+(\d+,?\d+)', html)
-        if healed_match:
-            stats["healed_gain"] = healed_match.group(1)
-        
-        # Parse T5-T1 kills
-        t5_match = re.search(r'T5:[^+]*\+(\d+,?\d+)', html)
+        # Tiered Kills - T5, T4, T3, T2, T1
+        t5_match = re.search(r'T5\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
         if t5_match:
             stats["t5_gain"] = t5_match.group(1)
         
-        t4_match = re.search(r'T4:[^+]*\+(\d+,?\d+)', html)
+        t4_match = re.search(r'T4\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
         if t4_match:
             stats["t4_gain"] = t4_match.group(1)
         
-        t3_match = re.search(r'T3:[^+]*\+(\d+,?\d+)', html)
+        t3_match = re.search(r'T3\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
         if t3_match:
             stats["t3_gain"] = t3_match.group(1)
         
-        t2_match = re.search(r'T2:[^+]*\+(\d+,?\d+)', html)
+        t2_match = re.search(r'T2\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
         if t2_match:
             stats["t2_gain"] = t2_match.group(1)
         
-        t1_match = re.search(r'T1:[^+]*\+(\d+,?\d+)', html)
+        t1_match = re.search(r'T1\s+[Kk]ills[^+\-]*([+\-]\d+(?:,\d+)*)', html)
         if t1_match:
             stats["t1_gain"] = t1_match.group(1)
         
+        # Resources Gathered
+        gold_gathered_match = re.search(r'Gold\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if gold_gathered_match:
+            stats["gold_gathered"] = gold_gathered_match.group(1)
+        
+        wood_gathered_match = re.search(r'Wood\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if wood_gathered_match:
+            stats["wood_gathered"] = wood_gathered_match.group(1)
+        
+        ore_gathered_match = re.search(r'Ore\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if ore_gathered_match:
+            stats["ore_gathered"] = ore_gathered_match.group(1)
+        
+        mana_gathered_match = re.search(r'Mana\s+Gathered[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if mana_gathered_match:
+            stats["mana_gathered"] = mana_gathered_match.group(1)
+        
+        # Resources Spent
+        gold_spent_match = re.search(r'Gold\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if gold_spent_match:
+            stats["gold_spent"] = gold_spent_match.group(1)
+        
+        wood_spent_match = re.search(r'Wood\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if wood_spent_match:
+            stats["wood_spent"] = wood_spent_match.group(1)
+        
+        ore_spent_match = re.search(r'Ore\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if ore_spent_match:
+            stats["ore_spent"] = ore_spent_match.group(1)
+        
+        mana_spent_match = re.search(r'Mana\s+Spent[^+\-]*([+\-]\d+(?:,\d+)*)', html)
+        if mana_spent_match:
+            stats["mana_spent"] = mana_spent_match.group(1)
+        
+        print(f"[PARSE] Successfully parsed stats: {len([s for s in stats.values() if s])} fields found")
         return stats
     except Exception as e:
         print(f"[PARSE STATS] Error: {e}")
@@ -894,6 +1013,70 @@ async def addlord(inter: discord.Interaction, name: str, account_id: str):
             await inter.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 
+@bot.command(name="forcefetch")
+async def forcefetch(ctx):
+    """Force fetch stats for all members with numeric roles (Owner only)"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    # Get all lords from server members
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+    
+    await ctx.send(f"⏳ Fetching stats for {len(lords)} members from season {season_name}...")
+    
+    fetched = 0
+    failed = 0
+    
+    for lord in lords:
+        try:
+            account_id = lord["account_id"]
+            name = lord["name"]
+            
+            stats = await fetch_stats_for_account(account_id, start_date, today)
+            if stats:
+                fetched += 1
+                print(f"[FORCEFETCH] ✅ {name} ({account_id})")
+            else:
+                failed += 1
+                print(f"[FORCEFETCH] ❌ {name} ({account_id})")
+        except Exception as e:
+            failed += 1
+            print(f"[FORCEFETCH] ERROR {name}: {e}")
+    
+    embed = discord.Embed(
+        title="📊 Force Fetch Complete",
+        description=f"Season: {season_name}",
+        color=0x2ecc71
+    )
+    embed.add_field(name="✅ Fetched", value=str(fetched), inline=True)
+    embed.add_field(name="❌ Failed", value=str(failed), inline=True)
+    embed.add_field(name="💾 Cache", value=f"All data cached for 3 days", inline=False)
+    embed.set_footer(text=f"Fetched: {start_date} → {today}")
+    
+    await ctx.send(embed=embed)
+
+
+@bot.tree.command(name="addlord", description="[DEPRECATED] Use numeric roles instead")
+async def addlord_deprecated(inter: discord.Interaction):
+    """Deprecated - use numeric roles instead"""
+    await inter.response.send_message(
+        "❌ `/addlord` is deprecated!\n\n"
+        "Instead, create a Discord role with your account ID as the name (e.g., `16322115`)\n"
+        "The bot will auto-detect everyone with numeric roles!\n\n"
+        "Use `/forcefetch` to update everyone's stats.",
+        ephemeral=True
+    )
+
+
 @bot.command(name="topmana")
 async def topmana(ctx):
     """Leaderboard for mana gathered this season"""
@@ -904,19 +1087,24 @@ async def topmana(ctx):
     season_id, season_name, start_date, created_at = season
     today = date.today().isoformat()
     
-    lords = db_get_all_lords()
+    lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
-        return await ctx.send("❌ No lords tracked. Use `/addlord` to add them.")
+        return await ctx.send("❌ No members with numeric roles found. Create roles with account IDs as names (e.g., `16322115`).")
     
     await ctx.send("⏳ Fetching leaderboard data...")
     
+    # Fetch all lords in parallel
+    fetch_tasks = [
+        fetch_stats_for_account(account_id, start_date, today)
+        for lord_id, lord_name, account_id in lords
+    ]
+    all_stats = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    
     leaderboard = []
     
-    for lord_id, lord_name, account_id in lords:
+    for (lord_id, lord_name, account_id), stats in zip(lords, all_stats):
         try:
-            # Temporarily modify fetch_stats to accept account_id
-            stats = await fetch_stats_for_account(account_id, start_date, today)
-            if stats and stats.get("mana_gathered"):
+            if stats and not isinstance(stats, Exception) and stats.get("mana_gathered"):
                 # Convert mana_gathered to number for sorting
                 mana_str = stats["mana_gathered"].replace(",", "")
                 mana_num = int(mana_str) if mana_str.isdigit() else 0
@@ -963,18 +1151,24 @@ async def topdeaths(ctx):
     season_id, season_name, start_date, created_at = season
     today = date.today().isoformat()
     
-    lords = db_get_all_lords()
+    lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
-        return await ctx.send("❌ No lords tracked. Use `/addlord` to add them.")
+        return await ctx.send("❌ No members with numeric roles found. Create roles with account IDs as names (e.g., `16322115`).")
     
     await ctx.send("⏳ Fetching leaderboard data...")
     
+    # Fetch all lords in parallel
+    fetch_tasks = [
+        fetch_stats_for_account(account_id, start_date, today)
+        for lord_id, lord_name, account_id in lords
+    ]
+    all_stats = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    
     leaderboard = []
     
-    for lord_id, lord_name, account_id in lords:
+    for (lord_id, lord_name, account_id), stats in zip(lords, all_stats):
         try:
-            stats = await fetch_stats_for_account(account_id, start_date, today)
-            if stats and stats.get("deads_gain"):
+            if stats and not isinstance(stats, Exception) and stats.get("deads_gain"):
                 # Convert deads to number for sorting
                 deaths_str = stats["deads_gain"].replace(",", "")
                 deaths_num = int(deaths_str) if deaths_str.isdigit() else 0
