@@ -1071,29 +1071,47 @@ async def topmana(ctx):
     
     for lord, stats in zip(lords, all_stats):
         try:
-            if stats and not isinstance(stats, Exception) and stats.get("mana_gathered"):
-                # Convert mana_gathered to number for sorting
-                mana_str = stats["mana_gathered"].replace(",", "").replace("+", "")
-                mana_num = int(mana_str) if mana_str.lstrip("-").isdigit() else 0
-                leaderboard.append({
-                    "name": stats.get("lord_name", lord["name"]),
-                    "mana": mana_num,
-                    "mana_str": stats["mana_gathered"]
-                })
+            # Show all lords, even without data
+            lord_name = "Unknown"
+            mana_str = "+0"
+            mana_num = 0
+            
+            if stats and not isinstance(stats, Exception):
+                lord_name = stats.get("lord_name", lord["name"])
+                
+                # Get mana_gathered if it exists
+                if stats.get("mana_gathered"):
+                    mana_str = stats["mana_gathered"]
+                    mana_clean = mana_str.replace(",", "").replace("+", "")
+                    mana_num = int(mana_clean) if mana_clean.lstrip("-").isdigit() else 0
+                else:
+                    print(f"[TOPMANA DEBUG] {lord['account_id']} - mana_gathered is None")
+                    print(f"[TOPMANA DEBUG] Full stats: {stats}")
+            else:
+                print(f"[TOPMANA ERROR] {lord['account_id']} - stats failed: {stats}")
+                lord_name = lord["name"]
+            
+            leaderboard.append({
+                "name": lord_name,
+                "mana": mana_num,
+                "mana_str": mana_str
+            })
         except Exception as e:
             print(f"[TOPMANA ERROR] {lord['account_id']}: {e}")
-    
-    if not leaderboard:
-        return await ctx.send("❌ No data found. Try running `/forcefetch` first.")
+            leaderboard.append({
+                "name": lord["name"],
+                "mana": 0,
+                "mana_str": "+0"
+            })
     
     # Sort by mana descending
     leaderboard.sort(key=lambda x: x["mana"], reverse=True)
     
-    # Build text output instead of embed
+    # Build text output
     output = f"```🏆 Top Mana Gathered - {season_name}\n\n"
     medals = ["🥇", "🥈", "🥉"]
     
-    for i, lord in enumerate(leaderboard[:10]):  # Top 10
+    for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['mana_str']}\n"
     
@@ -1128,29 +1146,47 @@ async def topdeaths(ctx):
     
     for lord, stats in zip(lords, all_stats):
         try:
-            if stats and not isinstance(stats, Exception) and stats.get("deads_gain"):
-                # Convert deads to number for sorting
-                deaths_str = stats["deads_gain"].replace(",", "").replace("+", "")
-                deaths_num = int(deaths_str) if deaths_str.lstrip("-").isdigit() else 0
-                leaderboard.append({
-                    "name": stats.get("lord_name", lord["name"]),
-                    "deaths": deaths_num,
-                    "deaths_str": stats["deads_gain"]
-                })
+            # Show all lords, even without data
+            lord_name = "Unknown"
+            deaths_str = "+0"
+            deaths_num = 0
+            
+            if stats and not isinstance(stats, Exception):
+                lord_name = stats.get("lord_name", lord["name"])
+                
+                # Get deads_gain if it exists
+                if stats.get("deads_gain"):
+                    deaths_str = stats["deads_gain"]
+                    deaths_clean = deaths_str.replace(",", "").replace("+", "")
+                    deaths_num = int(deaths_clean) if deaths_clean.lstrip("-").isdigit() else 0
+                else:
+                    print(f"[TOPDEATHS DEBUG] {lord['account_id']} - deads_gain is None")
+                    print(f"[TOPDEATHS DEBUG] Full stats: {stats}")
+            else:
+                print(f"[TOPDEATHS ERROR] {lord['account_id']} - stats failed: {stats}")
+                lord_name = lord["name"]
+            
+            leaderboard.append({
+                "name": lord_name,
+                "deaths": deaths_num,
+                "deaths_str": deaths_str
+            })
         except Exception as e:
             print(f"[TOPDEATHS ERROR] {lord['account_id']}: {e}")
-    
-    if not leaderboard:
-        return await ctx.send("❌ No data found. Try running `/forcefetch` first.")
+            leaderboard.append({
+                "name": lord["name"],
+                "deaths": 0,
+                "deaths_str": "+0"
+            })
     
     # Sort by deaths descending
     leaderboard.sort(key=lambda x: x["deaths"], reverse=True)
     
-    # Build text output instead of embed
+    # Build text output
     output = f"```💀 Most Deaths - {season_name}\n\n"
     medals = ["🥇", "🥈", "🥉"]
     
-    for i, lord in enumerate(leaderboard[:10]):  # Top 10
+    for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['deaths_str']}\n"
     
