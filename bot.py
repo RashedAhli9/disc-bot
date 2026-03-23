@@ -1758,6 +1758,10 @@ async def compare(ctx, user1: str = None, user2: str = None):
         t_kills1 = await fetch_current_t_kills(account_id1)
         t_kills2 = await fetch_current_t_kills(account_id2)
         
+        # Get lord names
+        name1 = stats1.get("lord_name", "Unknown")
+        name2 = stats2.get("lord_name", "Unknown")
+        
         # Build comparison as EMBED
         embed = discord.Embed(
             title=f"⚔️ {name1} vs {name2}",
