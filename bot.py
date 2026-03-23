@@ -329,16 +329,17 @@ async def login_callofstats(session):
     
     try:
         # Get login page first
-        async with session.get("https://callofstats.com/login") as resp:
+        async with session.get("https://callofstats.com/login", allow_redirects=True) as resp:
             pass
         
-        # Login
+        # Login with redirects allowed
         async with session.post(
             "https://callofstats.com/login",
-            data={"username": username, "password": password}
+            data={"username": username, "password": password},
+            allow_redirects=True
         ) as resp:
             if resp.status == 200:
-                print("[CALLOFSTATS] Login successful")
+                print(f"[CALLOFSTATS] Login successful (final URL: {resp.url})")
                 return session
             else:
                 print(f"[CALLOFSTATS] Login failed: {resp.status}")
@@ -364,15 +365,33 @@ async def fetch_stats_for_account(account_id, start_date, end_date):
     
     try:
         async with aiohttp.ClientSession() as session:
-            session = await login_callofstats(session)
-            if not session:
+            # Step 1: Login to callofstats
+            username = os.getenv("CALLOFSTATS_USERNAME")
+            password = os.getenv("CALLOFSTATS_PASSWORD")
+            
+            if not username or not password:
+                print("[CALLOFSTATS] Missing credentials in env variables")
                 return None
             
-            url = f"https://callofstats.com/lord/{account_id}?start_date={start_date}&end_date={end_date}"
+            print("[CALLOFSTATS] Logging in...")
+            async with session.post(
+                "https://callofstats.com/login",
+                data={"username": username, "password": password},
+                allow_redirects=True
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[CALLOFSTATS] Login failed: {resp.status}")
+                    return None
+                print("[CALLOFSTATS] Login successful")
             
-            async with session.get(url) as resp:
+            # Step 2: Fetch lord stats page with authenticated session
+            url = f"https://callofstats.com/lord/{account_id}?start_date={start_date}&end_date={end_date}"
+            print(f"[CALLOFSTATS] Fetching: {url}")
+            
+            async with session.get(url, allow_redirects=True) as resp:
                 if resp.status == 200:
                     html = await resp.text()
+                    print(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
                     return parse_stats(html)
                 else:
                     print(f"[CALLOFSTATS] Fetch failed: {resp.status}")
@@ -1600,34 +1619,3 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
