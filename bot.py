@@ -1650,9 +1650,27 @@ async def progress(ctx, user_input: str = None):
         # Get current T-kills from normal profile (only if not in database)
         current_t_kills = await fetch_current_t_kills(account_id)
         
+        # Calculate merit to power ratio using highest power and merits
+        if stats.get("merits") and highest_power:
+            try:
+                merits_str = stats["merits"].replace("+", "").replace(",", "")
+                merits_val = int(merits_str) if merits_str.isdigit() else 0
+                
+                # Calculate ratio: (Merits / Highest Power) × 100
+                if highest_power > 0:
+                    ratio = (merits_val / highest_power) * 100
+                    stats["merits_pct"] = f"{ratio:.1f}%"
+                else:
+                    stats["merits_pct"] = "0%"
+            except Exception as e:
+                stats["merits_pct"] = "0%"
+        else:
+            stats["merits_pct"] = "0%"
+        
         # Debug: log what we parsed
         log_info(f"[PROGRESS] Parsed stats: {stats}")
         log_info(f"[PROGRESS] Highest power: {highest_power}")
+        log_info(f"[PROGRESS] Merit ratio: {stats.get('merits_pct')}")
         log_info(f"[PROGRESS] Current T-kills: {current_t_kills}")
         
         # Get rankings for all stats
@@ -2956,6 +2974,23 @@ async def quick_stats(ctx, user_input: str = None):
         power_rank = await get_rankings_for_stat(ctx, "power_gain", start_date, today)
         merits_rank = await get_rankings_for_stat(ctx, "merits", start_date, today)
         kills_rank = await get_rankings_for_stat(ctx, "kills_gain", start_date, today)
+        
+        # Calculate merit to power ratio using highest power and merits
+        if stats.get("merits") and power:
+            try:
+                merits_str = stats["merits"].replace("+", "").replace(",", "")
+                merits_val = int(merits_str) if merits_str.isdigit() else 0
+                
+                # Calculate ratio: (Merits / Highest Power) × 100
+                if power > 0:
+                    ratio = (merits_val / power) * 100
+                    stats["merits_pct"] = f"{ratio:.1f}%"
+                else:
+                    stats["merits_pct"] = "0%"
+            except Exception as e:
+                stats["merits_pct"] = "0%"
+        else:
+            stats["merits_pct"] = "0%"
         
         # Extract data
         lord_name = stats.get("lord_name", "Unknown")
