@@ -1482,7 +1482,7 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats\n`!oldprogress [user]` - View stats from past seasons\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Side-by-side comparison\n`!topmana` - Top mana gathered\n`!topdeaths` - Most deaths\n`!topmerits` - Highest merits\n`!rss` - Top resource spenders\n`!active` - Show active vs inactive members\n`!forcefetch` - Fetch all stats and cache (owner only)",
+        value="`!progress [user]` - Full season stats\n`!oldprogress [user]` - View stats from past seasons\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Side-by-side comparison\n`!gains` - Interactive GUI to view gains over any date range\n`!topmana` - Top mana gathered\n`!topdeaths` - Most deaths\n`!topmerits` - Highest merits\n`!rss` - Top resource spenders\n`!active` - Show active vs inactive members",
         inline=False
     )
     
@@ -1501,7 +1501,7 @@ async def help_cmd(inter):
     if inter.user.id == OWNER_ID:
         embed.add_field(
             name="⚙️ Admin Commands",
-            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch all stats and cache",
+            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now\n`!loadhistory` - Load ALL historical season data (fixes all commands)",
             inline=False
         )
     
@@ -2102,12 +2102,12 @@ async def forcefetch(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="forcefetchfix")
-async def forcefetchfix(ctx):
+@bot.command(name="loadhistory")
+async def loadhistory(ctx):
     """
-    [OWNER ONLY - HIDDEN]
-    Fetch EVERY DAY of data from season start to today and save to database.
-    This fixes !active and other commands by populating all historical data.
+    [OWNER ONLY]
+    Load ALL historical data from season start to today.
+    This populates the database with every day of data, fixing !active and other commands.
     """
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
@@ -2150,13 +2150,13 @@ async def forcefetchfix(ctx):
                     saved_count += 1
                     
             except Exception as e:
-                log_error(f"[FORCEFETCHFIX] Error for {account_id} on {date_str}: {e}")
+                log_error(f"[LOADHISTORY] Error for {account_id} on {date_str}: {e}")
                 continue
         
         current_date += timedelta(days=1)
     
     embed = discord.Embed(
-        title="🔧 Force Fetch Fix Complete",
+        title="📚 Load History Complete",
         description=f"Season: {season_name}",
         color=0x3498db
     )
@@ -2166,7 +2166,7 @@ async def forcefetchfix(ctx):
     embed.add_field(name="✅ Status", value="All historical data loaded to database", inline=False)
     
     await ctx.send(embed=embed)
-    log_info(f"[FORCEFETCHFIX] Complete! Saved {saved_count} data points")
+    log_info(f"[LOADHISTORY] Complete! Saved {saved_count} data points")
 
 
 @bot.command(name="compareprogress")
@@ -2277,6 +2277,162 @@ async def compareprogress(ctx, date_str: str, user: str = None):
     except Exception as e:
         log_error(f"[COMPAREPROGRESS] Error: {e}")
         await ctx.send("❌ Error fetching comparison data.")
+
+
+class GainsDateSelector(View):
+    """Interactive selector for gains date range"""
+    
+    def __init__(self, available_dates, account_id, season_id, start_date, ctx):
+        super().__init__(timeout=120)
+        self.available_dates = available_dates
+        self.account_id = account_id
+        self.season_id = season_id
+        self.start_date = start_date
+        self.ctx = ctx
+        
+        self.selected_start = None
+        self.selected_end = None
+        
+        # Populate start date dropdown
+        start_select = Select(
+            placeholder="📅 Pick Start Date",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label=d, value=d) for d in available_dates]
+        )
+        start_select.callback = self.on_start_select
+        self.add_item(start_select)
+        
+        # Populate end date dropdown
+        end_select = Select(
+            placeholder="📅 Pick End Date",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label=d, value=d) for d in available_dates]
+        )
+        end_select.callback = self.on_end_select
+        self.add_item(end_select)
+    
+    async def on_start_select(self, interaction: discord.Interaction):
+        self.selected_start = interaction.data["values"][0]
+        await interaction.response.defer()
+    
+    async def on_end_select(self, interaction: discord.Interaction):
+        self.selected_end = interaction.data["values"][0]
+        await interaction.response.defer()
+    
+    @discord.ui.button(label="📊 Show Gains", style=discord.ButtonStyle.green)
+    async def show_gains(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_start or not self.selected_end:
+            return await interaction.response.send_message("❌ Please select both dates", ephemeral=True)
+        
+        if self.selected_start > self.selected_end:
+            return await interaction.response.send_message("❌ Start date must be before end date", ephemeral=True)
+        
+        await interaction.response.defer()
+        
+        # Get stats for both dates
+        stats_start = db_get_season_progress(self.season_id, self.account_id, self.selected_start)
+        stats_end = db_get_season_progress(self.season_id, self.account_id, self.selected_end)
+        
+        if not stats_start:
+            stats_start = get_cached_stats(self.account_id, self.start_date, self.selected_start)
+        if not stats_end:
+            stats_end = get_cached_stats(self.account_id, self.start_date, self.selected_end)
+        
+        if not stats_start or not stats_end:
+            return await interaction.followup.send("❌ Missing data for selected dates")
+        
+        # Helper to parse stats
+        def parse_stat(s):
+            if not s:
+                return 0
+            return int(str(s).replace("+", "").replace(",", "") or 0)
+        
+        # Calculate gains
+        power_gain = parse_stat(stats_end.get("power_gain", "0")) - parse_stat(stats_start.get("power_gain", "0"))
+        merits_gain = parse_stat(stats_end.get("merits", "0")) - parse_stat(stats_start.get("merits", "0"))
+        kills_gain = parse_stat(stats_end.get("kills_gain", "0")) - parse_stat(stats_start.get("kills_gain", "0"))
+        deaths_gain = parse_stat(stats_end.get("deads_gain", "0")) - parse_stat(stats_start.get("deads_gain", "0"))
+        mana_gain = parse_stat(stats_end.get("mana_gathered", "0")) - parse_stat(stats_start.get("mana_gathered", "0"))
+        gold_spent = parse_stat(stats_end.get("gold_spent", "0"))
+        
+        lord_name = stats_end.get("lord_name", self.account_id)
+        
+        # Create columnar display
+        day_count = (datetime.strptime(self.selected_end, "%Y-%m-%d").date() - 
+                     datetime.strptime(self.selected_start, "%Y-%m-%d").date()).days + 1
+        
+        embed = discord.Embed(
+            title=f"📊 Gains Report",
+            description=f"**{lord_name}** • {day_count} days ({self.selected_start} → {self.selected_end})",
+            color=0x9b59b6
+        )
+        
+        # Columnar format - each stat is a field
+        embed.add_field(name="⚔️ Power Gain", value=f"```{power_gain:,}```", inline=True)
+        embed.add_field(name="🏆 Merits Gain", value=f"```{merits_gain:,}```", inline=True)
+        embed.add_field(name="💀 Kills Gain", value=f"```{kills_gain:,}```", inline=True)
+        
+        embed.add_field(name="☠️ Deaths Gain", value=f"```{deaths_gain:,}```", inline=True)
+        embed.add_field(name="💧 Mana Gained", value=f"```{mana_gain:,}```", inline=True)
+        embed.add_field(name="💰 Gold Spent", value=f"```{gold_spent:,}```", inline=True)
+        
+        await interaction.followup.send(embed=embed)
+
+
+@bot.command(name="gains")
+async def gains(ctx):
+    """
+    Interactive GUI to view gains over any date range.
+    Pick start and end dates from available saved data.
+    
+    Usage: !gains
+    """
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    
+    # Get account ID
+    account_id = None
+    for role in ctx.author.roles:
+        if role.name.isdigit():
+            account_id = role.name
+            break
+    
+    if not account_id:
+        return await ctx.send("❌ You don't have a numeric role. Ask an admin to assign your account ID role.")
+    
+    # Get all available dates for this account from database
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(
+            "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
+            (season_id, account_id)
+        )
+        dates = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        if not dates:
+            return await ctx.send("❌ No saved data found for your account this season. Run `!loadhistory` first.")
+        
+        # Show selector
+        embed = discord.Embed(
+            title="📊 Gains Calculator",
+            description=f"Select start and end dates to see your gains.\n\n**Available dates:** {len(dates)} days of data",
+            color=0x3498db
+        )
+        embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
+        
+        view = GainsDateSelector(dates, account_id, season_id, start_date, ctx)
+        await ctx.send(embed=embed, view=view)
+        
+    except Exception as e:
+        log_error(f"[GAINS] Error: {e}")
+        await ctx.send("❌ Error loading data. Try again later.")
 
 
 @bot.command(name="topmana")
