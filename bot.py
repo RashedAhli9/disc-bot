@@ -77,6 +77,13 @@ DB = "/data/events.db"
 REKZ_ACCOUNT_ID = "16322115"
 FALLBACK_DAYS = 6  # Days to fallback when data is empty
 
+# Discord ID -> Call of Stats Account ID mapping
+# For members who may not have numeric roles in server
+DISCORD_TO_ACCOUNT_ID = {
+    1244330800019804180: "7979635",  # Havi
+}
+
+
 # ============================================================
 # CACHE SETTINGS
 # ============================================================
@@ -2357,62 +2364,123 @@ async def quick_stats(ctx, user_input: str = None):
 
 @bot.command(name="active")
 async def active_members(ctx):
-    """Show who's active vs inactive this season"""
+    """Show who's active (last 24h) vs inactive with days count"""
     season = db_get_current_season()
     if not season:
         return await ctx.send("❌ No season active.")
     
     season_id, season_name, start_date, created_at = season
     today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     
     try:
         guild = ctx.guild
         lords = get_all_lords_from_guild(guild)
         
-        if not lords:
-            return await ctx.send("❌ No members with numeric roles found.")
+        # Create list of (account_id, lord_name) tuples
+        accounts_to_check = []
+        
+        # Add lords from guild roles
+        for lord in lords:
+            accounts_to_check.append((lord["account_id"], lord["account_id"]))
+        
+        # Add mapped accounts (like Havi who's not in server)
+        for discord_id, account_id in DISCORD_TO_ACCOUNT_ID.items():
+            # Get the username if available
+            try:
+                user = await ctx.bot.fetch_user(discord_id)
+                accounts_to_check.append((account_id, user.name if user.name else account_id))
+            except:
+                accounts_to_check.append((account_id, account_id))
+        
+        if not accounts_to_check:
+            return await ctx.send("❌ No members found.")
         
         active = []
         inactive = []
         
-        for account_id, lord_name in lords:
-            # Get stats from yesterday and today
-            yesterday = (date.today() - timedelta(days=1)).isoformat()
-            
-            stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, today)
-            stats_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
-            
-            if not stats_today or not stats_yesterday:
-                continue
-            
-            # Check if there's a difference
-            power_today = stats_today.get("power_gain", "+0").replace("+", "").replace(",", "")
-            power_yesterday = stats_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "")
-            
+        for account_id, lord_name in accounts_to_check:
             try:
-                gain = int(power_today or 0) - int(power_yesterday or 0)
-                if gain > 0:
-                    active.append((lord_name, gain))
+                # Get stats from yesterday and today
+                stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+                stats_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
+                
+                if not stats_today or not stats_yesterday:
+                    inactive.append({"name": lord_name, "days": "?", "account_id": account_id})
+                    continue
+                
+                # Extract stats and calculate gains in last 24h
+                power_today = int(stats_today.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                power_yesterday = int(stats_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                
+                merits_today = int(stats_today.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                merits_yesterday = int(stats_yesterday.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                
+                mana_today = int(stats_today.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                mana_yesterday = int(stats_yesterday.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                
+                power_gain_24h = power_today - power_yesterday
+                merits_gain_24h = merits_today - merits_yesterday
+                mana_gain_24h = mana_today - mana_yesterday
+                
+                # Active if any gain in last 24h
+                if power_gain_24h > 0 or merits_gain_24h > 0 or mana_gain_24h > 0:
+                    active.append({
+                        "name": lord_name,
+                        "power": power_gain_24h,
+                        "merits": merits_gain_24h,
+                        "mana": mana_gain_24h
+                    })
                 else:
-                    inactive.append(lord_name)
-            except:
-                inactive.append(lord_name)
+                    # Find last activity date
+                    days_inactive = 0
+                    for days_back in range(1, 30):  # Check up to 30 days back
+                        check_date = (date.today() - timedelta(days=days_back)).isoformat()
+                        check_yesterday = (date.today() - timedelta(days=days_back+1)).isoformat()
+                        
+                        stats_check, _ = await fetch_stats_with_fallback(account_id, start_date, check_date)
+                        stats_check_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, check_yesterday)
+                        
+                        if not stats_check or not stats_check_yesterday:
+                            continue
+                        
+                        power_check = int(stats_check.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                        power_check_yesterday = int(stats_check_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                        merits_check = int(stats_check.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                        merits_check_yesterday = int(stats_check_yesterday.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                        mana_check = int(stats_check.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                        mana_check_yesterday = int(stats_check_yesterday.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                        
+                        if (power_check > power_check_yesterday or 
+                            merits_check > merits_check_yesterday or 
+                            mana_check > mana_check_yesterday):
+                            days_inactive = days_back
+                            break
+                    
+                    inactive.append({
+                        "name": lord_name,
+                        "days": days_inactive
+                    })
+            except Exception as e:
+                log_error(f"Error checking activity for {lord_name}: {e}")
+                inactive.append({"name": lord_name, "days": "?"})
         
-        # Sort active by gains
-        active.sort(key=lambda x: x[1], reverse=True)
+        # Sort active by power gain
+        active.sort(key=lambda x: x["power"], reverse=True)
         
-        output = f"```📊 Activity Report ({today})\n\n"
+        output = f"```📊 Activity Report (Last 24 Hours)\n\n"
         
         if active:
             output += f"✅ ACTIVE ({len(active)} members):\n"
-            for name, gain in active:
-                output += f"  • {name}: +{gain:,} power\n"
+            for member in active:
+                output += f"• {member['name']}: +{member['power']:,} power | +{member['merits']:,} Merits | +{member['mana']:,} mana\n"
             output += "\n"
         
         if inactive:
             output += f"⏸️ INACTIVE ({len(inactive)} members):\n"
-            for name in inactive:
-                output += f"  • {name}\n"
+            for member in inactive:
+                days_text = f"{member['days']} days" if member['days'] != "?" else "unknown"
+                output += f"• {member['name']} ({days_text})\n"
         
         output += "```"
         await ctx.send(output)
