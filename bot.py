@@ -2402,41 +2402,47 @@ async def active_members(ctx):
         
         for account_id in accounts_to_check:
             try:
-                # Get today's stats to fetch lord name
-                stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+                # Find the last available data date (don't assume today has data)
+                last_available_date = today
+                stats_latest = None
                 
-                # If today's data doesn't exist, try yesterday to get the name
-                if not stats_today or not stats_today.get("lord_name"):
-                    stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
+                for days_back in range(0, 3):  # Check last 3 days for available data
+                    check_date = (date.today() - timedelta(days=days_back)).isoformat()
+                    stats_check, _ = await fetch_stats_with_fallback(account_id, start_date, check_date)
+                    if stats_check and stats_check.get("lord_name"):
+                        last_available_date = check_date
+                        stats_latest = stats_check
+                        break
                 
-                if not stats_today:
+                if not stats_latest:
                     log_error(f"No stats found for account {account_id}")
                     continue
                 
-                lord_name = stats_today.get("lord_name", account_id)
+                lord_name = stats_latest.get("lord_name", account_id)
                 
-                # Get yesterday's stats
-                stats_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
+                # Now compare: last available date vs day before that
+                day_before_available = (datetime.fromisoformat(last_available_date) - timedelta(days=1)).date().isoformat()
+                stats_previous, _ = await fetch_stats_with_fallback(account_id, start_date, day_before_available)
                 
-                if not stats_yesterday:
+                if not stats_previous:
                     inactive.append({"name": lord_name, "days": "?", "account_id": account_id})
                     continue
                 
-                # Extract stats and calculate gains in last 24h
-                power_today = int(stats_today.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                power_yesterday = int(stats_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                # Extract stats and calculate gains
+                power_latest = int(stats_latest.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                power_previous = int(stats_previous.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
                 
-                merits_today = int(stats_today.get("merits", "+0").replace("+", "").replace(",", "") or 0)
-                merits_yesterday = int(stats_yesterday.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                merits_latest = int(stats_latest.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                merits_previous = int(stats_previous.get("merits", "+0").replace("+", "").replace(",", "") or 0)
                 
-                mana_today = int(stats_today.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
-                mana_yesterday = int(stats_yesterday.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                mana_latest = int(stats_latest.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                mana_previous = int(stats_previous.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
                 
-                power_gain_24h = power_today - power_yesterday
-                merits_gain_24h = merits_today - merits_yesterday
-                mana_gain_24h = mana_today - mana_yesterday
+                power_gain_24h = power_latest - power_previous
+                merits_gain_24h = merits_latest - merits_previous
+                mana_gain_24h = mana_latest - mana_previous
                 
-                # Active if any gain in last 24h
+                # Active if any gain since last available data
                 if power_gain_24h > 0 or merits_gain_24h > 0 or mana_gain_24h > 0:
                     active.append({
                         "name": lord_name,
