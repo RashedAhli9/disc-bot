@@ -3261,22 +3261,38 @@ async def active_members(ctx):
         # Sort active by power gain
         active.sort(key=lambda x: x["power"], reverse=True)
         
-        output = f"```📊 Activity Report (Last 24 Hours)\n\n"
+        # Create embed
+        embed = discord.Embed(
+            title="📊 Activity Report",
+            description="Last 24 Hours",
+            color=0x2ecc71 if active else 0x95a5a6
+        )
         
         if active:
-            output += f"✅ ACTIVE ({len(active)} members):\n"
+            # Build four columns for active members
+            member_col = ""
+            power_col = ""
+            merits_col = ""
+            mana_col = ""
+            
             for member in active:
-                output += f"• {member['name']}: +{member['power']:,} power | +{member['merits']:,} Merits | +{member['mana']:,} mana\n"
-            output += "\n"
+                member_col += f"{member['name']}\n"
+                power_col += f"+{member['power']:,}\n"
+                merits_col += f"+{member['merits']:,}\n"
+                mana_col += f"+{member['mana']:,}\n"
+            
+            embed.add_field(name="✅ Member", value=member_col or "None", inline=True)
+            embed.add_field(name="⚔️ Power", value=power_col or "—", inline=True)
+            embed.add_field(name="🏆 Merits", value=merits_col or "—", inline=True)
+            embed.add_field(name="💧 Mana", value=mana_col or "—", inline=True)
+        else:
+            embed.add_field(name="✅ Active Members", value="None", inline=False)
         
         if inactive:
-            output += f"⏸️ INACTIVE ({len(inactive)} members):\n"
-            for member in inactive:
-                days_text = f"{member['days']} days" if member['days'] != "?" else "unknown"
-                output += f"• {member['name']} ({days_text})\n"
+            inactive_list = "\n".join([f"• {m['name']}" for m in inactive])
+            embed.add_field(name=f"⏸️ Inactive ({len(inactive)})", value=inactive_list, inline=False)
         
-        output += "```"
-        await ctx.send(output)
+        await ctx.send(embed=embed)
     except Exception as e:
         log_error(f"Active members error: {e}")
         await ctx.send("❌ Error checking activity.")
