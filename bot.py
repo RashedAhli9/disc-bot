@@ -358,6 +358,46 @@ async def fetch_current_t_kills(account_id):
         return {}
 
 
+async def fetch_latest_data_date(account_id):
+    """
+    Extract the 'Latest Data' date from Call of Stats profile
+    Returns date string in format "DD/MM/YYYY" or None if not found
+    """
+    import re
+    
+    try:
+        session = await get_callofstats_session()
+        url = f"https://callofstats.com/lord/{account_id}"
+        
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status != 200:
+                print(f"[LATEST DATA DATE] Failed to fetch {url}: {response.status}")
+                return None
+            
+            html = await response.text()
+            
+            # Look for "Latest Data" text and extract the date
+            # Pattern: Latest Data</span> ... <div class="value">DD/MM/YYYY</div>
+            patterns = [
+                r'Latest Data</span>.*?<div class="value">(\d{2}/\d{2}/\d{4})</div>',
+                r'<span class="subtle">Latest Data</span>.*?<div class="value">(\d{2}/\d{2}/\d{4})</div>',
+                r'Latest Data.*?(\d{2}/\d{2}/\d{4})',
+            ]
+            
+            for i, pattern in enumerate(patterns):
+                match = re.search(pattern, html, re.DOTALL)
+                if match:
+                    date_str = match.group(1)
+                    print(f"[LATEST DATA DATE] {account_id} = {date_str} (pattern {i})")
+                    return date_str
+            
+            print(f"[LATEST DATA DATE] Could not find date for {account_id}")
+            return None
+    except Exception as e:
+        print(f"[LATEST DATA DATE ERROR] {account_id}: {e}")
+        return None
+
+
 async def fetch_stats_with_fallback(account_id, start_date, end_date):
     """
     Fetch stats and automatically fallback to earlier dates if data is empty.
@@ -446,6 +486,14 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lord_name TEXT NOT NULL,
             account_id TEXT NOT NULL UNIQUE
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS callofstats_update (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            latest_data_date TEXT NOT NULL,
+            last_checked TEXT NOT NULL,
+            notified INTEGER DEFAULT 0
         );
     """)
     conn.commit()
@@ -540,6 +588,52 @@ def db_get_all_lords():
     rows = c.fetchall()
     conn.close()
     return rows
+
+# ============================================================
+# CALL OF STATS UPDATE TRACKING
+# ============================================================
+
+def db_get_last_known_data_date():
+    """Get the last known Call of Stats data date"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT latest_data_date FROM callofstats_update ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def db_update_data_date(new_date):
+    """Update the latest data date and reset notified flag"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    
+    # Check if there's an existing record
+    c.execute("SELECT id FROM callofstats_update LIMIT 1")
+    if c.fetchone():
+        c.execute("UPDATE callofstats_update SET latest_data_date=?, last_checked=?, notified=0", (new_date, now))
+    else:
+        c.execute("INSERT INTO callofstats_update (latest_data_date, last_checked, notified) VALUES (?, ?, 0)", (new_date, now))
+    
+    conn.commit()
+    conn.close()
+
+def db_mark_update_notified():
+    """Mark that we've sent the notification"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE callofstats_update SET notified=1 WHERE id=(SELECT id FROM callofstats_update ORDER BY id DESC LIMIT 1)")
+    conn.commit()
+    conn.close()
+
+def db_is_update_notified():
+    """Check if we've already notified about this update"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT notified FROM callofstats_update ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 def db_get_lord(account_id):
     conn = sqlite3.connect(DB)
@@ -892,6 +986,55 @@ async def restorebackup(inter):
 # ============================================================
 
 
+@tasks.loop(minutes=1)
+async def check_callofstats_update():
+    """
+    Check every 1 minute if new Call of Stats data is available
+    If new date detected, send message to update_channel_id
+    """
+    try:
+        # Always check Rekz's profile for latest data
+        account_id = "16322115"  # Rekz
+        
+        # Fetch latest data date
+        latest_date = await fetch_latest_data_date(account_id)
+        if not latest_date:
+            return
+        
+        # Get last known date
+        last_known = db_get_last_known_data_date()
+        
+        # If this is first time or date changed
+        if last_known != latest_date:
+            print(f"[CALLOFSTATS UPDATE] New data detected! {last_known} -> {latest_date}")
+            
+            # Update database
+            db_update_data_date(latest_date)
+            
+            # Send message to update channel
+            try:
+                guild = bot.get_guild(bot.guilds[0].id) if bot.guilds else None
+                if guild:
+                    update_channel = guild.get_channel(update_channel_id)
+                    if update_channel:
+                        embed = discord.Embed(
+                            title="🔄 Call of Stats Update",
+                            description=f"New data available for **{latest_date}**!",
+                            color=0x00FF00
+                        )
+                        embed.set_footer(text="Time to fetch fresh stats!")
+                        await update_channel.send(embed=embed)
+                        
+                        # Also mark as notified
+                        db_mark_update_notified()
+                        print(f"[CALLOFSTATS UPDATE] Notification sent to channel {update_channel_id}")
+            except Exception as e:
+                print(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
+    except Exception as e:
+        print(f"[CALLOFSTATS UPDATE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+
 @tasks.loop(minutes=5)
 async def self_ping():
     try:
@@ -926,6 +1069,10 @@ async def on_ready():
     # ✅ START SELF-PING (CRITICAL)
     if not self_ping.is_running():
         self_ping.start()
+
+    # ✅ CHECK CALLOFSTATS UPDATES
+    if not check_callofstats_update.is_running():
+        check_callofstats_update.start()
 
     # ✅ SAFE LOOP STARTS
     if not abyss_reminder_loop.is_running():
@@ -1320,6 +1467,185 @@ async def addlord_deprecated(inter: discord.Interaction):
         "Use `/forcefetch` to fetch everyone's stats.",
         ephemeral=True
     )
+
+
+@bot.command(name="oldprogress")
+async def oldprogress(ctx, user_input: str = None):
+    """View progress from past seasons. Shows season selector."""
+    
+    # Get all seasons
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, season_name, start_date FROM seasons ORDER BY created_at DESC")
+    seasons = c.fetchall()
+    conn.close()
+    
+    if not seasons:
+        return await ctx.send("❌ No seasons found.")
+    
+    if len(seasons) == 1:
+        return await ctx.send("❌ Only one season exists. Use `!progress` for current season.")
+    
+    # Get account ID
+    account_id = None
+    
+    if not user_input:
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                account_id = role.name
+                break
+        if not account_id:
+            return await ctx.send("❌ You don't have a numeric role. Ask the owner to give you one.")
+    elif user_input.isdigit():
+        account_id = user_input
+    else:
+        username_lower = user_input.lower()
+        for username, discord_id in USERNAME_TO_DISCORD_ID.items():
+            if username.lower() == username_lower:
+                try:
+                    member = ctx.guild.get_member(discord_id)
+                    if member:
+                        for role in member.roles:
+                            if role.name.isdigit():
+                                account_id = role.name
+                                break
+                except:
+                    pass
+                break
+        if not account_id:
+            return await ctx.send(f"❌ Could not find account ID for '{user_input}'")
+    
+    if not account_id:
+        return await ctx.send("❌ Could not determine account ID.")
+    
+    # Create select menu with seasons (excluding current season)
+    class SeasonSelect(discord.ui.Select):
+        def __init__(self, seasons, account_id, ctx):
+            self.seasons = seasons
+            self.account_id = account_id
+            self.ctx = ctx
+            
+            options = []
+            for i, (season_id, season_name, start_date) in enumerate(seasons[:-1]):  # Exclude current (latest)
+                options.append(discord.SelectOption(label=season_name, value=str(season_id)))
+            
+            if not options:
+                options.append(discord.SelectOption(label="No past seasons", value="none"))
+            
+            super().__init__(placeholder="Choose a season...", options=options, min_values=1, max_values=1)
+        
+        async def callback(self, interaction: discord.Interaction):
+            if self.values[0] == "none":
+                await interaction.response.defer()
+                return
+            
+            season_id = int(self.values[0])
+            
+            # Find season
+            season = None
+            for s in self.seasons:
+                if s[0] == season_id:
+                    season = s
+                    break
+            
+            if not season:
+                await interaction.response.send_message("❌ Season not found.", ephemeral=True)
+                return
+            
+            season_id, season_name, start_date = season
+            
+            # Find next season's start date to know end date
+            end_date = None
+            for s in self.seasons:
+                if s[0] != season_id:
+                    # If this season is older, find next newer season
+                    conn = sqlite3.connect(DB)
+                    c = conn.cursor()
+                    c.execute("SELECT start_date FROM seasons WHERE id=? LIMIT 1", (season_id,))
+                    season_start = c.fetchone()
+                    c.execute("SELECT start_date FROM seasons WHERE start_date > ? ORDER BY start_date ASC LIMIT 1", (season_start[0] if season_start else "2000-01-01",))
+                    next_season = c.fetchone()
+                    conn.close()
+                    
+                    if next_season:
+                        end_date = next_season[0]
+                    break
+            
+            # If no next season, use today
+            if not end_date:
+                end_date = date.today().isoformat()
+            
+            await interaction.response.defer()
+            
+            # Fetch stats for this date range
+            stats, actual_end = await fetch_stats_with_fallback(self.account_id, start_date, end_date)
+            
+            if not stats or stats.get("lord_name") == "Unknown":
+                await interaction.followup.send("❌ Failed to fetch stats for this season.")
+                return
+            
+            # Get highest power and T-kills
+            power = await fetch_highest_power(self.account_id)
+            t_kills = await fetch_current_t_kills(self.account_id)
+            
+            # Build output
+            lord_name = stats.get("lord_name", "Unknown")
+            output = f"```✅ Progress Report for {lord_name} for season {season_name}\n\n"
+            
+            # Power
+            if power:
+                power_gain = 0
+                if stats.get("power_gain"):
+                    try:
+                        pg_str = stats.get("power_gain", "+0").replace("+", "").replace(",", "")
+                        power_gain = int(pg_str)
+                    except:
+                        power_gain = 0
+                
+                output += f"⚡ Power {power:,} (+{power_gain:,})\n\n"
+            
+            # Merits
+            merits = stats.get("merits", "+0")
+            merits_pct = stats.get("merits_pct", "0%")
+            output += f"🏅 Merits {merits} ({merits_pct})\n\n"
+            
+            # Deaths, Healed, Kills
+            deaths = stats.get("deads_gain", "+0")
+            healed = stats.get("healed_gain", "+0")
+            kills = stats.get("kills_gain", "+0")
+            total_t = sum(t_kills.values()) if t_kills else 0
+            
+            output += f"💀 Deaths\n{deaths}\n\n"
+            output += f"❤️ Healed\n{healed}\n\n"
+            output += f"⚔️ Kills\n{total_t:,} ({kills})\n\n"
+            
+            # T-Tier
+            t5 = t_kills.get("t5", 0)
+            t4 = t_kills.get("t4", 0)
+            t3 = t_kills.get("t3", 0)
+            t2 = t_kills.get("t2", 0)
+            t1 = t_kills.get("t1", 0)
+            
+            output += f"T5 Kills: {t5:,}\n"
+            output += f"T4 Kills: {t4:,}\n"
+            output += f"T3 Kills: {t3:,}\n"
+            output += f"T2 Kills: {t2:,}\n"
+            output += f"T1 Kills: {t1:,}\n\n"
+            
+            # Mana
+            mana = stats.get("mana_gathered", "+0")
+            output += f"💧 Mana Gathered\n{mana}\n"
+            output += f"```"
+            
+            await interaction.followup.send(output)
+    
+    class SeasonView(discord.ui.View):
+        def __init__(self, seasons, account_id, ctx):
+            super().__init__()
+            self.add_item(SeasonSelect(seasons, account_id, ctx))
+    
+    view = SeasonView(seasons, account_id, ctx)
+    await ctx.send("Choose a season to view progress:", view=view)
 
 
 @bot.command(name="forcefetch")
