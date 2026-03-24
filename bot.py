@@ -3269,22 +3269,16 @@ async def active_members(ctx):
         )
         
         if active:
-            # Build four columns for active members
+            # Build two columns: Member name | All stats combined
             member_col = ""
-            power_col = ""
-            merits_col = ""
-            mana_col = ""
+            stats_col = ""
             
             for member in active:
                 member_col += f"{member['name']}\n"
-                power_col += f"+{member['power']:,}\n"
-                merits_col += f"+{member['merits']:,}\n"
-                mana_col += f"+{member['mana']:,}\n"
+                stats_col += f"⚔️ +{member['power']:,} | 🏆 +{member['merits']:,} | 💧 +{member['mana']:,}\n"
             
             embed.add_field(name="✅ Member", value=member_col or "None", inline=True)
-            embed.add_field(name="⚔️ Power", value=power_col or "—", inline=True)
-            embed.add_field(name="🏆 Merits", value=merits_col or "—", inline=True)
-            embed.add_field(name="💧 Mana", value=mana_col or "—", inline=True)
+            embed.add_field(name="📈 Stats (Power | Merits | Mana)", value=stats_col or "—", inline=True)
         else:
             embed.add_field(name="✅ Active Members", value="None", inline=False)
         
