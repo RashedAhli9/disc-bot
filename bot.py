@@ -2402,47 +2402,38 @@ async def active_members(ctx):
         
         for account_id in accounts_to_check:
             try:
-                # Find the last available data date (don't assume today has data)
-                last_available_date = today
-                stats_latest = None
+                # Get stats for today (fallback will find latest available date)
+                stats_today, actual_date_today = await fetch_stats_with_fallback(account_id, start_date, today)
                 
-                for days_back in range(0, 3):  # Check last 3 days for available data
-                    check_date = (date.today() - timedelta(days=days_back)).isoformat()
-                    stats_check, _ = await fetch_stats_with_fallback(account_id, start_date, check_date)
-                    if stats_check and stats_check.get("lord_name"):
-                        last_available_date = check_date
-                        stats_latest = stats_check
-                        break
-                
-                if not stats_latest:
+                if not stats_today or not stats_today.get("lord_name"):
                     log_error(f"No stats found for account {account_id}")
                     continue
                 
-                lord_name = stats_latest.get("lord_name", account_id)
+                lord_name = stats_today.get("lord_name", account_id)
                 
-                # Now compare: last available date vs day before that
-                day_before_available = (datetime.fromisoformat(last_available_date) - timedelta(days=1)).date().isoformat()
-                stats_previous, _ = await fetch_stats_with_fallback(account_id, start_date, day_before_available)
+                # Get stats for yesterday using the same fallback logic
+                yesterday_check = (date.today() - timedelta(days=1)).isoformat()
+                stats_yesterday, actual_date_yesterday = await fetch_stats_with_fallback(account_id, start_date, yesterday_check)
                 
-                if not stats_previous:
+                if not stats_yesterday:
                     inactive.append({"name": lord_name, "days": "?", "account_id": account_id})
                     continue
                 
-                # Extract stats and calculate gains
-                power_latest = int(stats_latest.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                power_previous = int(stats_previous.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                # Extract stats
+                power_today = int(stats_today.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                power_yesterday = int(stats_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
                 
-                merits_latest = int(stats_latest.get("merits", "+0").replace("+", "").replace(",", "") or 0)
-                merits_previous = int(stats_previous.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                merits_today = int(stats_today.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                merits_yesterday = int(stats_yesterday.get("merits", "+0").replace("+", "").replace(",", "") or 0)
                 
-                mana_latest = int(stats_latest.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
-                mana_previous = int(stats_previous.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                mana_today = int(stats_today.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                mana_yesterday = int(stats_yesterday.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
                 
-                power_gain_24h = power_latest - power_previous
-                merits_gain_24h = merits_latest - merits_previous
-                mana_gain_24h = mana_latest - mana_previous
+                power_gain_24h = power_today - power_yesterday
+                merits_gain_24h = merits_today - merits_yesterday
+                mana_gain_24h = mana_today - mana_yesterday
                 
-                # Active if any gain since last available data
+                # Active if any gain
                 if power_gain_24h > 0 or merits_gain_24h > 0 or mana_gain_24h > 0:
                     active.append({
                         "name": lord_name,
@@ -2451,28 +2442,10 @@ async def active_members(ctx):
                         "mana": mana_gain_24h
                     })
                 else:
-                    # Find last activity date (check up to 30 days)
-                    days_inactive = 0
-                    for days_back in range(1, 30):
-                        check_date = (date.today() - timedelta(days=days_back)).isoformat()
-                        check_date_prev = (date.today() - timedelta(days=days_back+1)).isoformat()
-                        
-                        stats_check, _ = await fetch_stats_with_fallback(account_id, start_date, check_date)
-                        stats_check_prev, _ = await fetch_stats_with_fallback(account_id, start_date, check_date_prev)
-                        
-                        if not stats_check or not stats_check_prev:
-                            continue
-                        
-                        power_check = int(stats_check.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                        power_check_prev = int(stats_check_prev.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                        
-                        if power_check > power_check_prev:
-                            days_inactive = days_back
-                            break
-                    
+                    # If no recent activity, mark as inactive with unknown days
                     inactive.append({
                         "name": lord_name,
-                        "days": days_inactive if days_inactive > 0 else "?"
+                        "days": "?"
                     })
             except Exception as e:
                 log_error(f"Error checking activity for {account_id}: {e}")
