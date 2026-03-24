@@ -2733,24 +2733,30 @@ async def active_members(ctx):
             try:
                 # Get today's stats from database
                 stats_today = db_get_season_progress(season_id, account_id, today)
+                actual_today_date = today
                 
                 # If not today, try yesterday (in case data hasn't been released yet)
                 if not stats_today:
                     yesterday = (date.today() - timedelta(days=1)).isoformat()
                     stats_today = db_get_season_progress(season_id, account_id, yesterday)
+                    if stats_today:
+                        actual_today_date = yesterday
                 
                 # Fallback to cache if still not found
                 if not stats_today:
                     stats_today = get_cached_stats(account_id, start_date, today)
+                    if stats_today:
+                        actual_today_date = today
                 
                 # If STILL no data, skip this account
-                if not stats_today:
+                if not stats_today or not isinstance(stats_today, dict):
                     log_info(f"[ACTIVE] No stats for {account_id}, skipping")
                     continue
                 
                 # Now safe to get lord_name
                 lord_name = stats_today.get("lord_name", account_id)
-                actual_today_date = stats_today.get("data_date", today)
+                if stats_today.get("data_date"):
+                    actual_today_date = stats_today.get("data_date")
                 
                 # Get stats from day before the actual date we got
                 day_before = (datetime.strptime(actual_today_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
@@ -2760,19 +2766,25 @@ async def active_members(ctx):
                 if not stats_yesterday:
                     stats_yesterday = get_cached_stats(account_id, start_date, day_before)
                 
-                if not stats_yesterday:
+                if not stats_yesterday or not isinstance(stats_yesterday, dict):
                     inactive.append({"name": lord_name, "days": "?"})
                     continue
                 
-                # Extract stats
-                power_today = int(stats_today.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                power_yesterday = int(stats_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
+                # Extract stats safely
+                def safe_parse(stat_str):
+                    """Safely parse stat strings like '+12,345' to int"""
+                    if not stat_str:
+                        return 0
+                    return int(str(stat_str).replace("+", "").replace(",", "") or 0)
                 
-                merits_today = int(stats_today.get("merits", "+0").replace("+", "").replace(",", "") or 0)
-                merits_yesterday = int(stats_yesterday.get("merits", "+0").replace("+", "").replace(",", "") or 0)
+                power_today = safe_parse(stats_today.get("power_gain", "0"))
+                power_yesterday = safe_parse(stats_yesterday.get("power_gain", "0"))
                 
-                mana_today = int(stats_today.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
-                mana_yesterday = int(stats_yesterday.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                merits_today = safe_parse(stats_today.get("merits", "0"))
+                merits_yesterday = safe_parse(stats_yesterday.get("merits", "0"))
+                
+                mana_today = safe_parse(stats_today.get("mana_gathered", "0"))
+                mana_yesterday = safe_parse(stats_yesterday.get("mana_gathered", "0"))
                 
                 power_gain_24h = power_today - power_yesterday
                 merits_gain_24h = merits_today - merits_yesterday
@@ -2790,6 +2802,8 @@ async def active_members(ctx):
                     inactive.append({"name": lord_name, "days": "?"})
             except Exception as e:
                 log_error(f"Error checking activity for {account_id}: {e}")
+                import traceback
+                log_error(traceback.format_exc())
                 continue
         
         # Sort active by power gain
