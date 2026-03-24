@@ -575,6 +575,35 @@ def init_db():
             notified INTEGER DEFAULT 0
         );
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS season_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            season_id INTEGER NOT NULL,
+            account_id TEXT NOT NULL,
+            data_date TEXT NOT NULL,
+            lord_name TEXT NOT NULL,
+            power_gain TEXT,
+            merits TEXT,
+            kills_gain TEXT,
+            deads_gain TEXT,
+            healed_gain TEXT,
+            t5_gain TEXT,
+            t4_gain TEXT,
+            t3_gain TEXT,
+            t2_gain TEXT,
+            t1_gain TEXT,
+            gold_spent TEXT,
+            wood_spent TEXT,
+            ore_spent TEXT,
+            mana_spent TEXT,
+            gold_gathered TEXT,
+            wood_gathered TEXT,
+            ore_gathered TEXT,
+            mana_gathered TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(season_id, account_id, data_date)
+        );
+    """)
     conn.commit()
     conn.close()
 
@@ -713,6 +742,140 @@ def db_is_update_notified():
     row = c.fetchone()
     conn.close()
     return row[0] if row else 0
+
+def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=None):
+    """Save a member's progress for a specific date in a season"""
+    try:
+        if not data_date:
+            data_date = date.today().isoformat()
+        
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        now = datetime.utcnow().isoformat()
+        
+        c.execute("""
+            INSERT OR REPLACE INTO season_progress 
+            (season_id, account_id, data_date, lord_name, power_gain, merits, kills_gain, deads_gain, healed_gain,
+             t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+             gold_spent, wood_spent, ore_spent, mana_spent,
+             gold_gathered, wood_gathered, ore_gathered, mana_gathered, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            season_id, account_id, data_date, lord_name,
+            stats.get("power_gain"), stats.get("merits"), stats.get("kills_gain"), 
+            stats.get("deads_gain"), stats.get("healed_gain"),
+            stats.get("t5_gain"), stats.get("t4_gain"), stats.get("t3_gain"), 
+            stats.get("t2_gain"), stats.get("t1_gain"),
+            stats.get("gold_spent"), stats.get("wood_spent"), stats.get("ore_spent"), 
+            stats.get("mana_spent"),
+            stats.get("gold_gathered"), stats.get("wood_gathered"), stats.get("ore_gathered"), 
+            stats.get("mana_gathered"), now
+        ))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        log_error(f"[DB SAVE PROGRESS] Error: {e}")
+        return False
+
+def db_get_season_progress(season_id, account_id, data_date=None):
+    """Get a member's progress for a specific date in a season (defaults to today)"""
+    try:
+        if not data_date:
+            data_date = date.today().isoformat()
+        
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("""
+            SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
+                   t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+                   gold_spent, wood_spent, ore_spent, mana_spent,
+                   gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+            FROM season_progress
+            WHERE season_id=? AND account_id=? AND data_date=?
+        """, (season_id, account_id, data_date))
+        row = c.fetchone()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        # Convert to stats dict format
+        stats = {
+            "power_gain": row[0],
+            "merits": row[1],
+            "kills_gain": row[2],
+            "deads_gain": row[3],
+            "healed_gain": row[4],
+            "t5_gain": row[5],
+            "t4_gain": row[6],
+            "t3_gain": row[7],
+            "t2_gain": row[8],
+            "t1_gain": row[9],
+            "gold_spent": row[10],
+            "wood_spent": row[11],
+            "ore_spent": row[12],
+            "mana_spent": row[13],
+            "gold_gathered": row[14],
+            "wood_gathered": row[15],
+            "ore_gathered": row[16],
+            "mana_gathered": row[17],
+            "lord_name": row[18],
+            "data_date": row[19]
+        }
+        return stats
+    except Exception as e:
+        log_error(f"[DB GET PROGRESS] Error: {e}")
+        return None
+
+def db_get_latest_season_progress(season_id, account_id):
+    """Get the latest (most recent date) progress for a member in a season"""
+    try:
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("""
+            SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
+                   t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+                   gold_spent, wood_spent, ore_spent, mana_spent,
+                   gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+            FROM season_progress
+            WHERE season_id=? AND account_id=?
+            ORDER BY data_date DESC
+            LIMIT 1
+        """, (season_id, account_id))
+        row = c.fetchone()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        # Convert to stats dict format
+        stats = {
+            "power_gain": row[0],
+            "merits": row[1],
+            "kills_gain": row[2],
+            "deads_gain": row[3],
+            "healed_gain": row[4],
+            "t5_gain": row[5],
+            "t4_gain": row[6],
+            "t3_gain": row[7],
+            "t2_gain": row[8],
+            "t1_gain": row[9],
+            "gold_spent": row[10],
+            "wood_spent": row[11],
+            "ore_spent": row[12],
+            "mana_spent": row[13],
+            "gold_gathered": row[14],
+            "wood_gathered": row[15],
+            "ore_gathered": row[16],
+            "mana_gathered": row[17],
+            "lord_name": row[18],
+            "data_date": row[19]
+        }
+        return stats
+    except Exception as e:
+        log_error(f"[DB GET LATEST PROGRESS] Error: {e}")
+        return None
 
 def db_get_lord(account_id):
     conn = sqlite3.connect(DB)
@@ -1065,11 +1228,76 @@ async def restorebackup(inter):
 # ============================================================
 
 
+async def force_refresh_all_stats():
+    """
+    Force-fetch and cache all members' stats for current season.
+    Called when Call of Stats update is detected.
+    Saves progress to database for future !oldprogress queries.
+    """
+    try:
+        season = db_get_current_season()
+        if not season:
+            log_info("[CACHE REFRESH] No active season")
+            return
+        
+        season_id, season_name, start_date, created_at = season
+        today = date.today().isoformat()
+        
+        guild = bot.get_guild(bot.guilds[0].id) if bot.guilds else None
+        if not guild:
+            log_info("[CACHE REFRESH] No guild found")
+            return
+        
+        lords = get_all_lords_from_guild(guild)
+        accounts_to_refresh = []
+        
+        # Add lords from guild roles
+        for lord in lords:
+            accounts_to_refresh.append(lord["account_id"])
+        
+        # Add mapped accounts (like Havi)
+        for discord_id, account_id in DISCORD_TO_ACCOUNT_ID.items():
+            accounts_to_refresh.append(account_id)
+        
+        log_info(f"[CACHE REFRESH] Starting bulk refresh for {len(accounts_to_refresh)} members")
+        
+        # Fetch and cache stats for each member
+        count = 0
+        for account_id in accounts_to_refresh:
+            try:
+                # Fetch today's stats (will fallback if needed)
+                stats_today, actual_date_today = await fetch_stats_with_fallback(account_id, start_date, today)
+                
+                if stats_today:
+                    # Cache today's stats (in-memory)
+                    set_cached_stats(account_id, start_date, today, stats_today)
+                    
+                    # SAVE to database with actual date (handles missed dates like 24/03)
+                    db_save_season_progress(season_id, account_id, stats_today.get("lord_name", account_id), stats_today, actual_date_today)
+                    
+                    # Also cache the day before for comparisons
+                    day_before = (datetime.strptime(actual_date_today, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+                    stats_yesterday, actual_date_yesterday = await fetch_stats_with_fallback(account_id, start_date, day_before)
+                    if stats_yesterday:
+                        set_cached_stats(account_id, start_date, day_before, stats_yesterday)
+                        # Also save yesterday to database
+                        db_save_season_progress(season_id, account_id, stats_yesterday.get("lord_name", account_id), stats_yesterday, actual_date_yesterday)
+                    
+                    count += 1
+            except Exception as e:
+                log_error(f"[CACHE REFRESH] Error for {account_id}: {e}")
+                continue
+        
+        log_info(f"[CACHE REFRESH] Complete! Cached & saved {count}/{len(accounts_to_refresh)} members to database")
+    except Exception as e:
+        log_error(f"[CACHE REFRESH ERROR] {e}")
+
+
 @tasks.loop(minutes=1)
 async def check_callofstats_update():
     """
     Check every 1 minute if new Call of Stats data is available
-    If new date detected, send message to update_channel_id
+    If new date detected, refresh cache and send notification
     """
     try:
         # Always check Rekz's profile for latest data
@@ -1090,7 +1318,11 @@ async def check_callofstats_update():
             # Update database
             db_update_data_date(latest_date)
             
-            # Send message to backup channel with owner tag
+            # IMMEDIATELY refresh cache with new data
+            log_info(f"[CALLOFSTATS UPDATE] Triggering cache refresh...")
+            await force_refresh_all_stats()
+            
+            # Send notification
             try:
                 guild = bot.get_guild(bot.guilds[0].id) if bot.guilds else None
                 if guild:
@@ -1098,10 +1330,10 @@ async def check_callofstats_update():
                     if update_channel:
                         embed = discord.Embed(
                             title="🔄 Call of Stats Update",
-                            description=f"<@{OWNER_ID}> New data available for **{latest_date}**!",
+                            description=f"<@{OWNER_ID}> New data for **{latest_date}** cached and ready!",
                             color=0x00FF00
                         )
-                        embed.set_footer(text="Time to fetch fresh stats!")
+                        embed.set_footer(text="Cache refreshed ✅")
                         await update_channel.send(embed=embed)
                         
                         # Also mark as notified
@@ -1314,21 +1546,37 @@ async def progress(ctx, user_input: str = None):
     
     season_id, season_name, start_date, created_at = season
     
-    msg = await ctx.send(f"⏳ Fetching fresh stats for account {account_id}...")
+    msg = await ctx.send(f"📊 Fetching stats for account {account_id}...")
     
     today = date.today().isoformat()
     
     try:
-        # Use universal fallback function
-        stats, end_date_used = await fetch_stats_with_fallback(account_id, start_date, today)
+        # FIRST: Try database for today
+        stats = db_get_season_progress(season_id, account_id, today)
+        
+        # If not today, try yesterday
+        if not stats:
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            stats = db_get_season_progress(season_id, account_id, yesterday)
+        
+        # FALLBACK: Check cache
+        if not stats:
+            stats = get_cached_stats(account_id, start_date, today)
+        
+        # FALLBACK 2: Fetch from API (for unlisted people)
+        if not stats:
+            log_info(f"[PROGRESS] {account_id} not in DB, fetching from API")
+            stats, end_date_used = await fetch_stats_with_fallback(account_id, start_date, today)
+        else:
+            end_date_used = stats.get("data_date", today)
         
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
         
-        # Get highest power from normal profile
+        # Get highest power from normal profile (only if not in database)
         highest_power = await fetch_highest_power(account_id)
         
-        # Get current T-kills from normal profile
+        # Get current T-kills from normal profile (only if not in database)
         current_t_kills = await fetch_current_t_kills(account_id)
         
         # Debug: log what we parsed
@@ -1656,10 +1904,14 @@ async def oldprogress(ctx, user_input: str = None):
             
             await interaction.response.defer()
             
-            # Fetch stats for this date range
-            stats, actual_end = await fetch_stats_with_fallback(self.account_id, start_date, end_date)
+            # Get latest stats from database for past season (no API calls, no dates needed)
+            stats = db_get_latest_season_progress(season_id, self.account_id)
             
-            if not stats or stats.get("lord_name") == "Unknown":
+            if not stats:
+                await interaction.followup.send(f"❌ No data found in database for this season.\n**Note:** Data is only saved for members in our tracking list. If you're a new member, ask the owner to add you!")
+                return
+            
+            if stats.get("lord_name") == "Unknown":
                 await interaction.followup.send("❌ Failed to fetch stats for this season.")
                 return
             
@@ -2056,28 +2308,55 @@ async def rss_leaderboard(ctx):
 
 async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
     """
-    Get all lords ranked by a specific stat.
-    Returns dict: {account_id: rank} where rank is 1-indexed
+    Get all lords ranked by a specific stat - uses database for current season.
+    Returns dict: {account_id: (rank, total)} where rank is 1-indexed
     """
-    lords = get_all_lords_from_guild(ctx.guild)
-    if not lords:
+    season = db_get_current_season()
+    if not season:
         return {}
     
+    season_id, season_name, _, _ = season
+    
     try:
-        fetch_tasks = [fetch_stats_with_fallback(lord["account_id"], start_date, end_date) for lord in lords]
-        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        # Get all members from guild + mapped accounts
+        lords = get_all_lords_from_guild(ctx.guild)
+        checked_accounts = set()
         
+        for lord in lords:
+            checked_accounts.add(lord["account_id"])
+        
+        for discord_id, account_id in DISCORD_TO_ACCOUNT_ID.items():
+            checked_accounts.add(account_id)
+        
+        # Valid stat keys to prevent SQL injection
+        valid_stats = ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain",
+                      "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
+                      "gold_spent", "wood_spent", "ore_spent", "mana_spent",
+                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]
+        
+        if stat_key not in valid_stats:
+            return {}
+        
+        # Get stats from database for all members
         stats_list = []
-        for lord, result in zip(lords, results):
-            if result and not isinstance(result, Exception):
-                stats, _ = result
-                if stats and stats.get(stat_key):
-                    val_str = stats[stat_key].replace(",", "").replace("+", "")
-                    try:
-                        val = int(val_str) if val_str.lstrip("-").isdigit() else 0
-                        stats_list.append({"account_id": lord["account_id"], "value": val})
-                    except Exception as e:
-                        pass
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        
+        for account_id in checked_accounts:
+            # Use safe column selection
+            query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=?"
+            c.execute(query, (season_id, account_id))
+            
+            row = c.fetchone()
+            if row and row[0]:
+                val_str = str(row[0]).replace(",", "").replace("+", "")
+                try:
+                    val = int(val_str) if val_str.lstrip("-").isdigit() else 0
+                    stats_list.append({"account_id": account_id, "value": val})
+                except:
+                    pass
+        
+        conn.close()
         
         # Sort by value descending
         stats_list.sort(key=lambda x: x["value"], reverse=True)
@@ -2089,7 +2368,8 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         
         return rankings
     except Exception as e:
-        log_info(f"[RANKINGS ERROR] {e}")
+        log_error(f"[RANKINGS ERROR] {e}")
+        return {}
         return {}
 
 
@@ -2138,7 +2418,7 @@ async def compare(ctx, user1: str = None, user2: str = None):
     season_id, season_name, start_date, created_at = season
     today = date.today().isoformat()
     
-    msg = await ctx.send(f"⏳ Fetching data for {user1} and {user2}...")
+    msg = await ctx.send(f"⏳ Comparing {user1} vs {user2}...")
     
     try:
         # Resolve both users
@@ -2150,14 +2430,34 @@ async def compare(ctx, user1: str = None, user2: str = None):
         if not account_id2:
             return await msg.edit(content=f"❌ Could not find '{user2}'")
         
-        # Fetch stats for both
-        stats1, end_date1 = await fetch_stats_with_fallback(account_id1, start_date, today)
-        stats2, end_date2 = await fetch_stats_with_fallback(account_id2, start_date, today)
+        # FIRST: Try database for today
+        stats1 = db_get_season_progress(season_id, account_id1, today)
+        stats2 = db_get_season_progress(season_id, account_id2, today)
+        
+        # If not today, try yesterday
+        if not stats1:
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            stats1 = db_get_season_progress(season_id, account_id1, yesterday)
+        if not stats2:
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            stats2 = db_get_season_progress(season_id, account_id2, yesterday)
+        
+        # FALLBACK: If not in database, try cache
+        if not stats1:
+            stats1 = get_cached_stats(account_id1, start_date, today)
+        if not stats2:
+            stats2 = get_cached_stats(account_id2, start_date, today)
+        
+        # FALLBACK 2: If still missing, fetch from API (for unlisted people)
+        if not stats1:
+            stats1, _ = await fetch_stats_with_fallback(account_id1, start_date, today)
+        if not stats2:
+            stats2, _ = await fetch_stats_with_fallback(account_id2, start_date, today)
         
         if not stats1 or not stats2:
             return await msg.edit(content="❌ Failed to fetch stats")
         
-        # Get highest power and T-kills for both
+        # Get highest power and T-kills for both (only if not in database)
         power1 = await fetch_highest_power(account_id1)
         power2 = await fetch_highest_power(account_id2)
         t_kills1 = await fetch_current_t_kills(account_id1)
@@ -2325,8 +2625,22 @@ async def quick_stats(ctx, user_input: str = None):
         return await ctx.send("❌ Could not find account ID.")
     
     try:
-        # Fetch stats
-        stats, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+        # FIRST: Try database for today
+        stats = db_get_season_progress(season_id, account_id, today)
+        
+        # If not today, try yesterday
+        if not stats:
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            stats = db_get_season_progress(season_id, account_id, yesterday)
+        
+        # FALLBACK: Check cache
+        if not stats:
+            stats = get_cached_stats(account_id, start_date, today)
+        
+        # FALLBACK 2: Fetch from API (for unlisted people)
+        if not stats:
+            stats, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+        
         if not stats or stats.get("lord_name") == "Unknown":
             return await ctx.send("❌ Failed to fetch stats.")
         
@@ -2364,14 +2678,13 @@ async def quick_stats(ctx, user_input: str = None):
 
 @bot.command(name="active")
 async def active_members(ctx):
-    """Show who's active (last 24h) vs inactive with days count"""
+    """Show who's active (last 24h) vs inactive with days count - uses cached data"""
     season = db_get_current_season()
     if not season:
         return await ctx.send("❌ No season active.")
     
     season_id, season_name, start_date, created_at = season
     today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
     
     try:
         guild = ctx.guild
@@ -2402,21 +2715,35 @@ async def active_members(ctx):
         
         for account_id in accounts_to_check:
             try:
-                # Get stats for today (fallback will find latest available date)
-                stats_today, actual_date_today = await fetch_stats_with_fallback(account_id, start_date, today)
+                # Get today's stats from database
+                stats_today = db_get_season_progress(season_id, account_id, today)
+                
+                # If not today, try yesterday (in case data hasn't been released yet)
+                if not stats_today:
+                    yesterday = (date.today() - timedelta(days=1)).isoformat()
+                    stats_today = db_get_season_progress(season_id, account_id, yesterday)
+                
+                # Fallback to cache if still not found
+                if not stats_today:
+                    stats_today = get_cached_stats(account_id, start_date, today)
                 
                 if not stats_today or not stats_today.get("lord_name"):
-                    log_error(f"No stats found for account {account_id}")
+                    log_error(f"No stats for account {account_id}")
                     continue
                 
                 lord_name = stats_today.get("lord_name", account_id)
+                actual_today_date = stats_today.get("data_date", today)
                 
-                # Get stats for yesterday using the same fallback logic
-                yesterday_check = (date.today() - timedelta(days=1)).isoformat()
-                stats_yesterday, actual_date_yesterday = await fetch_stats_with_fallback(account_id, start_date, yesterday_check)
+                # Get stats from day before the actual date we got
+                day_before = (datetime.strptime(actual_today_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+                stats_yesterday = db_get_season_progress(season_id, account_id, day_before)
+                
+                # Fallback to cache
+                if not stats_yesterday:
+                    stats_yesterday = get_cached_stats(account_id, start_date, day_before)
                 
                 if not stats_yesterday:
-                    inactive.append({"name": lord_name, "days": "?", "account_id": account_id})
+                    inactive.append({"name": lord_name, "days": "?"})
                     continue
                 
                 # Extract stats
@@ -2442,11 +2769,7 @@ async def active_members(ctx):
                         "mana": mana_gain_24h
                     })
                 else:
-                    # If no recent activity, mark as inactive with unknown days
-                    inactive.append({
-                        "name": lord_name,
-                        "days": "?"
-                    })
+                    inactive.append({"name": lord_name, "days": "?"})
             except Exception as e:
                 log_error(f"Error checking activity for {account_id}: {e}")
                 continue
