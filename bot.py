@@ -789,6 +789,7 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
         ))
         conn.commit()
         conn.close()
+        log_info(f"[DB SAVE] {lord_name} ({account_id}) for {data_date}")
         return True
     except Exception as e:
         log_error(f"[DB SAVE PROGRESS] Error: {e}")
@@ -1375,6 +1376,47 @@ async def self_ping():
     except Exception as e:
         log_info("[Self Ping Error]", e)
 
+def preload_cache_from_db():
+    """Load all recent season data from database into cache on bot startup"""
+    try:
+        season = db_get_current_season()
+        if not season:
+            log_info("[PRELOAD] No active season")
+            return
+        
+        season_id, season_name, start_date, created_at = season
+        
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        
+        # Get all unique account_ids and dates in the current season
+        c.execute("""
+            SELECT DISTINCT account_id, data_date
+            FROM season_progress
+            WHERE season_id = ?
+            ORDER BY data_date DESC
+            LIMIT 200
+        """, (season_id,))
+        
+        rows = c.fetchall()
+        conn.close()
+        
+        if not rows:
+            log_info("[PRELOAD] No data found in database")
+            return
+        
+        # Load each into cache
+        count = 0
+        for account_id, data_date in rows:
+            stats = db_get_season_progress(season_id, account_id, data_date)
+            if stats:
+                set_cached_stats(account_id, start_date, data_date, stats)
+                count += 1
+        
+        log_info(f"[PRELOAD] Loaded {count} entries into cache from database")
+    except Exception as e:
+        log_error(f"[PRELOAD ERROR] {e}")
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -1392,6 +1434,9 @@ async def on_ready():
         print(f"✅ Synced {len(synced)} commands")
     except Exception as e:
         print(f"❌ Command sync failed: {e}")
+    
+    # Pre-load cache from database on startup (so commands work immediately)
+    preload_cache_from_db()
 
     # ✅ START SELF-PING (CRITICAL)
     if not self_ping.is_running():
