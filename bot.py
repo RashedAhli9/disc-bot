@@ -2778,22 +2778,29 @@ async def active_members(ctx):
         
         for account_id in accounts_to_check:
             try:
-                # Get today's stats from database
-                stats_today = db_get_season_progress(season_id, account_id, today)
+                # PRIORITY 1: Try cache first (populated by forcefetch)
+                stats_today = get_cached_stats(account_id, start_date, today)
                 actual_today_date = today
                 
-                # If not today, try yesterday (in case data hasn't been released yet)
+                # PRIORITY 2: Try database if cache miss
+                if not stats_today:
+                    stats_today = db_get_season_progress(season_id, account_id, today)
+                    if stats_today:
+                        actual_today_date = stats_today.get("data_date", today)
+                
+                # PRIORITY 3: Try yesterday in cache
+                if not stats_today:
+                    yesterday = (date.today() - timedelta(days=1)).isoformat()
+                    stats_today = get_cached_stats(account_id, start_date, yesterday)
+                    if stats_today:
+                        actual_today_date = yesterday
+                
+                # PRIORITY 4: Try yesterday in database
                 if not stats_today:
                     yesterday = (date.today() - timedelta(days=1)).isoformat()
                     stats_today = db_get_season_progress(season_id, account_id, yesterday)
                     if stats_today:
-                        actual_today_date = yesterday
-                
-                # Fallback to cache if still not found
-                if not stats_today:
-                    stats_today = get_cached_stats(account_id, start_date, today)
-                    if stats_today:
-                        actual_today_date = today
+                        actual_today_date = stats_today.get("data_date", yesterday)
                 
                 # If STILL no data, skip this account
                 if not stats_today or not isinstance(stats_today, dict):
@@ -2805,11 +2812,19 @@ async def active_members(ctx):
                 if stats_today.get("data_date"):
                     actual_today_date = stats_today.get("data_date")
                 
+                log_info(f"[ACTIVE] Using {lord_name} data from {actual_today_date}")
+                
                 # Get stats from day before the actual date we got
                 day_before = (datetime.strptime(actual_today_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
-                stats_yesterday = db_get_season_progress(season_id, account_id, day_before)
                 
-                # If not yesterday, try to get the LATEST data before today (handles skipped dates)
+                # Try cache first for yesterday
+                stats_yesterday = get_cached_stats(account_id, start_date, day_before)
+                
+                # Then try database for specific day
+                if not stats_yesterday:
+                    stats_yesterday = db_get_season_progress(season_id, account_id, day_before)
+                
+                # If still not found, try to find LATEST data before today (handles skipped dates)
                 if not stats_yesterday:
                     try:
                         conn = sqlite3.connect(DB_PROGRESS)
@@ -2853,10 +2868,6 @@ async def active_members(ctx):
                             log_info(f"[ACTIVE] Found earlier data for {account_id}: {row[19]}")
                     except Exception as e:
                         log_error(f"[ACTIVE] Error querying earlier dates: {e}")
-                
-                # Fallback to cache
-                if not stats_yesterday:
-                    stats_yesterday = get_cached_stats(account_id, start_date, day_before)
                 
                 if not stats_yesterday or not isinstance(stats_yesterday, dict):
                     inactive.append({"name": lord_name, "days": "?"})
