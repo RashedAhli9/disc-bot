@@ -2224,6 +2224,10 @@ class GainsDateSelector(View):
         )
         end_select.callback = self.on_end_select
         self.add_item(end_select)
+        
+        # Add button below dropdowns
+        button = discord.ui.button(label="📊 Show Gains", style=discord.ButtonStyle.green)(self.show_gains)
+        self.add_item(button)
     
     async def on_start_select(self, interaction: discord.Interaction):
         self.selected_start = interaction.data["values"][0]
@@ -2233,8 +2237,7 @@ class GainsDateSelector(View):
         self.selected_end = interaction.data["values"][0]
         await interaction.response.defer()
     
-    @discord.ui.button(label="📊 Show Gains", style=discord.ButtonStyle.green)
-    async def show_gains(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def show_gains(self, interaction: discord.Interaction):
         if not self.selected_start or not self.selected_end:
             return await interaction.response.send_message("❌ Please select both dates", ephemeral=True)
         
@@ -2303,12 +2306,12 @@ class GainsDateSelector(View):
 
 
 @bot.command(name="gains")
-async def gains(ctx):
+async def gains(ctx, user_input: str = None):
     """
     Interactive GUI to view gains over any date range.
-    Pick start and end dates from available saved data.
+    Pick start and end dates to see gains.
     
-    Usage: !gains
+    Usage: !gains (your own) or !gains truvix or !gains 16322115
     """
     season = db_get_current_season()
     if not season:
@@ -2317,14 +2320,9 @@ async def gains(ctx):
     season_id, season_name, start_date, created_at = season
     
     # Get account ID
-    account_id = None
-    for role in ctx.author.roles:
-        if role.name.isdigit():
-            account_id = role.name
-            break
-    
+    account_id = await get_account_id_from_input(ctx, user_input)
     if not account_id:
-        return await ctx.send("❌ You don't have a numeric role. Ask an admin to assign your account ID role.")
+        return await ctx.send("❌ Could not find account ID.")
     
     # Get all available dates for this account from database
     try:
@@ -2338,7 +2336,7 @@ async def gains(ctx):
         conn.close()
         
         if not dates:
-            return await ctx.send("❌ No saved data found for your account this season. Run `!loadhistory` first.")
+            return await ctx.send("❌ No saved data found for this account this season. Run `!loadhistory` first.")
         
         # Show selector
         embed = discord.Embed(
