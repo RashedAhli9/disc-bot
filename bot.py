@@ -815,6 +815,7 @@ def db_get_season_progress(season_id, account_id, data_date=None):
         conn.close()
         
         if not row:
+            log_info(f"[DB QUERY] No data: season={season_id}, account={account_id}, date={data_date}")
             return None
         
         # Convert to stats dict format
@@ -840,6 +841,7 @@ def db_get_season_progress(season_id, account_id, data_date=None):
             "lord_name": row[18],
             "data_date": row[19]
         }
+        log_info(f"[DB HIT] {row[18]} ({account_id}) for {data_date}")
         return stats
     except Exception as e:
         log_error(f"[DB GET PROGRESS] Error: {e}")
@@ -2806,6 +2808,51 @@ async def active_members(ctx):
                 # Get stats from day before the actual date we got
                 day_before = (datetime.strptime(actual_today_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
                 stats_yesterday = db_get_season_progress(season_id, account_id, day_before)
+                
+                # If not yesterday, try to get the LATEST data before today (handles skipped dates)
+                if not stats_yesterday:
+                    try:
+                        conn = sqlite3.connect(DB_PROGRESS)
+                        c = conn.cursor()
+                        c.execute("""
+                            SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
+                                   t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+                                   gold_spent, wood_spent, ore_spent, mana_spent,
+                                   gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+                            FROM season_progress
+                            WHERE season_id=? AND account_id=? AND data_date < ?
+                            ORDER BY data_date DESC
+                            LIMIT 1
+                        """, (season_id, account_id, actual_today_date))
+                        row = c.fetchone()
+                        conn.close()
+                        
+                        if row:
+                            stats_yesterday = {
+                                "power_gain": row[0],
+                                "merits": row[1],
+                                "kills_gain": row[2],
+                                "deads_gain": row[3],
+                                "healed_gain": row[4],
+                                "t5_gain": row[5],
+                                "t4_gain": row[6],
+                                "t3_gain": row[7],
+                                "t2_gain": row[8],
+                                "t1_gain": row[9],
+                                "gold_spent": row[10],
+                                "wood_spent": row[11],
+                                "ore_spent": row[12],
+                                "mana_spent": row[13],
+                                "gold_gathered": row[14],
+                                "wood_gathered": row[15],
+                                "ore_gathered": row[16],
+                                "mana_gathered": row[17],
+                                "lord_name": row[18],
+                                "data_date": row[19]
+                            }
+                            log_info(f"[ACTIVE] Found earlier data for {account_id}: {row[19]}")
+                    except Exception as e:
+                        log_error(f"[ACTIVE] Error querying earlier dates: {e}")
                 
                 # Fallback to cache
                 if not stats_yesterday:
