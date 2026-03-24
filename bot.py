@@ -69,6 +69,7 @@ BACKUP_CHANNEL_ID = 1444604637377204295
 ABYSS_ROLE_ID = 1413532222396301322
 ABYSS_CONFIG_FILE = "abyss_config.json"
 DB = "/data/events.db"
+DB_PROGRESS = "/data/season_progress.db"  # Separate database for seasonal data
 
 # ============================================================
 # CALL OF STATS ACCOUNT IDS & CONSTANTS
@@ -575,6 +576,13 @@ def init_db():
             notified INTEGER DEFAULT 0
         );
     """)
+    conn.commit()
+    conn.close()
+
+def init_db_progress():
+    """Initialize separate database for season progress tracking"""
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS season_progress (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -606,6 +614,13 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+def migrate_db(conn):
+    """Handle database schema migrations for backwards compatibility"""
+    try:
+        pass  # No migrations needed - using separate databases now
+    except Exception as e:
+        log_error(f"[DB MIGRATION] Error: {e}")
 
 def db_add_event(name, dt, reminder):
     conn = sqlite3.connect(DB)
@@ -653,6 +668,7 @@ def db_delete_event(event_id):
     silent_backup()
 
 init_db()
+init_db_progress()
 
 # ============================================================
 # SEASON TRACKER DATABASE FUNCTIONS
@@ -749,7 +765,7 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
         if not data_date:
             data_date = date.today().isoformat()
         
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         now = datetime.utcnow().isoformat()
         
@@ -784,7 +800,7 @@ def db_get_season_progress(season_id, account_id, data_date=None):
         if not data_date:
             data_date = date.today().isoformat()
         
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute("""
             SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
@@ -831,7 +847,7 @@ def db_get_season_progress(season_id, account_id, data_date=None):
 def db_get_latest_season_progress(season_id, account_id):
     """Get the latest (most recent date) progress for a member in a season"""
     try:
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute("""
             SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
@@ -2339,7 +2355,7 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         
         # Get stats from database for all members
         stats_list = []
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         
         for account_id in checked_accounts:
@@ -2727,10 +2743,12 @@ async def active_members(ctx):
                 if not stats_today:
                     stats_today = get_cached_stats(account_id, start_date, today)
                 
-                if not stats_today or not stats_today.get("lord_name"):
-                    log_error(f"No stats for account {account_id}")
+                # If STILL no data, skip this account
+                if not stats_today:
+                    log_info(f"[ACTIVE] No stats for {account_id}, skipping")
                     continue
                 
+                # Now safe to get lord_name
                 lord_name = stats_today.get("lord_name", account_id)
                 actual_today_date = stats_today.get("data_date", today)
                 
