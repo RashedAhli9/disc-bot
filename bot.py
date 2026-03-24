@@ -1011,15 +1011,15 @@ async def check_callofstats_update():
             # Update database
             db_update_data_date(latest_date)
             
-            # Send message to update channel
+            # Send message to backup channel with owner tag
             try:
                 guild = bot.get_guild(bot.guilds[0].id) if bot.guilds else None
                 if guild:
-                    update_channel = guild.get_channel(update_channel_id)
+                    update_channel = guild.get_channel(BACKUP_CHANNEL_ID)
                     if update_channel:
                         embed = discord.Embed(
                             title="🔄 Call of Stats Update",
-                            description=f"New data available for **{latest_date}**!",
+                            description=f"<@{OWNER_ID}> New data available for **{latest_date}**!",
                             color=0x00FF00
                         )
                         embed.set_footer(text="Time to fetch fresh stats!")
@@ -1027,7 +1027,7 @@ async def check_callofstats_update():
                         
                         # Also mark as notified
                         db_mark_update_notified()
-                        print(f"[CALLOFSTATS UPDATE] Notification sent to channel {update_channel_id}")
+                        print(f"[CALLOFSTATS UPDATE] Notification sent to channel {BACKUP_CHANNEL_ID}")
             except Exception as e:
                 print(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
     except Exception as e:
