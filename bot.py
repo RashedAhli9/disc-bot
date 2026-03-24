@@ -1290,17 +1290,25 @@ async def force_refresh_all_stats():
                 if stats_today:
                     # Cache today's stats (in-memory)
                     set_cached_stats(account_id, start_date, today, stats_today)
+                    log_info(f"[FORCEFETCH] Cached today {account_id} for {today}")
                     
                     # SAVE to database with actual date (handles missed dates like 24/03)
                     db_save_season_progress(season_id, account_id, stats_today.get("lord_name", account_id), stats_today, actual_date_today)
+                    log_info(f"[FORCEFETCH] Saved today {account_id} for {actual_date_today}")
                     
                     # Also cache the day before for comparisons
                     day_before = (datetime.strptime(actual_date_today, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
                     stats_yesterday, actual_date_yesterday = await fetch_stats_with_fallback(account_id, start_date, day_before)
+                    
                     if stats_yesterday:
                         set_cached_stats(account_id, start_date, day_before, stats_yesterday)
+                        log_info(f"[FORCEFETCH] Cached yesterday {account_id} for {day_before} (actual: {actual_date_yesterday})")
+                        
                         # Also save yesterday to database
                         db_save_season_progress(season_id, account_id, stats_yesterday.get("lord_name", account_id), stats_yesterday, actual_date_yesterday)
+                        log_info(f"[FORCEFETCH] Saved yesterday {account_id} for {actual_date_yesterday}")
+                    else:
+                        log_info(f"[FORCEFETCH] ⚠️ No yesterday data for {account_id} (tried {day_before})")
                     
                     count += 1
             except Exception as e:
@@ -2094,6 +2102,183 @@ async def forcefetch(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="forcefetchfix")
+async def forcefetchfix(ctx):
+    """
+    [OWNER ONLY - HIDDEN]
+    Fetch EVERY DAY of data from season start to today and save to database.
+    This fixes !active and other commands by populating all historical data.
+    """
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    today = date.today()
+    
+    # Get all members to fetch for
+    lords = get_all_lords_from_guild(ctx.guild)
+    for discord_id, account_id in DISCORD_TO_ACCOUNT_ID.items():
+        if not any(l["account_id"] == account_id for l in lords):
+            lords.append({"account_id": account_id, "name": f"Account {account_id}"})
+    
+    total_days = (today - start).days + 1
+    await ctx.send(f"⏳ Fetching {len(lords)} members × {total_days} days ({total_days * len(lords)} total requests)...\nThis may take a few minutes.")
+    
+    # Fetch data for each day
+    current_date = start
+    saved_count = 0
+    
+    while current_date <= today:
+        date_str = current_date.isoformat()
+        
+        for lord in lords:
+            try:
+                account_id = lord["account_id"]
+                name = lord.get("name", account_id)
+                
+                # Fetch stats for this specific day
+                stats, actual_date = await fetch_stats_with_fallback(account_id, start_date, date_str)
+                
+                if stats:
+                    # Save to database with the correct date
+                    db_save_season_progress(season_id, account_id, stats.get("lord_name", name), stats, actual_date)
+                    saved_count += 1
+                    
+            except Exception as e:
+                log_error(f"[FORCEFETCHFIX] Error for {account_id} on {date_str}: {e}")
+                continue
+        
+        current_date += timedelta(days=1)
+    
+    embed = discord.Embed(
+        title="🔧 Force Fetch Fix Complete",
+        description=f"Season: {season_name}",
+        color=0x3498db
+    )
+    embed.add_field(name="📅 Date Range", value=f"{start_date} → {today}", inline=False)
+    embed.add_field(name="👥 Members", value=str(len(lords)), inline=True)
+    embed.add_field(name="📊 Data Rows Saved", value=str(saved_count), inline=True)
+    embed.add_field(name="✅ Status", value="All historical data loaded to database", inline=False)
+    
+    await ctx.send(embed=embed)
+    log_info(f"[FORCEFETCHFIX] Complete! Saved {saved_count} data points")
+
+
+@bot.command(name="compareprogress")
+async def compareprogress(ctx, date_str: str, user: str = None):
+    """
+    Compare your 24-hour progress on a specific date.
+    Usage: !compareprogress 23-03 [user]  or  !compareprogress 23/3 [user]  or  !compareprogress 24/03 [user]
+    
+    Shows stats from that date minus stats from the previous day.
+    """
+    try:
+        # Parse flexible date formats: 23-03, 23-3, 24/03, 24/3
+        date_str = date_str.replace("/", "-")
+        parts = date_str.split("-")
+        
+        if len(parts) != 2:
+            return await ctx.send("❌ Date format: Use 23-03 or 23/3 (day-month)")
+        
+        day = int(parts[0])
+        month = int(parts[1])
+        year = date.today().year  # Current year
+        
+        # Handle 2-digit month (03 → 03, 3 → 03)
+        query_date = date(year, month, day).isoformat()
+        
+        # Get account ID
+        if not user:
+            account_id = USERNAME_TO_DISCORD_ID.get(ctx.author.id)
+            if not account_id:
+                # Try to get from numeric roles
+                for role in ctx.author.roles:
+                    if role.name.isdigit():
+                        account_id = role.name
+                        break
+            if not account_id:
+                return await ctx.send("❌ Could not find your account. Try: `!compareprogress 23-03 @user`")
+        else:
+            account_id = await get_account_id_from_input(ctx, user)
+            if not account_id:
+                return await ctx.send(f"❌ Could not find account for '{user}'")
+        
+        # Get season
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active.")
+        
+        season_id, season_name, start_date, created_at = season
+        
+        # Get stats for query_date
+        stats_query = db_get_season_progress(season_id, account_id, query_date)
+        
+        if not stats_query:
+            # Try cache
+            stats_query = get_cached_stats(account_id, start_date, query_date)
+        
+        if not stats_query:
+            # Try API fallback
+            stats_query, _ = await fetch_stats_with_fallback(account_id, start_date, query_date)
+        
+        if not stats_query:
+            return await ctx.send(f"❌ No data found for {query_date}")
+        
+        # Get previous day
+        prev_date = (datetime.strptime(query_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+        stats_prev = db_get_season_progress(season_id, account_id, prev_date)
+        
+        if not stats_prev:
+            stats_prev = get_cached_stats(account_id, start_date, prev_date)
+        
+        if not stats_prev:
+            stats_prev, _ = await fetch_stats_with_fallback(account_id, start_date, prev_date)
+        
+        if not stats_prev:
+            return await ctx.send(f"❌ No data found for previous day ({prev_date})")
+        
+        # Helper to parse stats
+        def parse_stat(s):
+            if not s:
+                return 0
+            return int(str(s).replace("+", "").replace(",", "") or 0)
+        
+        # Calculate gains
+        power_gain = parse_stat(stats_query.get("power_gain", "0")) - parse_stat(stats_prev.get("power_gain", "0"))
+        merits_gain = parse_stat(stats_query.get("merits", "0")) - parse_stat(stats_prev.get("merits", "0"))
+        kills_gain = parse_stat(stats_query.get("kills_gain", "0")) - parse_stat(stats_prev.get("kills_gain", "0"))
+        deaths_gain = parse_stat(stats_query.get("deads_gain", "0")) - parse_stat(stats_prev.get("deads_gain", "0"))
+        mana_gain = parse_stat(stats_query.get("mana_gathered", "0")) - parse_stat(stats_prev.get("mana_gathered", "0"))
+        gold_spent = parse_stat(stats_query.get("gold_spent", "0"))
+        
+        lord_name = stats_query.get("lord_name", account_id)
+        
+        embed = discord.Embed(
+            title=f"📊 24-Hour Progress: {lord_name}",
+            description=f"{prev_date} → {query_date}",
+            color=0x9b59b6
+        )
+        embed.add_field(name="⚔️ Power", value=f"+{power_gain:,}", inline=True)
+        embed.add_field(name="🏆 Merits", value=f"+{merits_gain:,}", inline=True)
+        embed.add_field(name="💀 Kills", value=f"+{kills_gain:,}", inline=True)
+        embed.add_field(name="☠️ Deaths", value=f"+{deaths_gain:,}", inline=True)
+        embed.add_field(name="💧 Mana Gained", value=f"+{mana_gain:,}", inline=True)
+        embed.add_field(name="💰 Gold Spent", value=f"+{gold_spent:,}", inline=True)
+        
+        await ctx.send(embed=embed)
+        
+    except ValueError as e:
+        await ctx.send(f"❌ Invalid date format. Use: `!compareprogress 23-03` or `!compareprogress 24/03`")
+    except Exception as e:
+        log_error(f"[COMPAREPROGRESS] Error: {e}")
+        await ctx.send("❌ Error fetching comparison data.")
+
+
 @bot.command(name="topmana")
 async def topmana(ctx):
     """Leaderboard for mana gathered this season (auto-detects numeric roles)"""
@@ -2819,13 +3004,18 @@ async def active_members(ctx):
                 
                 # Try cache first for yesterday
                 stats_yesterday = get_cached_stats(account_id, start_date, day_before)
+                if stats_yesterday:
+                    log_info(f"[ACTIVE] Found yesterday in CACHE for {account_id}: {day_before}")
                 
                 # Then try database for specific day
                 if not stats_yesterday:
                     stats_yesterday = db_get_season_progress(season_id, account_id, day_before)
+                    if stats_yesterday:
+                        log_info(f"[ACTIVE] Found yesterday in DB for {account_id}: {day_before}")
                 
                 # If still not found, try to find LATEST data before today (handles skipped dates)
                 if not stats_yesterday:
+                    log_info(f"[ACTIVE] No yesterday data found, searching for earlier data before {actual_today_date}")
                     try:
                         conn = sqlite3.connect(DB_PROGRESS)
                         c = conn.cursor()
@@ -2866,10 +3056,13 @@ async def active_members(ctx):
                                 "data_date": row[19]
                             }
                             log_info(f"[ACTIVE] Found earlier data for {account_id}: {row[19]}")
+                        else:
+                            log_info(f"[ACTIVE] ❌ No earlier data found for {account_id} before {actual_today_date}")
                     except Exception as e:
                         log_error(f"[ACTIVE] Error querying earlier dates: {e}")
                 
                 if not stats_yesterday or not isinstance(stats_yesterday, dict):
+                    log_info(f"[ACTIVE] Marking {lord_name} as INACTIVE (no comparison data)")
                     inactive.append({"name": lord_name, "days": "?"})
                     continue
                 
