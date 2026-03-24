@@ -1713,8 +1713,11 @@ async def progress(ctx, user_input: str = None):
                 output += f"{power_gain}{power_rank_str}\n"
         
         # Merits - with ranking on ONE line
-        if stats.get("merits") and stats.get("merits_pct"):
-            output += f"🏅 Merits {stats['merits']} ({stats['merits_pct']}){merits_rank_str}\n"
+        if stats.get("merits"):
+            merits_display = f"{stats['merits']}"
+            if stats.get("merits_pct"):
+                merits_display += f" ({stats['merits_pct']})"
+            output += f"🏅 Merits {merits_display}{merits_rank_str}\n"
         
         output += f"\n"
         
@@ -2962,15 +2965,22 @@ async def quick_stats(ctx, user_input: str = None):
         deaths = stats.get("deads_gain", "+0")
         healed = stats.get("healed_gain", "+0")
         
+        # Get ranking positions as strings
+        power_rank_str = f"(#{power_rank[account_id][0]})" if account_id in power_rank else ""
+        merits_rank_str = f"(#{merits_rank[account_id][0]})" if account_id in merits_rank else ""
+        kills_rank_str = f"(#{kills_rank[account_id][0]})" if account_id in kills_rank else ""
+        
         # Format one-liner
         output = f"**{lord_name}** | "
         
         if power:
             power_gain_str = stats.get("power_gain", "+0")
-            output += f"⚡ {power:,} {power_gain_str} {power_rank} | "
+            output += f"⚡ {power:,} {power_gain_str} {power_rank_str} | "
         
-        output += f"🏅 {merits} ({merits_pct}) {merits_rank} | "
-        output += f"⚔️ {kills} {kills_rank} | "
+        if merits and merits != "+0":
+            output += f"🏅 {merits} ({merits_pct}) {merits_rank_str} | "
+        
+        output += f"⚔️ {kills} {kills_rank_str} | "
         output += f"💀 {deaths} | "
         output += f"❤️ {healed}"
         
