@@ -14,7 +14,7 @@ def home():
 
 @app.route("/health")
 def health():
-    print("[HEALTH CHECK] ping received")
+    log_info("[HEALTH CHECK] ping received")
     return "healthy", 200
 
 
@@ -44,6 +44,19 @@ import shutil
 import os
 
 # ============================================================
+# LOGGING SYSTEM
+# ============================================================
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================
 # GLOBAL CONFIG
 # ============================================================
 
@@ -57,7 +70,41 @@ ABYSS_ROLE_ID = 1413532222396301322
 ABYSS_CONFIG_FILE = "abyss_config.json"
 DB = "/data/events.db"
 
+# ============================================================
+# CALL OF STATS ACCOUNT IDS & CONSTANTS
+# ============================================================
 
+REKZ_ACCOUNT_ID = "16322115"
+FALLBACK_DAYS = 6  # Days to fallback when data is empty
+
+# ============================================================
+# CACHE SETTINGS
+# ============================================================
+
+CACHE_EXPIRY_HOURS = 72  # 3 days - cache validity period
+
+# ============================================================
+# LOGGING SETUP (Simple alternative to print)
+# ============================================================
+
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def log_info(message):
+    """Log info message"""
+    logger.info(message)
+
+def log_error(message):
+    """Log error message"""
+    logger.error(message)
+
+def log_debug(message):
+    """Log debug message"""
+    logger.debug(message)
     
 BACKUP_DIR = "backups"
 MAX_BACKUPS = 10
@@ -79,7 +126,7 @@ def parse_datetime(input_str):
     # Case 1: full date + HH:MM
     try:
         return datetime.strptime(input_str, "%d-%m-%Y %H:%M")
-    except:
+    except Exception as e:
         pass
 
     # Case 2: full date + HHutc
@@ -120,9 +167,18 @@ def pretty_hours(hours):
 
 
 async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
-    role = guild.get_role(ABYSS_ROLE_ID)
+    """
+    Send a DM to all members with the Abyss reminder role.
+    
+    Args:
+        guild: Discord guild/server
+        embed: Discord embed to send
+    
+    Returns:
+        None (logs success/errors)
+    """
     if not role:
-        print("[ABYSS] Role not found in guild:", guild.id)
+        log_info("[ABYSS] Role not found in guild:", guild.id)
         return
 
     count = 0
@@ -137,9 +193,9 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
             except discord.Forbidden:
                 continue
             except Exception as e:
-                print("[ABYSS] DM error:", e)
+                log_info("[ABYSS] DM error:", e)
     
-    print(f"[ABYSS] Sent DM to {count} members with role {ABYSS_ROLE_ID}")
+    log_info(f"[ABYSS] Sent DM to {count} members with role {ABYSS_ROLE_ID}")
 
 
 
@@ -148,6 +204,12 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
 # ============================================================
 
 def cleanup_old_backups():
+    """
+    Remove old backup files, keeping only the MAX_BACKUPS most recent.
+    
+    Returns:
+        None
+    """
     files = sorted(
         [f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")],
         reverse=True
@@ -155,11 +217,20 @@ def cleanup_old_backups():
     for f in files[MAX_BACKUPS:]:
         try:
             os.remove(os.path.join(BACKUP_DIR, f))
-        except:
-            pass
+            log_info(f"Deleted old backup: {f}")
+        except Exception as e:
+            log_error(f"Failed to delete backup {f}: {e}")
 
 async def upload_backup(path):
-    ch = bot.get_channel(BACKUP_CHANNEL_ID)
+    """
+    Upload a backup file to the backup channel.
+    
+    Args:
+        path: Path to the backup zip file
+    
+    Returns:
+        None
+    """
     if ch:
         await ch.send("📦 **Backup created**", file=discord.File(path))
 
@@ -181,7 +252,7 @@ def make_backup():
 def silent_backup():
     try:
         make_backup()
-    except:
+    except Exception as e:
         pass
 
 def get_all_lords_from_guild(guild):
@@ -221,7 +292,7 @@ async def fetch_highest_power(account_id):
         
         async with session.get(url, allow_redirects=True) as response:
             if response.status != 200:
-                print(f"[HIGHEST POWER] Failed to fetch {url}: {response.status}")
+                log_info(f"[HIGHEST POWER] Failed to fetch {url}: {response.status}")
                 return None
             
             html = await response.text()
@@ -239,25 +310,25 @@ async def fetch_highest_power(account_id):
                     power_str = match.group(1).replace(",", "")
                     try:
                         highest_power = int(power_str)
-                        print(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i})")
+                        log_info(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i})")
                         return highest_power
                     except Exception as e:
-                        print(f"[HIGHEST POWER] Failed to parse: {e}")
+                        log_info(f"[HIGHEST POWER] Failed to parse: {e}")
             
             # Debug: show section around "Highest Power"
             idx = html.find("Highest Power")
             if idx != -1:
                 debug_html = html[max(0, idx-200):min(len(html), idx+400)]
-                print(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{debug_html}")
+                log_info(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{debug_html}")
             else:
-                print(f"[HIGHEST POWER] 'Highest Power' not found in HTML at all")
+                log_info(f"[HIGHEST POWER] 'Highest Power' not found in HTML at all")
                 # Show first 3000 chars
-                print(f"[HIGHEST POWER DEBUG] First 3000 chars:\n{html[:3000]}")
+                log_info(f"[HIGHEST POWER DEBUG] First 3000 chars:\n{html[:3000]}")
             
             return None
     
     except Exception as e:
-        print(f"[HIGHEST POWER ERROR] {account_id}: {e}")
+        log_info(f"[HIGHEST POWER ERROR] {account_id}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -273,7 +344,7 @@ async def fetch_highest_power(account_id):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
             async with session.get(url, allow_redirects=True) as response:
                 if response.status != 200:
-                    print(f"[CURRENT POWER] Failed to fetch {url}: {response.status}")
+                    log_info(f"[CURRENT POWER] Failed to fetch {url}: {response.status}")
                     return None
                 
                 html = await response.text()
@@ -283,13 +354,13 @@ async def fetch_highest_power(account_id):
                 if power_match:
                     power_str = power_match.group(1).replace(",", "")
                     power = int(power_str)
-                    print(f"[CURRENT POWER] {account_id} = {power}")
+                    log_info(f"[CURRENT POWER] {account_id} = {power}")
                     return power
                 
-                print(f"[CURRENT POWER] Could not parse power for {account_id}")
+                log_info(f"[CURRENT POWER] Could not parse power for {account_id}")
                 return None
     except Exception as e:
-        print(f"[CURRENT POWER ERROR] {account_id}: {e}")
+        log_info(f"[CURRENT POWER ERROR] {account_id}: {e}")
         return None
 
 
@@ -308,7 +379,7 @@ async def fetch_current_t_kills(account_id):
         
         async with session.get(url, allow_redirects=True) as response:
             if response.status != 200:
-                print(f"[CURRENT T-KILLS] Failed to fetch {url}: {response.status}")
+                log_info(f"[CURRENT T-KILLS] Failed to fetch {url}: {response.status}")
                 return {}
             
             html = await response.text()
@@ -334,25 +405,25 @@ async def fetch_current_t_kills(account_id):
                     kills_str = match.group(1).replace(",", "")
                     try:
                         t_kills[tier.lower()] = int(kills_str)
-                        print(f"[CURRENT T-KILLS] Parsed {tier}: {kills_str}")
+                        log_info(f"[CURRENT T-KILLS] Parsed {tier}: {kills_str}")
                     except Exception as e:
-                        print(f"[CURRENT T-KILLS] Failed to parse {tier}: {e}")
+                        log_info(f"[CURRENT T-KILLS] Failed to parse {tier}: {e}")
                 else:
-                    print(f"[CURRENT T-KILLS] Pattern not found for {tier}")
+                    log_info(f"[CURRENT T-KILLS] Pattern not found for {tier}")
                     # Debug
                     idx = html.find(f"{tier} Kills")
                     if idx != -1:
                         debug_html = html[max(0, idx-100):min(len(html), idx+300)]
-                        print(f"[CURRENT T-KILLS DEBUG {tier}]:\n{debug_html}")
+                        log_info(f"[CURRENT T-KILLS DEBUG {tier}]:\n{debug_html}")
             
             if t_kills:
-                print(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
+                log_info(f"[CURRENT T-KILLS] {account_id} = {t_kills}")
                 return t_kills
             else:
-                print(f"[CURRENT T-KILLS] Could not parse any T-kills for {account_id}")
+                log_info(f"[CURRENT T-KILLS] Could not parse any T-kills for {account_id}")
                 return {}
     except Exception as e:
-        print(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
+        log_info(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
         import traceback
         traceback.print_exc()
         return {}
@@ -371,7 +442,7 @@ async def fetch_latest_data_date(account_id):
         
         async with session.get(url, allow_redirects=True) as response:
             if response.status != 200:
-                print(f"[LATEST DATA DATE] Failed to fetch {url}: {response.status}")
+                log_info(f"[LATEST DATA DATE] Failed to fetch {url}: {response.status}")
                 return None
             
             html = await response.text()
@@ -388,13 +459,13 @@ async def fetch_latest_data_date(account_id):
                 match = re.search(pattern, html, re.DOTALL)
                 if match:
                     date_str = match.group(1)
-                    print(f"[LATEST DATA DATE] {account_id} = {date_str} (pattern {i})")
+                    log_info(f"[LATEST DATA DATE] {account_id} = {date_str} (pattern {i})")
                     return date_str
             
-            print(f"[LATEST DATA DATE] Could not find date for {account_id}")
+            log_info(f"[LATEST DATA DATE] Could not find date for {account_id}")
             return None
     except Exception as e:
-        print(f"[LATEST DATA DATE ERROR] {account_id}: {e}")
+        log_info(f"[LATEST DATA DATE ERROR] {account_id}: {e}")
         return None
 
 
@@ -407,15 +478,15 @@ async def fetch_stats_with_fallback(account_id, start_date, end_date):
     
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
     
-    # Try up to 5 days back
-    for days_back in range(6):
+    # Try up to FALLBACK_DAYS back
+    for days_back in range(FALLBACK_DAYS):
         current_end = (end_dt - timedelta(days=days_back)).isoformat()
-        print(f"[FALLBACK] Trying date: {current_end}")
+        log_info(f"[FALLBACK] Trying date: {current_end}")
         
         stats = await fetch_stats_for_account(account_id, start_date, current_end, skip_cache=True)
         
         if not stats:
-            print(f"[FALLBACK] No stats returned for {current_end}, trying earlier")
+            log_info(f"[FALLBACK] No stats returned for {current_end}, trying earlier")
             continue
         
         # Check if any data exists (not all zeros/None)
@@ -430,33 +501,34 @@ async def fetch_stats_with_fallback(account_id, start_date, end_date):
                 break
         
         if has_data:
-            print(f"[FALLBACK] Found data for {current_end}")
+            log_info(f"[FALLBACK] Found data for {current_end}")
             return stats, current_end
         else:
-            print(f"[FALLBACK] All zeros for {current_end}, trying earlier")
+            log_info(f"[FALLBACK] All zeros for {current_end}, trying earlier")
     
     # Return the original stats even if empty (for last resort)
     return stats, end_date
 
 
-
-    """Get stats from cache if valid"""
+def get_cached_stats(account_id, start_date, end_date):
+    """Get stats from cache if valid (not expired)"""
     cache_key = f"{account_id}_{start_date}_{end_date}"
     if cache_key in _stats_cache:
         cached = _stats_cache[cache_key]
         age_hours = (datetime.utcnow() - cached["timestamp"]).total_seconds() / 3600
         if age_hours < CACHE_EXPIRY_HOURS:
-            print(f"[CACHE HIT] {account_id} (age: {int(age_hours)}h)")
+            log_info(f"[CACHE HIT] {account_id} (age: {int(age_hours)}h)")
             return cached["stats"]
         else:
             del _stats_cache[cache_key]
     return None
 
+
 def set_cached_stats(account_id, start_date, end_date, stats):
-    """Store stats in cache"""
+    """Store stats in cache with timestamp"""
     cache_key = f"{account_id}_{start_date}_{end_date}"
     _stats_cache[cache_key] = {"timestamp": datetime.utcnow(), "stats": stats}
-    print(f"[CACHE SET] {account_id}")
+    log_info(f"[CACHE SET] {account_id}")
 
 # ============================================================
 # SQLITE DATABASE
@@ -506,7 +578,7 @@ def db_add_event(name, dt, reminder):
         "INSERT INTO events (name, datetime, reminder) VALUES (?, ?, ?)",
         (name, dt, reminder)
     )
-    print("[DB ADD EVENT] writing to:", DB)
+    log_info("[DB ADD EVENT] writing to:", DB)
     conn.commit()
     conn.close()
     silent_backup()
@@ -667,17 +739,17 @@ async def get_callofstats_session():
     password = os.getenv("CALLOFSTATS_PASSWORD")
     
     if not username or not password:
-        print("[CALLOFSTATS] Missing credentials in env variables")
+        log_info("[CALLOFSTATS] Missing credentials in env variables")
         return None
     
     # Reuse session if it exists and is less than 30 minutes old
     if _callofstats_session and _session_login_time:
         age = (datetime.utcnow() - _session_login_time).total_seconds()
         if age < 1800:  # 30 minutes
-            print(f"[CALLOFSTATS] Reusing cached session (age: {int(age)}s)")
+            log_info(f"[CALLOFSTATS] Reusing cached session (age: {int(age)}s)")
             return _callofstats_session
         else:
-            print("[CALLOFSTATS] Session expired, creating new one")
+            log_info("[CALLOFSTATS] Session expired, creating new one")
             await _callofstats_session.close()
             _callofstats_session = None
     
@@ -687,33 +759,33 @@ async def get_callofstats_session():
         timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)
         session = aiohttp.ClientSession(timeout=timeout)
         
-        print("[CALLOFSTATS] Logging in...")
+        log_info("[CALLOFSTATS] Logging in...")
         async with session.post(
             "https://callofstats.com/login",
             data={"username": username, "password": password},
             allow_redirects=True
         ) as resp:
             if resp.status != 200:
-                print(f"[CALLOFSTATS] Login failed: {resp.status}")
+                log_info(f"[CALLOFSTATS] Login failed: {resp.status}")
                 await session.close()
                 return None
-            print("[CALLOFSTATS] Login successful (session cached)")
+            log_info("[CALLOFSTATS] Login successful (session cached)")
         
         _callofstats_session = session
         _session_login_time = datetime.utcnow()
         return session
     except asyncio.TimeoutError:
-        print("[CALLOFSTATS] Login timed out (30 seconds)")
+        log_info("[CALLOFSTATS] Login timed out (30 seconds)")
         return None
     except Exception as e:
-        print(f"[CALLOFSTATS] Login error: {e}")
+        log_info(f"[CALLOFSTATS] Login error: {e}")
         return None
 
 async def fetch_stats(start_date, end_date):
     """Fetch player stats from callofstats"""
     account_id = os.getenv("CALLOFSTATS_ACCOUNT_ID")
     if not account_id:
-        print("[CALLOFSTATS] Missing CALLOFSTATS_ACCOUNT_ID")
+        log_info("[CALLOFSTATS] Missing CALLOFSTATS_ACCOUNT_ID")
         return None
     
     return await fetch_stats_for_account(account_id, start_date, end_date)
@@ -723,7 +795,7 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
     global _stats_cache
     
     if not account_id:
-        print("[CALLOFSTATS] Missing account_id")
+        log_info("[CALLOFSTATS] Missing account_id")
         return None
     
     # Check cache first (unless skip_cache=True)
@@ -732,13 +804,13 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
         timestamp, cached_stats = _stats_cache[cache_key]
         age = (datetime.utcnow() - timestamp).total_seconds()
         if age < CACHE_DURATION:
-            print(f"[CACHE HIT] Account {account_id} (age: {int(age)}s)")
+            log_info(f"[CACHE HIT] Account {account_id} (age: {int(age)}s)")
             return cached_stats
         else:
-            print(f"[CACHE EXPIRED] Account {account_id}, fetching fresh data")
+            log_info(f"[CACHE EXPIRED] Account {account_id}, fetching fresh data")
             del _stats_cache[cache_key]
     elif skip_cache:
-        print(f"[SKIP CACHE] Fetching fresh data for {account_id}")
+        log_info(f"[SKIP CACHE] Fetching fresh data for {account_id}")
     
     try:
         # Get cached session (reuses login)
@@ -752,30 +824,30 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
             end_dt = datetime.strptime(end_date, "%Y-%m-%d")
             start_date_formatted = start_dt.strftime("%Y-%m-%d")
             end_date_formatted = end_dt.strftime("%Y-%m-%d")
-        except:
+        except Exception as e:
             start_date_formatted = start_date
             end_date_formatted = end_date
         
         url = f"https://callofstats.com/lord/{account_id}?start_date={start_date_formatted}&end_date={end_date_formatted}"
-        print(f"[CALLOFSTATS] Fetching: {url}")
+        log_info(f"[CALLOFSTATS] Fetching: {url}")
         
         async with session.get(url, allow_redirects=True) as resp:
             if resp.status == 200:
                 html = await resp.text()
-                print(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
+                log_info(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
                 stats = parse_stats(html)
                 
                 # Cache the result
                 _stats_cache[cache_key] = (datetime.utcnow(), stats)
                 return stats
             else:
-                print(f"[CALLOFSTATS] Fetch failed: {resp.status}")
+                log_info(f"[CALLOFSTATS] Fetch failed: {resp.status}")
                 return None
     except asyncio.TimeoutError:
-        print("[CALLOFSTATS] Request timed out (30 seconds)")
+        log_info("[CALLOFSTATS] Request timed out (30 seconds)")
         return None
     except Exception as e:
-        print(f"[CALLOFSTATS] Fetch error: {e}")
+        log_info(f"[CALLOFSTATS] Fetch error: {e}")
         return None
 
 def parse_stats(html):
@@ -855,11 +927,11 @@ def parse_stats(html):
         stats["mana_spent"] = find_stat_value("Mana Spent")
         
         found_count = len([v for v in stats.values() if v])
-        print(f"[PARSE] Successfully parsed stats: {found_count} fields found")
-        print(f"[PARSE] Lord name: {stats['lord_name']}")
+        log_info(f"[PARSE] Successfully parsed stats: {found_count} fields found")
+        log_info(f"[PARSE] Lord name: {stats['lord_name']}")
         return stats
     except Exception as e:
-        print(f"[PARSE STATS] Error: {e}")
+        log_info(f"[PARSE STATS] Error: {e}")
         return None
 
 # ============================================================
@@ -994,7 +1066,7 @@ async def check_callofstats_update():
     """
     try:
         # Always check Rekz's profile for latest data
-        account_id = "16322115"  # Rekz
+        account_id = REKZ_ACCOUNT_ID
         
         # Fetch latest data date
         latest_date = await fetch_latest_data_date(account_id)
@@ -1006,7 +1078,7 @@ async def check_callofstats_update():
         
         # If this is first time or date changed
         if last_known != latest_date:
-            print(f"[CALLOFSTATS UPDATE] New data detected! {last_known} -> {latest_date}")
+            log_info(f"[CALLOFSTATS UPDATE] New data detected! {last_known} -> {latest_date}")
             
             # Update database
             db_update_data_date(latest_date)
@@ -1027,11 +1099,11 @@ async def check_callofstats_update():
                         
                         # Also mark as notified
                         db_mark_update_notified()
-                        print(f"[CALLOFSTATS UPDATE] Notification sent to channel {BACKUP_CHANNEL_ID}")
+                        log_info(f"[CALLOFSTATS UPDATE] Notification sent to channel {BACKUP_CHANNEL_ID}")
             except Exception as e:
-                print(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
+                log_info(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
     except Exception as e:
-        print(f"[CALLOFSTATS UPDATE ERROR] {e}")
+        log_info(f"[CALLOFSTATS UPDATE ERROR] {e}")
         import traceback
         traceback.print_exc()
 
@@ -1046,7 +1118,7 @@ async def self_ping():
             async with session.get(url) as resp:
                 pass
     except Exception as e:
-        print("[Self Ping Error]", e)
+        log_info("[Self Ping Error]", e)
 
 @bot.event
 async def on_ready():
@@ -1100,7 +1172,7 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [username]` - View your or another lord's season stats\n`!compare lord1 lord2` - Compare two lords side by side\n`!topmana` - Top mana gathered this season\n`!topdeaths` - Most deaths this season\n`!topmerits` - Highest merits this season\n`!rss` - Top resource spenders",
+        value="`!progress [user]` - Full season stats\n`!oldprogress [user]` - View stats from past seasons\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Side-by-side comparison\n`!topmana` - Top mana gathered\n`!topdeaths` - Most deaths\n`!topmerits` - Highest merits\n`!rss` - Top resource spenders\n`!active` - Show active vs inactive members\n`!forcefetch` - Fetch all stats and cache (owner only)",
         inline=False
     )
     
@@ -1164,7 +1236,7 @@ class NewSeasonModal(Modal, title="📅 New Season"):
                 ephemeral=True
             )
         except Exception as e:
-            print(f"[NEW SEASON ERROR] {e}")
+            log_info(f"[NEW SEASON ERROR] {e}")
             await interaction.followup.send(
                 "❌ Failed to create season.",
                 ephemeral=True
@@ -1230,7 +1302,7 @@ async def progress(ctx, user_input: str = None):
             if not account_id:
                 return await ctx.send(f"❌ User '{user_input}' doesn't have a numeric role with their account ID.")
         except Exception as e:
-            print(f"[PROGRESS USERNAME ERROR] {e}")
+            log_info(f"[PROGRESS USERNAME ERROR] {e}")
             return await ctx.send(f"❌ Error looking up user '{user_input}'")
     
     season_id, season_name, start_date, created_at = season
@@ -1253,9 +1325,9 @@ async def progress(ctx, user_input: str = None):
         current_t_kills = await fetch_current_t_kills(account_id)
         
         # Debug: log what we parsed
-        print(f"[PROGRESS] Parsed stats: {stats}")
-        print(f"[PROGRESS] Highest power: {highest_power}")
-        print(f"[PROGRESS] Current T-kills: {current_t_kills}")
+        log_info(f"[PROGRESS] Parsed stats: {stats}")
+        log_info(f"[PROGRESS] Highest power: {highest_power}")
+        log_info(f"[PROGRESS] Current T-kills: {current_t_kills}")
         
         # Get rankings for all stats
         power_rank = await get_rankings_for_stat(ctx, "power_gain", start_date, end_date_used)
@@ -1270,7 +1342,7 @@ async def progress(ctx, user_input: str = None):
             power_gain_str = stats["power_gain"].replace("+", "")
             try:
                 power_gain = int(power_gain_str.replace(",", ""))
-            except:
+            except Exception as e:
                 power_gain = 0
         
         # Build ranking strings
@@ -1289,14 +1361,14 @@ async def progress(ctx, user_input: str = None):
             val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
             try:
                 total_spent += int(val_str) if val_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         for key in ["gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
             val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
             try:
                 total_gathered += int(val_str) if val_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         # Build text output - MATCH REFERENCE FORMAT
@@ -1352,7 +1424,7 @@ async def progress(ctx, user_input: str = None):
             t5_gain_str = stats['t5_gain'].replace("+", "").replace(",", "")
             try:
                 total_t_gain += int(t5_gain_str) if t5_gain_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         if stats.get("t4_gain"):
@@ -1366,7 +1438,7 @@ async def progress(ctx, user_input: str = None):
             t4_gain_str = stats['t4_gain'].replace("+", "").replace(",", "")
             try:
                 total_t_gain += int(t4_gain_str) if t4_gain_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         if stats.get("t3_gain"):
@@ -1380,7 +1452,7 @@ async def progress(ctx, user_input: str = None):
             t3_gain_str = stats['t3_gain'].replace("+", "").replace(",", "")
             try:
                 total_t_gain += int(t3_gain_str) if t3_gain_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         if stats.get("t2_gain"):
@@ -1394,7 +1466,7 @@ async def progress(ctx, user_input: str = None):
             t2_gain_str = stats['t2_gain'].replace("+", "").replace(",", "")
             try:
                 total_t_gain += int(t2_gain_str) if t2_gain_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         if stats.get("t1_gain"):
@@ -1408,7 +1480,7 @@ async def progress(ctx, user_input: str = None):
             t1_gain_str = stats['t1_gain'].replace("+", "").replace(",", "")
             try:
                 total_t_gain += int(t1_gain_str) if t1_gain_str.lstrip("-").isdigit() else 0
-            except:
+            except Exception as e:
                 pass
         
         # Add total T-kills
@@ -1451,7 +1523,7 @@ async def progress(ctx, user_input: str = None):
         await msg.edit(content=output)
         
     except Exception as e:
-        print(f"[PROGRESS ERROR] {e}")
+        log_info(f"[PROGRESS ERROR] {e}")
         await msg.edit(content=f"❌ Error: {str(e)}")
 
 
@@ -1509,7 +1581,7 @@ async def oldprogress(ctx, user_input: str = None):
                             if role.name.isdigit():
                                 account_id = role.name
                                 break
-                except:
+                except Exception as e:
                     pass
                 break
         if not account_id:
@@ -1599,7 +1671,7 @@ async def oldprogress(ctx, user_input: str = None):
                     try:
                         pg_str = stats.get("power_gain", "+0").replace("+", "").replace(",", "")
                         power_gain = int(pg_str)
-                    except:
+                    except Exception as e:
                         power_gain = 0
                 
                 output += f"⚡ Power {power:,} (+{power_gain:,})\n\n"
@@ -1679,13 +1751,13 @@ async def forcefetch(ctx):
             stats = await fetch_stats_for_account(account_id, start_date, today)
             if stats:
                 fetched += 1
-                print(f"[FORCEFETCH] ✅ {name} ({account_id})")
+                log_info(f"[FORCEFETCH] ✅ {name} ({account_id})")
             else:
                 failed += 1
-                print(f"[FORCEFETCH] ❌ {name} ({account_id})")
+                log_info(f"[FORCEFETCH] ❌ {name} ({account_id})")
         except Exception as e:
             failed += 1
-            print(f"[FORCEFETCH] ERROR {name}: {e}")
+            log_info(f"[FORCEFETCH] ERROR {name}: {e}")
     
     embed = discord.Embed(
         title="📊 Force Fetch Complete",
@@ -1746,12 +1818,12 @@ async def topmana(ctx):
                         mana_clean = mana_str.replace(",", "").replace("+", "")
                         mana_num = int(mana_clean) if mana_clean.lstrip("-").isdigit() else 0
                     else:
-                        print(f"[TOPMANA DEBUG] {lord['account_id']} - mana_gathered is None")
+                        log_info(f"[TOPMANA DEBUG] {lord['account_id']} - mana_gathered is None")
                 else:
-                    print(f"[TOPMANA ERROR] {lord['account_id']} - stats is None")
+                    log_info(f"[TOPMANA ERROR] {lord['account_id']} - stats is None")
                     lord_name = lord["name"]
             else:
-                print(f"[TOPMANA ERROR] {lord['account_id']} - result failed: {result}")
+                log_info(f"[TOPMANA ERROR] {lord['account_id']} - result failed: {result}")
                 lord_name = lord["name"]
             
             leaderboard.append({
@@ -1760,7 +1832,7 @@ async def topmana(ctx):
                 "mana_str": mana_str
             })
         except Exception as e:
-            print(f"[TOPMANA ERROR] {lord['account_id']}: {e}")
+            log_info(f"[TOPMANA ERROR] {lord['account_id']}: {e}")
             leaderboard.append({
                 "name": lord["name"],
                 "mana": 0,
@@ -1828,12 +1900,12 @@ async def topdeaths(ctx):
                         deaths_clean = deaths_str.replace(",", "").replace("+", "")
                         deaths_num = int(deaths_clean) if deaths_clean.lstrip("-").isdigit() else 0
                     else:
-                        print(f"[TOPDEATHS DEBUG] {lord['account_id']} - deads_gain is None")
+                        log_info(f"[TOPDEATHS DEBUG] {lord['account_id']} - deads_gain is None")
                 else:
-                    print(f"[TOPDEATHS ERROR] {lord['account_id']} - stats is None")
+                    log_info(f"[TOPDEATHS ERROR] {lord['account_id']} - stats is None")
                     lord_name = lord["name"]
             else:
-                print(f"[TOPDEATHS ERROR] {lord['account_id']} - result failed: {result}")
+                log_info(f"[TOPDEATHS ERROR] {lord['account_id']} - result failed: {result}")
                 lord_name = lord["name"]
             
             leaderboard.append({
@@ -1842,7 +1914,7 @@ async def topdeaths(ctx):
                 "deaths_str": deaths_str
             })
         except Exception as e:
-            print(f"[TOPDEATHS ERROR] {lord['account_id']}: {e}")
+            log_info(f"[TOPDEATHS ERROR] {lord['account_id']}: {e}")
             leaderboard.append({
                 "name": lord["name"],
                 "deaths": 0,
@@ -1904,7 +1976,7 @@ async def topmerits(ctx):
             
             leaderboard.append({"name": lord_name, "merits": merits_num, "merits_str": merits_str})
         except Exception as e:
-            print(f"[TOPMERITS ERROR] {lord.get('account_id')}: {e}")
+            log_info(f"[TOPMERITS ERROR] {lord.get('account_id')}: {e}")
             leaderboard.append({"name": lord["name"], "merits": 0, "merits_str": "+0"})
     
     leaderboard.sort(key=lambda x: x["merits"], reverse=True)
@@ -1956,12 +2028,12 @@ async def rss_leaderboard(ctx):
                         val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
                         try:
                             total_rss += int(val_str) if val_str.lstrip("-").isdigit() else 0
-                        except:
+                        except Exception as e:
                             pass
             
             leaderboard.append({"name": lord_name, "rss": total_rss})
         except Exception as e:
-            print(f"[RSS ERROR] {lord.get('account_id')}: {e}")
+            log_info(f"[RSS ERROR] {lord.get('account_id')}: {e}")
             leaderboard.append({"name": lord["name"], "rss": 0})
     
     leaderboard.sort(key=lambda x: x["rss"], reverse=True)
@@ -1997,7 +2069,7 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
                     try:
                         val = int(val_str) if val_str.lstrip("-").isdigit() else 0
                         stats_list.append({"account_id": lord["account_id"], "value": val})
-                    except:
+                    except Exception as e:
                         pass
         
         # Sort by value descending
@@ -2010,7 +2082,7 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         
         return rankings
     except Exception as e:
-        print(f"[RANKINGS ERROR] {e}")
+        log_info(f"[RANKINGS ERROR] {e}")
         return {}
 
 
@@ -2042,7 +2114,7 @@ async def get_account_id_from_input(ctx, user_input):
             if role.name.isdigit():
                 return role.name
         return None
-    except:
+    except Exception as e:
         return None
 
 
@@ -2106,14 +2178,14 @@ async def compare(ctx, user1: str = None, user2: str = None):
                 try:
                     pg1_str = stats1.get("power_gain", "+0").replace("+", "").replace(",", "")
                     power_gain1 = int(pg1_str)
-                except:
+                except Exception as e:
                     power_gain1 = 0
             
             if stats2.get("power_gain"):
                 try:
                     pg2_str = stats2.get("power_gain", "+0").replace("+", "").replace(",", "")
                     power_gain2 = int(pg2_str)
-                except:
+                except Exception as e:
                     power_gain2 = 0
             
             output += f"{name1}: {power1:,} (+{power_gain1:,})\n"
@@ -2204,7 +2276,7 @@ async def compare(ctx, user1: str = None, user2: str = None):
         
         await msg.edit(content=output)
     except Exception as e:
-        print(f"[COMPARE ERROR] {e}")
+        log_info(f"[COMPARE ERROR] {e}")
         import traceback
         traceback.print_exc()
         await msg.edit(content=f"❌ Error: {str(e)}")
@@ -2224,6 +2296,129 @@ USERNAME_TO_DISCORD_ID = {
     "truffles": 1285424051761713155,
     "havi": 1244330800019804180,
 }
+
+
+# ============================================================
+# QUICK COMMANDS
+# ============================================================
+
+@bot.command(name="q")
+async def quick_stats(ctx, user_input: str = None):
+    """Quick one-liner stats. Usage: !q (your stats) or !q truvix"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    # Get account ID
+    account_id = await get_account_id_from_input(ctx, user_input)
+    if not account_id:
+        return await ctx.send("❌ Could not find account ID.")
+    
+    try:
+        # Fetch stats
+        stats, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+        if not stats or stats.get("lord_name") == "Unknown":
+            return await ctx.send("❌ Failed to fetch stats.")
+        
+        # Get power and rankings
+        power = await fetch_highest_power(account_id)
+        power_rank = await get_rankings_for_stat(ctx, "power_gain", start_date, today)
+        merits_rank = await get_rankings_for_stat(ctx, "merits", start_date, today)
+        kills_rank = await get_rankings_for_stat(ctx, "kills_gain", start_date, today)
+        
+        # Extract data
+        lord_name = stats.get("lord_name", "Unknown")
+        merits = stats.get("merits", "+0")
+        merits_pct = stats.get("merits_pct", "0%")
+        kills = stats.get("kills_gain", "+0")
+        deaths = stats.get("deads_gain", "+0")
+        healed = stats.get("healed_gain", "+0")
+        
+        # Format one-liner
+        output = f"**{lord_name}** | "
+        
+        if power:
+            power_gain_str = stats.get("power_gain", "+0")
+            output += f"⚡ {power:,} {power_gain_str} {power_rank} | "
+        
+        output += f"🏅 {merits} ({merits_pct}) {merits_rank} | "
+        output += f"⚔️ {kills} {kills_rank} | "
+        output += f"💀 {deaths} | "
+        output += f"❤️ {healed}"
+        
+        await ctx.send(output)
+    except Exception as e:
+        log_error(f"Quick stats error: {e}")
+        await ctx.send("❌ Error fetching stats.")
+
+
+@bot.command(name="active")
+async def active_members(ctx):
+    """Show who's active vs inactive this season"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    try:
+        guild = ctx.guild
+        lords = get_all_lords_from_guild(guild)
+        
+        if not lords:
+            return await ctx.send("❌ No members with numeric roles found.")
+        
+        active = []
+        inactive = []
+        
+        for account_id, lord_name in lords:
+            # Get stats from yesterday and today
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            
+            stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+            stats_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
+            
+            if not stats_today or not stats_yesterday:
+                continue
+            
+            # Check if there's a difference
+            power_today = stats_today.get("power_gain", "+0").replace("+", "").replace(",", "")
+            power_yesterday = stats_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "")
+            
+            try:
+                gain = int(power_today or 0) - int(power_yesterday or 0)
+                if gain > 0:
+                    active.append((lord_name, gain))
+                else:
+                    inactive.append(lord_name)
+            except:
+                inactive.append(lord_name)
+        
+        # Sort active by gains
+        active.sort(key=lambda x: x[1], reverse=True)
+        
+        output = f"```📊 Activity Report ({today})\n\n"
+        
+        if active:
+            output += f"✅ ACTIVE ({len(active)} members):\n"
+            for name, gain in active:
+                output += f"  • {name}: +{gain:,} power\n"
+            output += "\n"
+        
+        if inactive:
+            output += f"⏸️ INACTIVE ({len(inactive)} members):\n"
+            for name in inactive:
+                output += f"  • {name}\n"
+        
+        output += "```"
+        await ctx.send(output)
+    except Exception as e:
+        log_error(f"Active members error: {e}")
+        await ctx.send("❌ Error checking activity.")
 
 
 # ============================================================
@@ -2378,7 +2573,7 @@ class AddEventModal(Modal, title="➕ Add Event"):
             )
 
         except Exception as e:
-            print("[AddEvent Error]", e)
+            log_info("[AddEvent Error]", e)
             await interaction.followup.send(
                 "❌ Failed to add event.",
                 ephemeral=True
@@ -2487,7 +2682,7 @@ async def editevent(inter: discord.Interaction):
                     )
 
                 except Exception as e:
-                    print("[EditEvent Error]", e)
+                    log_info("[EditEvent Error]", e)
                     await modal_inter.response.send_message(
                         "❌ Failed to update event.",
                         ephemeral=True
@@ -2741,7 +2936,7 @@ async def abyss_reminder_loop():
             if ch and ch.guild:
                 await dm_abyss_role(ch.guild, embed)
             else:
-                print("[ABYSS REMINDER] Warning: Channel not found or no guild")
+                log_info("[ABYSS REMINDER] Warning: Channel not found or no guild")
 
 
         # Round 2 reminder
@@ -2755,9 +2950,9 @@ async def abyss_reminder_loop():
             if ch and ch.guild:
                 await dm_abyss_role(ch.guild, embed)
             else:
-                print("[ABYSS REMINDER] Warning: Channel not found or no guild")
+                log_info("[ABYSS REMINDER] Warning: Channel not found or no guild")
     except Exception as e:
-        print(f"[ABYSS REMINDER ERROR] {type(e).__name__}: {e}")
+        log_info(f"[ABYSS REMINDER ERROR] {type(e).__name__}: {e}")
 
 sent_custom = set()
 
@@ -2797,7 +2992,7 @@ async def custom_event_loop():
         if len(sent_custom) > 300:
             sent_custom.clear()
     except Exception as e:
-        print(f"[CUSTOM EVENT LOOP ERROR] {type(e).__name__}: {e}")
+        log_info(f"[CUSTOM EVENT LOOP ERROR] {type(e).__name__}: {e}")
 
 # ============================================================
 # SAFE LOGIN (NO bot.run)
@@ -2806,7 +3001,7 @@ async def custom_event_loop():
 async def safe_login():
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
-        print("❌ Missing DISCORD_BOT_TOKEN")
+        log_info("❌ Missing DISCORD_BOT_TOKEN")
         return
 
     while True:
@@ -2817,14 +3012,14 @@ async def safe_login():
         except discord.HTTPException as e:
             if e.status == 429:
                 # HARD COOLDOWN on rate limit
-                print("⛔ Discord rate-limited login. Cooling down for 15 minutes.")
+                log_info("⛔ Discord rate-limited login. Cooling down for 15 minutes.")
                 await asyncio.sleep(900)  # 15 minutes
             else:
-                print(f"[Login Error] {e}")
+                log_info(f"[Login Error] {e}")
                 await asyncio.sleep(60)
 
         except Exception as e:
-            print(f"[Fatal Login Error] {e}")
+            log_info(f"[Fatal Login Error] {e}")
             await asyncio.sleep(120)
 
 if __name__ == "__main__":
