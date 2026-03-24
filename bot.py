@@ -987,11 +987,11 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
     # Check cache first (unless skip_cache=True)
     cache_key = f"{account_id}_{start_date}_{end_date}"
     if not skip_cache and cache_key in _stats_cache:
-        timestamp, cached_stats = _stats_cache[cache_key]
-        age = (datetime.utcnow() - timestamp).total_seconds()
+        cached = _stats_cache[cache_key]
+        age = (datetime.utcnow() - cached["timestamp"]).total_seconds()
         if age < CACHE_DURATION:
             log_info(f"[CACHE HIT] Account {account_id} (age: {int(age)}s)")
-            return cached_stats
+            return cached["stats"]
         else:
             log_info(f"[CACHE EXPIRED] Account {account_id}, fetching fresh data")
             del _stats_cache[cache_key]
@@ -1023,8 +1023,8 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
                 log_info(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
                 stats = parse_stats(html)
                 
-                # Cache the result
-                _stats_cache[cache_key] = (datetime.utcnow(), stats)
+                # Cache the result (use consistent dict format)
+                _stats_cache[cache_key] = {"timestamp": datetime.utcnow(), "stats": stats}
                 return stats
             else:
                 log_info(f"[CALLOFSTATS] Fetch failed: {resp.status}")
