@@ -2169,115 +2169,6 @@ async def loadhistory(ctx):
     log_info(f"[LOADHISTORY] Complete! Saved {saved_count} data points")
 
 
-@bot.command(name="compareprogress")
-async def compareprogress(ctx, date_str: str, user: str = None):
-    """
-    Compare your 24-hour progress on a specific date.
-    Usage: !compareprogress 23-03 [user]  or  !compareprogress 23/3 [user]  or  !compareprogress 24/03 [user]
-    
-    Shows stats from that date minus stats from the previous day.
-    """
-    try:
-        # Parse flexible date formats: 23-03, 23-3, 24/03, 24/3
-        date_str = date_str.replace("/", "-")
-        parts = date_str.split("-")
-        
-        if len(parts) != 2:
-            return await ctx.send("❌ Date format: Use 23-03 or 23/3 (day-month)")
-        
-        day = int(parts[0])
-        month = int(parts[1])
-        year = date.today().year  # Current year
-        
-        # Handle 2-digit month (03 → 03, 3 → 03)
-        query_date = date(year, month, day).isoformat()
-        
-        # Get account ID
-        if not user:
-            account_id = USERNAME_TO_DISCORD_ID.get(ctx.author.id)
-            if not account_id:
-                # Try to get from numeric roles
-                for role in ctx.author.roles:
-                    if role.name.isdigit():
-                        account_id = role.name
-                        break
-            if not account_id:
-                return await ctx.send("❌ Could not find your account. Try: `!compareprogress 23-03 @user`")
-        else:
-            account_id = await get_account_id_from_input(ctx, user)
-            if not account_id:
-                return await ctx.send(f"❌ Could not find account for '{user}'")
-        
-        # Get season
-        season = db_get_current_season()
-        if not season:
-            return await ctx.send("❌ No season active.")
-        
-        season_id, season_name, start_date, created_at = season
-        
-        # Get stats for query_date
-        stats_query = db_get_season_progress(season_id, account_id, query_date)
-        
-        if not stats_query:
-            # Try cache
-            stats_query = get_cached_stats(account_id, start_date, query_date)
-        
-        if not stats_query:
-            # Try API fallback
-            stats_query, _ = await fetch_stats_with_fallback(account_id, start_date, query_date)
-        
-        if not stats_query:
-            return await ctx.send(f"❌ No data found for {query_date}")
-        
-        # Get previous day
-        prev_date = (datetime.strptime(query_date, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
-        stats_prev = db_get_season_progress(season_id, account_id, prev_date)
-        
-        if not stats_prev:
-            stats_prev = get_cached_stats(account_id, start_date, prev_date)
-        
-        if not stats_prev:
-            stats_prev, _ = await fetch_stats_with_fallback(account_id, start_date, prev_date)
-        
-        if not stats_prev:
-            return await ctx.send(f"❌ No data found for previous day ({prev_date})")
-        
-        # Helper to parse stats
-        def parse_stat(s):
-            if not s:
-                return 0
-            return int(str(s).replace("+", "").replace(",", "") or 0)
-        
-        # Calculate gains
-        power_gain = parse_stat(stats_query.get("power_gain", "0")) - parse_stat(stats_prev.get("power_gain", "0"))
-        merits_gain = parse_stat(stats_query.get("merits", "0")) - parse_stat(stats_prev.get("merits", "0"))
-        kills_gain = parse_stat(stats_query.get("kills_gain", "0")) - parse_stat(stats_prev.get("kills_gain", "0"))
-        deaths_gain = parse_stat(stats_query.get("deads_gain", "0")) - parse_stat(stats_prev.get("deads_gain", "0"))
-        mana_gain = parse_stat(stats_query.get("mana_gathered", "0")) - parse_stat(stats_prev.get("mana_gathered", "0"))
-        gold_spent = parse_stat(stats_query.get("gold_spent", "0"))
-        
-        lord_name = stats_query.get("lord_name", account_id)
-        
-        embed = discord.Embed(
-            title=f"📊 24-Hour Progress: {lord_name}",
-            description=f"{prev_date} → {query_date}",
-            color=0x9b59b6
-        )
-        embed.add_field(name="⚔️ Power", value=f"+{power_gain:,}", inline=True)
-        embed.add_field(name="🏆 Merits", value=f"+{merits_gain:,}", inline=True)
-        embed.add_field(name="💀 Kills", value=f"+{kills_gain:,}", inline=True)
-        embed.add_field(name="☠️ Deaths", value=f"+{deaths_gain:,}", inline=True)
-        embed.add_field(name="💧 Mana Gained", value=f"+{mana_gain:,}", inline=True)
-        embed.add_field(name="💰 Gold Spent", value=f"+{gold_spent:,}", inline=True)
-        
-        await ctx.send(embed=embed)
-        
-    except ValueError as e:
-        await ctx.send(f"❌ Invalid date format. Use: `!compareprogress 23-03` or `!compareprogress 24/03`")
-    except Exception as e:
-        log_error(f"[COMPAREPROGRESS] Error: {e}")
-        await ctx.send("❌ Error fetching comparison data.")
-
 
 class GainsDateSelector(View):
     """Interactive selector for gains date range"""
@@ -2355,7 +2246,10 @@ class GainsDateSelector(View):
         kills_gain = parse_stat(stats_end.get("kills_gain", "0")) - parse_stat(stats_start.get("kills_gain", "0"))
         deaths_gain = parse_stat(stats_end.get("deads_gain", "0")) - parse_stat(stats_start.get("deads_gain", "0"))
         mana_gain = parse_stat(stats_end.get("mana_gathered", "0")) - parse_stat(stats_start.get("mana_gathered", "0"))
+        mana_spent = parse_stat(stats_end.get("mana_spent", "0"))
         gold_spent = parse_stat(stats_end.get("gold_spent", "0"))
+        wood_spent = parse_stat(stats_end.get("wood_spent", "0"))
+        ore_spent = parse_stat(stats_end.get("ore_spent", "0"))
         
         lord_name = stats_end.get("lord_name", self.account_id)
         
@@ -2369,14 +2263,20 @@ class GainsDateSelector(View):
             color=0x9b59b6
         )
         
-        # Columnar format - each stat is a field
+        # Row 1: Power, Merits, Kills
         embed.add_field(name="⚔️ Power Gain", value=f"```{power_gain:,}```", inline=True)
         embed.add_field(name="🏆 Merits Gain", value=f"```{merits_gain:,}```", inline=True)
         embed.add_field(name="💀 Kills Gain", value=f"```{kills_gain:,}```", inline=True)
         
+        # Row 2: Deaths, Mana Gained, Mana Spent
         embed.add_field(name="☠️ Deaths Gain", value=f"```{deaths_gain:,}```", inline=True)
         embed.add_field(name="💧 Mana Gained", value=f"```{mana_gain:,}```", inline=True)
+        embed.add_field(name="💧 Mana Spent", value=f"```{mana_spent:,}```", inline=True)
+        
+        # Row 3: Resources Spent
         embed.add_field(name="💰 Gold Spent", value=f"```{gold_spent:,}```", inline=True)
+        embed.add_field(name="🪵 Wood Spent", value=f"```{wood_spent:,}```", inline=True)
+        embed.add_field(name="⛏️ Ore Spent", value=f"```{ore_spent:,}```", inline=True)
         
         await interaction.followup.send(embed=embed)
 
