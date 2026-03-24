@@ -2377,21 +2377,22 @@ async def active_members(ctx):
         guild = ctx.guild
         lords = get_all_lords_from_guild(guild)
         
-        # Create list of (account_id, lord_name) tuples
+        # Create set to track which account IDs we've already checked (prevent duplicates)
+        checked_accounts = set()
         accounts_to_check = []
         
         # Add lords from guild roles
         for lord in lords:
-            accounts_to_check.append((lord["account_id"], lord["account_id"]))
+            account_id = lord["account_id"]
+            if account_id not in checked_accounts:
+                checked_accounts.add(account_id)
+                accounts_to_check.append(account_id)
         
         # Add mapped accounts (like Havi who's not in server)
         for discord_id, account_id in DISCORD_TO_ACCOUNT_ID.items():
-            # Get the username if available
-            try:
-                user = await ctx.bot.fetch_user(discord_id)
-                accounts_to_check.append((account_id, user.name if user.name else account_id))
-            except:
-                accounts_to_check.append((account_id, account_id))
+            if account_id not in checked_accounts:
+                checked_accounts.add(account_id)
+                accounts_to_check.append(account_id)
         
         if not accounts_to_check:
             return await ctx.send("❌ No members found.")
@@ -2399,13 +2400,25 @@ async def active_members(ctx):
         active = []
         inactive = []
         
-        for account_id, lord_name in accounts_to_check:
+        for account_id in accounts_to_check:
             try:
-                # Get stats from yesterday and today
+                # Get today's stats to fetch lord name
                 stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, today)
+                
+                # If today's data doesn't exist, try yesterday to get the name
+                if not stats_today or not stats_today.get("lord_name"):
+                    stats_today, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
+                
+                if not stats_today:
+                    log_error(f"No stats found for account {account_id}")
+                    continue
+                
+                lord_name = stats_today.get("lord_name", account_id)
+                
+                # Get yesterday's stats
                 stats_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, yesterday)
                 
-                if not stats_today or not stats_yesterday:
+                if not stats_yesterday:
                     inactive.append({"name": lord_name, "days": "?", "account_id": account_id})
                     continue
                 
@@ -2432,38 +2445,32 @@ async def active_members(ctx):
                         "mana": mana_gain_24h
                     })
                 else:
-                    # Find last activity date
+                    # Find last activity date (check up to 30 days)
                     days_inactive = 0
-                    for days_back in range(1, 30):  # Check up to 30 days back
+                    for days_back in range(1, 30):
                         check_date = (date.today() - timedelta(days=days_back)).isoformat()
-                        check_yesterday = (date.today() - timedelta(days=days_back+1)).isoformat()
+                        check_date_prev = (date.today() - timedelta(days=days_back+1)).isoformat()
                         
                         stats_check, _ = await fetch_stats_with_fallback(account_id, start_date, check_date)
-                        stats_check_yesterday, _ = await fetch_stats_with_fallback(account_id, start_date, check_yesterday)
+                        stats_check_prev, _ = await fetch_stats_with_fallback(account_id, start_date, check_date_prev)
                         
-                        if not stats_check or not stats_check_yesterday:
+                        if not stats_check or not stats_check_prev:
                             continue
                         
                         power_check = int(stats_check.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                        power_check_yesterday = int(stats_check_yesterday.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
-                        merits_check = int(stats_check.get("merits", "+0").replace("+", "").replace(",", "") or 0)
-                        merits_check_yesterday = int(stats_check_yesterday.get("merits", "+0").replace("+", "").replace(",", "") or 0)
-                        mana_check = int(stats_check.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
-                        mana_check_yesterday = int(stats_check_yesterday.get("mana_gathered", "+0").replace("+", "").replace(",", "") or 0)
+                        power_check_prev = int(stats_check_prev.get("power_gain", "+0").replace("+", "").replace(",", "") or 0)
                         
-                        if (power_check > power_check_yesterday or 
-                            merits_check > merits_check_yesterday or 
-                            mana_check > mana_check_yesterday):
+                        if power_check > power_check_prev:
                             days_inactive = days_back
                             break
                     
                     inactive.append({
                         "name": lord_name,
-                        "days": days_inactive
+                        "days": days_inactive if days_inactive > 0 else "?"
                     })
             except Exception as e:
-                log_error(f"Error checking activity for {lord_name}: {e}")
-                inactive.append({"name": lord_name, "days": "?"})
+                log_error(f"Error checking activity for {account_id}: {e}")
+                continue
         
         # Sort active by power gain
         active.sort(key=lambda x: x["power"], reverse=True)
