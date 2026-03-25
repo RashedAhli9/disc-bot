@@ -439,10 +439,12 @@ async def fetch_current_t_kills(account_id):
 
 async def fetch_latest_data_date(account_id):
     """
-    Extract the 'Latest Data' date from Call of Stats profile
+    Extract the latest data date from Call of Stats profile
+    Reads from data-current-date attribute in linkacct-data div
     Returns date string in format "DD/MM/YYYY" or None if not found
     """
     import re
+    from datetime import datetime
     
     try:
         session = await get_callofstats_session()
@@ -455,20 +457,18 @@ async def fetch_latest_data_date(account_id):
             
             html = await response.text()
             
-            # Look for "Latest Data" text and extract the date
-            # Pattern: Latest Data</span> ... <div class="value">DD/MM/YYYY</div>
-            patterns = [
-                r'Latest Data</span>.*?<div class="value">(\d{2}/\d{2}/\d{4})</div>',
-                r'<span class="subtle">Latest Data</span>.*?<div class="value">(\d{2}/\d{2}/\d{4})</div>',
-                r'Latest Data.*?(\d{2}/\d{2}/\d{4})',
-            ]
+            # Extract from data-current-date attribute in linkacct-data div
+            # Format in HTML: data-current-date="2026-03-25" (YYYY-MM-DD)
+            pattern = r'data-current-date="(\d{4}-\d{2}-\d{2})"'
+            match = re.search(pattern, html)
             
-            for i, pattern in enumerate(patterns):
-                match = re.search(pattern, html, re.DOTALL)
-                if match:
-                    date_str = match.group(1)
-                    log_info(f"[LATEST DATA DATE] {account_id} = {date_str} (pattern {i})")
-                    return date_str
+            if match:
+                date_str = match.group(1)  # Returns YYYY-MM-DD format
+                # Convert YYYY-MM-DD to DD/MM/YYYY for consistency
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                formatted_date = dt.strftime("%d/%m/%Y")
+                log_info(f"[LATEST DATA DATE] {account_id} = {formatted_date}")
+                return formatted_date
             
             log_info(f"[LATEST DATA DATE] Could not find date for {account_id}")
             return None
@@ -2660,14 +2660,14 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         if stat_key not in valid_stats:
             return {}
         
-        # Get stats from database for all members
+        # Get stats from database for all members (use latest data per account)
         stats_list = []
         conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         
         for account_id in checked_accounts:
-            # Use safe column selection
-            query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=?"
+            # Get LATEST row for this account (most recent date = most recent cumulative data)
+            query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1"
             c.execute(query, (season_id, account_id))
             
             row = c.fetchone()
@@ -2698,9 +2698,31 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
 
 async def get_account_id_from_input(ctx, user_input):
     """Helper function to resolve username or account ID to account ID"""
+    # If no input, use author's own account ID from role
+    if not user_input:
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                return role.name
+        return None
+    
     # If numeric, use as account ID
     if user_input.isdigit():
         return user_input
+    
+    # Check for mention (e.g. <@12345>)
+    if user_input.startswith("<@") and user_input.endswith(">"):
+        user_id_str = user_input[2:-1].replace("!", "")
+        if user_id_str.isdigit():
+            user_id = int(user_id_str)
+            try:
+                member = ctx.guild.get_member(user_id)
+                if member:
+                    for role in member.roles:
+                        if role.name.isdigit():
+                            return role.name
+            except Exception as e:
+                pass
+        return None
     
     # Check username lookup
     username_lower = user_input.lower()
@@ -2901,6 +2923,40 @@ async def compare(ctx, user1: str = None, user2: str = None):
         output += f"💧 Mana Gathered\n"
         output += f"{name1}: {mg1}\n"
         output += f"{name2}: {mg2}\n"
+        output += f"\n"
+        
+        # RSS Spent
+        output += f"💰 RSS Spent\n"
+        gs1 = stats1.get("gold_spent", "+0")
+        gs2 = stats2.get("gold_spent", "+0")
+        ws1 = stats1.get("wood_spent", "+0")
+        ws2 = stats2.get("wood_spent", "+0")
+        os1 = stats1.get("ore_spent", "+0")
+        os2 = stats2.get("ore_spent", "+0")
+        ms1 = stats1.get("mana_spent", "+0")
+        ms2 = stats2.get("mana_spent", "+0")
+        
+        output += f"  Gold: {name1} {gs1} | {name2} {gs2}\n"
+        output += f"  Wood: {name1} {ws1} | {name2} {ws2}\n"
+        output += f"  Ore: {name1} {os1} | {name2} {os2}\n"
+        output += f"  Mana: {name1} {ms1} | {name2} {ms2}\n"
+        output += f"\n"
+        
+        # RSS Gathered
+        output += f"📦 RSS Gathered\n"
+        gg1 = stats1.get("gold_gathered", "+0")
+        gg2 = stats2.get("gold_gathered", "+0")
+        wg1 = stats1.get("wood_gathered", "+0")
+        wg2 = stats2.get("wood_gathered", "+0")
+        og1 = stats1.get("ore_gathered", "+0")
+        og2 = stats2.get("ore_gathered", "+0")
+        mg1_g = stats1.get("mana_gathered", "+0")
+        mg2_g = stats2.get("mana_gathered", "+0")
+        
+        output += f"  Gold: {name1} {gg1} | {name2} {gg2}\n"
+        output += f"  Wood: {name1} {wg1} | {name2} {wg2}\n"
+        output += f"  Ore: {name1} {og1} | {name2} {og2}\n"
+        output += f"  Mana: {name1} {mg1_g} | {name2} {mg2_g}\n"
         
         output += f"```"
         
@@ -2997,6 +3053,7 @@ async def quick_stats(ctx, user_input: str = None):
         kills = stats.get("kills_gain", "+0")
         deaths = stats.get("deads_gain", "+0")
         healed = stats.get("healed_gain", "+0")
+        mana_spent = stats.get("mana_spent", "+0")
         
         # Get ranking positions as strings
         power_rank_str = f"(#{power_rank[account_id][0]})" if account_id in power_rank else ""
@@ -3015,7 +3072,8 @@ async def quick_stats(ctx, user_input: str = None):
         
         output += f"⚔️ {kills} {kills_rank_str} | "
         output += f"💀 {deaths} | "
-        output += f"❤️ {healed}"
+        output += f"❤️ {healed} | "
+        output += f"💧 {mana_spent}"
         
         await ctx.send(output)
     except Exception as e:
