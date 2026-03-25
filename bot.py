@@ -2224,10 +2224,6 @@ class GainsDateSelector(View):
         )
         end_select.callback = self.on_end_select
         self.add_item(end_select)
-        
-        # Add button below dropdowns
-        button = discord.ui.button(label="📊 Show Gains", style=discord.ButtonStyle.green)(self.show_gains)
-        self.add_item(button)
     
     async def on_start_select(self, interaction: discord.Interaction):
         self.selected_start = interaction.data["values"][0]
@@ -2237,7 +2233,8 @@ class GainsDateSelector(View):
         self.selected_end = interaction.data["values"][0]
         await interaction.response.defer()
     
-    async def show_gains(self, interaction: discord.Interaction):
+    @discord.ui.button(label="📊 Show Gains", style=discord.ButtonStyle.green)
+    async def show_gains(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.selected_start or not self.selected_end:
             return await interaction.response.send_message("❌ Please select both dates", ephemeral=True)
         
