@@ -1323,24 +1323,72 @@ async def force_refresh_all_stats():
 @tasks.loop(minutes=1)
 async def check_callofstats_update():
     """
-    Check every 1 minute if new Call of Stats data is available
-    If new date detected, refresh cache and send notification
+    Check every 5 minutes if new Call of Stats data is available
+    Only notify if the date changed AND actual data exists for new date
     """
     try:
         # Always check Rekz's profile for latest data
         account_id = REKZ_ACCOUNT_ID
         
-        # Fetch latest data date
+        # Fetch latest data date from website
         latest_date = await fetch_latest_data_date(account_id)
         if not latest_date:
+            log_info(f"[CALLOFSTATS UPDATE] Could not fetch latest date")
             return
         
         # Get last known date
         last_known = db_get_last_known_data_date()
         
-        # If this is first time or date changed
+        # If date changed, verify actual data exists before notifying
         if last_known != latest_date:
-            log_info(f"[CALLOFSTATS UPDATE] New data detected! {last_known} -> {latest_date}")
+            log_info(f"[CALLOFSTATS UPDATE] Date changed {last_known} -> {latest_date}, verifying data exists...")
+            
+            # Try to fetch stats for the new date to verify it exists
+            # Convert DD/MM/YYYY to YYYY-MM-DD for the query
+            from datetime import datetime
+            try:
+                date_obj = datetime.strptime(latest_date, "%d/%m/%Y")
+                new_date_iso = date_obj.strftime("%Y-%m-%d")
+                
+                # Fetch season start date
+                season = db_get_current_season()
+                if not season:
+                    log_info(f"[CALLOFSTATS UPDATE] No active season")
+                    return
+                season_id, season_name, start_date, created_at = season
+                
+                # Try to fetch stats for the new date
+                test_stats = await fetch_stats_for_account(account_id, start_date, new_date_iso, skip_cache=True)
+                
+                # Verify we got valid data (not empty/unknown)
+                if not test_stats or test_stats.get("lord_name") == "Unknown":
+                    log_info(f"[CALLOFSTATS UPDATE] No actual data for {new_date_iso} yet (stats missing), skipping notification")
+                    return
+                
+                # Check if we have actual stats values (not all zeros)
+                # Look for at least one meaningful stat
+                has_real_data = False
+                for stat_key in ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain"]:
+                    stat_val = test_stats.get(stat_key, "0")
+                    # Parse the value
+                    try:
+                        num_val = int(str(stat_val).replace("+", "").replace(",", "") or 0)
+                        if num_val > 0:
+                            has_real_data = True
+                            log_info(f"[CALLOFSTATS UPDATE] Found real data: {stat_key}={num_val}")
+                            break
+                    except:
+                        pass
+                
+                if not has_real_data:
+                    log_info(f"[CALLOFSTATS UPDATE] Data exists but appears empty (all zeros) for {new_date_iso}, skipping notification")
+                    return
+                
+                log_info(f"[CALLOFSTATS UPDATE] Data verified for {new_date_iso}! ✅")
+                
+            except Exception as e:
+                log_info(f"[CALLOFSTATS UPDATE] Error verifying data: {e}")
+                return
             
             # Update database
             db_update_data_date(latest_date)
@@ -1561,14 +1609,28 @@ async def newseason(inter: discord.Interaction):
 
 
 @bot.command(name="progress")
-async def progress(ctx, user_input: str = None):
-    """Check season progress. Usage: !progress (uses your role) or !progress truvix (username) or !progress 16322115 (account ID)"""
+async def progress(ctx, user_input: str = None, scope_input: str = None):
+    """Check season progress with optional server ranking.
+    Usage:
+        !progress (your stats, guild ranking)
+        !progress truvix (member stats, guild ranking)
+        !progress mfd (your stats, server #77 ranking)
+        !progress truvix mfd (member stats, server #77 ranking)
+    """
     season = db_get_current_season()
     
     if not season:
         return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
     account_id = None
+    scope = "guild"  # Default
+    
+    # Parse arguments for scope
+    if user_input and user_input.lower() == "mfd":
+        scope = "server"
+        user_input = None  # Clear to use author's account
+    elif scope_input and scope_input.lower() == "mfd":
+        scope = "server"
     
     # If no input provided, find from user's numeric role
     if not user_input:
@@ -2271,6 +2333,11 @@ class GainsDateSelector(View):
         gold_spent = parse_stat(stats_end.get("gold_spent", "0"))
         wood_spent = parse_stat(stats_end.get("wood_spent", "0"))
         ore_spent = parse_stat(stats_end.get("ore_spent", "0"))
+        
+        # Debug logging
+        log_info(f"[GAINS DEBUG] Start date {self.selected_start}: power_gain={stats_start.get('power_gain')}")
+        log_info(f"[GAINS DEBUG] End date {self.selected_end}: power_gain={stats_end.get('power_gain')}")
+        log_info(f"[GAINS DEBUG] Calculated power_gain: {power_gain}")
         
         lord_name = stats_end.get("lord_name", self.account_id)
         
@@ -2982,8 +3049,531 @@ USERNAME_TO_DISCORD_ID = {
 
 
 # ============================================================
+# SERVER #77 PLAYER DATABASE & RANKING SYSTEM
+# ============================================================
+
+import json
+
+SERVER_77_PLAYERS = {}
+try:
+    with open('server_77_players.json', 'r') as f:
+        SERVER_77_PLAYERS = json.load(f)
+    log_info(f"[SERVER77] Loaded {len(SERVER_77_PLAYERS.get('account_ids', []))} players from server #77")
+except Exception as e:
+    log_error(f"[SERVER77] Failed to load server_77_players.json: {e}")
+    SERVER_77_PLAYERS = {"account_ids": []}
+
+
+async def get_rankings_for_stat_scoped(ctx, stat_key, start_date, end_date, scope="guild"):
+    """
+    Get rankings for a stat with optional server scope.
+    
+    Args:
+        ctx: Discord context
+        stat_key: The stat column (e.g., "merits", "kills_gain")
+        start_date: Season start date
+        end_date: End date for query
+        scope: "guild" (default, guild members only) or "server" (all server #77 players)
+    
+    Returns:
+        dict: {account_id: (rank, total)} where rank is 1-indexed
+    """
+    season = db_get_current_season()
+    if not season:
+        return {}
+    
+    season_id, season_name, _, _ = season
+    
+    try:
+        # Determine which accounts to check
+        if scope == "server":
+            # Use all server #77 account IDs
+            checked_accounts = set(SERVER_77_PLAYERS.get('account_ids', []))
+            checked_accounts = {str(acc) for acc in checked_accounts}  # Ensure strings
+        else:
+            # Use guild members only (default)
+            lords = get_all_lords_from_guild(ctx.guild)
+            checked_accounts = set()
+            
+            for lord in lords:
+                checked_accounts.add(lord["account_id"])
+            
+            for discord_id, account_id in DISCORD_TO_ACCOUNT_ID.items():
+                checked_accounts.add(account_id)
+        
+        # Valid stat keys to prevent SQL injection
+        valid_stats = ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain",
+                      "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
+                      "gold_spent", "wood_spent", "ore_spent", "mana_spent",
+                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]
+        
+        if stat_key not in valid_stats:
+            return {}
+        
+        # Get stats from database
+        stats_list = []
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        
+        for account_id in checked_accounts:
+            # Get LATEST row for this account (most recent cumulative data)
+            query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1"
+            c.execute(query, (season_id, str(account_id)))
+            
+            row = c.fetchone()
+            if row and row[0]:
+                val_str = str(row[0]).replace(",", "").replace("+", "")
+                try:
+                    val = int(val_str) if val_str.lstrip("-").isdigit() else 0
+                    stats_list.append({"account_id": str(account_id), "value": val})
+                except:
+                    pass
+        
+        conn.close()
+        
+        # Sort by value descending
+        stats_list.sort(key=lambda x: x["value"], reverse=True)
+        
+        # Create rank dict
+        rankings = {}
+        for i, item in enumerate(stats_list):
+            rankings[item["account_id"]] = (i + 1, len(stats_list))
+        
+        return rankings
+    except Exception as e:
+        log_error(f"[RANKINGS ERROR] {e}")
+        return {}
+
+
+
+
+# ============================================================
+# NEW LEADERBOARD COMMANDS (Scope Support)
+# ============================================================
+
+@bot.command(name="topmerits")
+async def topmerits(ctx, scope_input: str = None):
+    """
+    Show top merits ranking.
+    Usage: !topmerits (guild only) or !topmerits mfd (server #77)
+    """
+    scope = "server" if scope_input and scope_input.lower() == "mfd" else "guild"
+    scope_label = "Server #77" if scope == "server" else "Guild"
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, "merits", start_date, today, scope=scope)
+    
+    if not rankings:
+        return await ctx.send(f"❌ No ranking data for {scope_label}.")
+    
+    # Sort by rank
+    sorted_rankings = sorted(rankings.items(), key=lambda x: x[1][0])[:10]
+    
+    embed = discord.Embed(
+        title=f"🏆 Top Merits - {scope_label}",
+        color=discord.Color.gold()
+    )
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    
+    for account_id, (rank, total) in sorted_rankings:
+        c.execute("SELECT merits FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1",
+                 (season_id, account_id))
+        row = c.fetchone()
+        
+        if row and row[0]:
+            merits = row[0]
+            embed.add_field(name=f"#{rank}", value=f"Account {account_id}: {merits}", inline=False)
+    
+    conn.close()
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="topkills")
+async def topkills(ctx, scope_input: str = None):
+    """Show top kills ranking. Usage: !topkills or !topkills mfd"""
+    scope = "server" if scope_input and scope_input.lower() == "mfd" else "guild"
+    scope_label = "Server #77" if scope == "server" else "Guild"
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, "kills_gain", start_date, today, scope=scope)
+    
+    if not rankings:
+        return await ctx.send(f"❌ No ranking data for {scope_label}.")
+    
+    sorted_rankings = sorted(rankings.items(), key=lambda x: x[1][0])[:10]
+    
+    embed = discord.Embed(title=f"⚔️ Top Kills - {scope_label}", color=discord.Color.red())
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    
+    for account_id, (rank, total) in sorted_rankings:
+        c.execute("SELECT kills_gain FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1",
+                 (season_id, account_id))
+        row = c.fetchone()
+        if row and row[0]:
+            embed.add_field(name=f"#{rank}", value=f"Account {account_id}: {row[0]}", inline=False)
+    
+    conn.close()
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="topdeaths")
+async def topdeaths(ctx, scope_input: str = None):
+    """Show top deaths ranking. Usage: !topdeaths or !topdeaths mfd"""
+    scope = "server" if scope_input and scope_input.lower() == "mfd" else "guild"
+    scope_label = "Server #77" if scope == "server" else "Guild"
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, "deads_gain", start_date, today, scope=scope)
+    
+    if not rankings:
+        return await ctx.send(f"❌ No ranking data for {scope_label}.")
+    
+    sorted_rankings = sorted(rankings.items(), key=lambda x: x[1][0])[:10]
+    
+    embed = discord.Embed(title=f"☠️ Top Deaths - {scope_label}", color=discord.Color.dark_red())
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    
+    for account_id, (rank, total) in sorted_rankings:
+        c.execute("SELECT deads_gain FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1",
+                 (season_id, account_id))
+        row = c.fetchone()
+        if row and row[0]:
+            embed.add_field(name=f"#{rank}", value=f"Account {account_id}: {row[0]}", inline=False)
+    
+    conn.close()
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="topmana")
+async def topmana(ctx, scope_input: str = None):
+    """Show top mana gathered. Usage: !topmana or !topmana mfd"""
+    scope = "server" if scope_input and scope_input.lower() == "mfd" else "guild"
+    scope_label = "Server #77" if scope == "server" else "Guild"
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, "mana_gathered", start_date, today, scope=scope)
+    
+    if not rankings:
+        return await ctx.send(f"❌ No ranking data for {scope_label}.")
+    
+    sorted_rankings = sorted(rankings.items(), key=lambda x: x[1][0])[:10]
+    
+    embed = discord.Embed(title=f"💧 Top Mana - {scope_label}", color=discord.Color.blue())
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    
+    for account_id, (rank, total) in sorted_rankings:
+        c.execute("SELECT mana_gathered FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1",
+                 (season_id, account_id))
+        row = c.fetchone()
+        if row and row[0]:
+            embed.add_field(name=f"#{rank}", value=f"Account {account_id}: {row[0]}", inline=False)
+    
+    conn.close()
+    await ctx.send(embed=embed)
+
+
+
+
+# ============================================================
 # QUICK COMMANDS
 # ============================================================
+
+
+
+# ============================================================
+# EXTENDED LEADERBOARD COMMANDS
+# ============================================================
+
+@bot.command(name="toppower")
+async def toppower(ctx, scope_input: str = None):
+    """Show top power ranking. Usage: !toppower or !toppower mfd"""
+    scope = "server" if scope_input and scope_input.lower() == "mfd" else "guild"
+    scope_label = "Server #77" if scope == "server" else "Guild"
+    
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, "power_gain", start_date, today, scope=scope)
+    
+    if not rankings:
+        return await ctx.send(f"❌ No ranking data for {scope_label}.")
+    
+    sorted_rankings = sorted(rankings.items(), key=lambda x: x[1][0])[:10]
+    embed = discord.Embed(title=f"⚡ Top Power Gain - {scope_label}", color=discord.Color.yellow())
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    for account_id, (rank, total) in sorted_rankings:
+        c.execute("SELECT power_gain FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1", (season_id, account_id))
+        row = c.fetchone()
+        if row and row[0]:
+            embed.add_field(name=f"#{rank}", value=f"Account {account_id}: {row[0]}", inline=False)
+    conn.close()
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="serverleader")
+async def serverleader(ctx, stat: str = "merits"):
+    """Show #1 in server #77 for a stat. Usage: !serverleader or !serverleader merits/kills/power/mana"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    stat_key = stat.lower()
+    stat_map = {
+        "merits": ("merits", "🏆 Merits"),
+        "kills": ("kills_gain", "⚔️ Kills"),
+        "deaths": ("deads_gain", "☠️ Deaths"),
+        "power": ("power_gain", "⚡ Power"),
+        "mana": ("mana_gathered", "💧 Mana"),
+    }
+    
+    if stat_key not in stat_map:
+        return await ctx.send(f"❌ Unknown stat. Available: {', '.join(stat_map.keys())}")
+    
+    db_stat, display_name = stat_map[stat_key]
+    rankings = await get_rankings_for_stat_scoped(ctx, db_stat, start_date, today, scope="server")
+    
+    if not rankings:
+        return await ctx.send("❌ No ranking data for server #77.")
+    
+    top_entry = sorted(rankings.items(), key=lambda x: x[1][0])[0]
+    account_id, (rank, total) = top_entry
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    c.execute(f"SELECT {db_stat} FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1", (season_id, account_id))
+    row = c.fetchone()
+    conn.close()
+    
+    value = row[0] if row else "N/A"
+    embed = discord.Embed(title=f"🥇 Server #77 Leader - {display_name}", description=f"Account ID: `{account_id}`", color=discord.Color.gold())
+    embed.add_field(name="Value", value=value, inline=False)
+    embed.add_field(name="Rank", value=f"#{rank} out of {total}", inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="compare")
+async def compare(ctx, user_input: str = None):
+    """Compare your merits to server #77 #1. Usage: !compare or !compare truvix"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    if not user_input:
+        account_id = None
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                account_id = role.name
+                break
+        if not account_id:
+            return await ctx.send("❌ You don't have an account ID role.")
+    else:
+        account_id = await get_account_id_from_input(ctx, user_input)
+        if not account_id:
+            return await ctx.send(f"❌ Could not find account for '{user_input}'")
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, "merits", start_date, today, scope="server")
+    if not rankings:
+        return await ctx.send("❌ No ranking data.")
+    
+    top_account = sorted(rankings.items(), key=lambda x: x[1][0])[0][0]
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    c.execute("SELECT merits FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1", (season_id, account_id))
+    your_row = c.fetchone()
+    c.execute("SELECT merits FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1", (season_id, top_account))
+    leader_row = c.fetchone()
+    conn.close()
+    
+    your_merits = your_row[0] if your_row else "N/A"
+    leader_merits = leader_row[0] if leader_row else "N/A"
+    
+    if your_row and leader_row:
+        try:
+            your_val = int(str(your_row[0]).replace(",", "").replace("+", ""))
+            leader_val = int(str(leader_row[0]).replace(",", "").replace("+", ""))
+            diff = leader_val - your_val
+            pct = (your_val / leader_val * 100) if leader_val > 0 else 0
+            
+            embed = discord.Embed(title=f"📊 Merits Comparison - {season_name}", color=discord.Color.blue())
+            embed.add_field(name="Your Merits", value=f"{your_merits}", inline=True)
+            embed.add_field(name="Server #1 Merits", value=f"{leader_merits}", inline=True)
+            embed.add_field(name="Difference", value=f"-{diff:,}", inline=False)
+            embed.add_field(name="You have", value=f"{pct:.1f}% of #1", inline=False)
+            embed.set_footer(text=f"Account: {account_id} vs Leader: {top_account}")
+            await ctx.send(embed=embed)
+        except:
+            await ctx.send(f"Your merits: {your_merits}\nServer #1: {leader_merits}")
+    else:
+        embed = discord.Embed(title="📊 Merits Comparison", color=discord.Color.blue())
+        embed.add_field(name="Your Merits", value=your_merits, inline=True)
+        embed.add_field(name="Server #1 Merits", value=leader_merits, inline=True)
+        await ctx.send(embed=embed)
+
+
+@bot.command(name="alliance")
+async def alliance(ctx, alliance_code: str = "MFD2"):
+    """Show alliance stats in server #77. Usage: !alliance MFD2 or !alliance MFD"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    alliance_code = alliance_code.upper()
+    alliance_players = SERVER_77_PLAYERS.get("by_alliance", {})
+    
+    matching_alliance = None
+    for key in alliance_players.keys():
+        if key.upper() == alliance_code:
+            matching_alliance = key
+            break
+    
+    if not matching_alliance:
+        available = ", ".join(alliance_players.keys())
+        return await ctx.send(f"❌ Alliance not found. Available: {available}")
+    
+    players = alliance_players[matching_alliance]
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    alliance_stats = []
+    
+    for player_id in players:
+        c.execute("SELECT merits FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1", (season_id, str(player_id)))
+        row = c.fetchone()
+        if row and row[0]:
+            try:
+                val = int(str(row[0]).replace(",", "").replace("+", ""))
+                alliance_stats.append({"id": str(player_id), "merits": val, "display": row[0]})
+            except:
+                pass
+    
+    conn.close()
+    alliance_stats.sort(key=lambda x: x["merits"], reverse=True)
+    
+    if not alliance_stats:
+        return await ctx.send(f"❌ No data for {matching_alliance} alliance.")
+    
+    embed = discord.Embed(title=f"👥 {matching_alliance} Alliance - {season_name}", description=f"Top {min(15, len(alliance_stats))} Members", color=discord.Color.purple())
+    
+    total_merits = sum(s["merits"] for s in alliance_stats)
+    avg_merits = total_merits // len(alliance_stats) if alliance_stats else 0
+    
+    for i, stat in enumerate(alliance_stats[:15]):
+        embed.add_field(name=f"#{i+1} - Account {stat['id']}", value=f"Merits: {stat['display']}", inline=False)
+    
+    embed.set_footer(text=f"Total Members: {len(players)} | Total: {total_merits:,} | Avg: {avg_merits:,}")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="ranking")
+async def ranking(ctx, user_input: str = None, stat_input: str = None):
+    """Show your ranking for a stat. Usage: !ranking merits or !ranking merits mfd"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active.")
+    
+    account_id = None
+    stat = "merits"
+    scope = "guild"
+    
+    if not user_input:
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                account_id = role.name
+                break
+    elif user_input.lower() in ["merits", "kills", "deaths", "power", "mana"]:
+        stat = user_input.lower()
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                account_id = role.name
+                break
+    else:
+        account_id = await get_account_id_from_input(ctx, user_input)
+    
+    if stat_input:
+        if stat_input.lower() == "mfd":
+            scope = "server"
+        else:
+            stat = stat_input.lower()
+    
+    if not account_id:
+        return await ctx.send("❌ Could not find your account ID.")
+    
+    stat_map = {"merits": "merits", "kills": "kills_gain", "deaths": "deads_gain", "power": "power_gain", "mana": "mana_gathered"}
+    db_stat = stat_map.get(stat.lower(), "merits")
+    scope_label = "Server #77" if scope == "server" else "Guild"
+    
+    season_id, season_name, start_date, created_at = season
+    today = date.today().isoformat()
+    
+    rankings = await get_rankings_for_stat_scoped(ctx, db_stat, start_date, today, scope=scope)
+    
+    if account_id not in rankings:
+        return await ctx.send(f"❌ No ranking found for {account_id} in {scope_label}.")
+    
+    rank, total = rankings[account_id]
+    
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    c.execute(f"SELECT {db_stat} FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1", (season_id, account_id))
+    row = c.fetchone()
+    conn.close()
+    
+    value = row[0] if row else "N/A"
+    
+    embed = discord.Embed(title=f"📈 Your Ranking - {stat.capitalize()} ({scope_label})", color=discord.Color.green())
+    embed.add_field(name="Account", value=account_id, inline=True)
+    embed.add_field(name="Rank", value=f"#{rank} / {total}", inline=True)
+    embed.add_field(name="Value", value=value, inline=False)
+    await ctx.send(embed=embed)
+
+
 
 @bot.command(name="q")
 async def quick_stats(ctx, user_input: str = None):
@@ -3898,3 +4488,34 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(3600)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
