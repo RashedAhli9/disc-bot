@@ -84,6 +84,21 @@ DISCORD_TO_ACCOUNT_ID = {
     1244330800019804180: "7979635",  # Havi
 }
 
+# ============================================================
+# USERNAME LOOKUP (Map Discord usernames to Discord IDs)
+# ============================================================
+# Hardcoded mapping - add your members here
+# Username: Discord ID
+USERNAME_TO_DISCORD_ID = {
+    "rekz": 1084884048884797490,
+    "truvix": 797778630025019402,
+    "azrael": 663715561951461376,
+    "drakken": 401088806432014347,
+    "gato": 937458459115413565,
+    "truffles": 1285424051761713155,
+    "havi": 1244330800019804180,
+}
+
 
 # ============================================================
 # CACHE SETTINGS
@@ -185,8 +200,9 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
     Returns:
         None (logs success/errors)
     """
+    role = guild.get_role(ABYSS_ROLE_ID)
     if not role:
-        log_info("[ABYSS] Role not found in guild:", guild.id)
+        log_info(f"[ABYSS] Role not found in guild {guild.id}")
         return
 
     count = 0
@@ -239,8 +255,12 @@ async def upload_backup(path):
     Returns:
         None
     """
-    if ch:
-        await ch.send("📦 **Backup created**", file=discord.File(path))
+    try:
+        ch = bot.get_channel(BACKUP_CHANNEL_ID)
+        if ch:
+            await ch.send("📦 **Backup created**", file=discord.File(path))
+    except Exception as e:
+        log_error(f"[UPLOAD BACKUP] Error: {e}")
 
 def make_backup():
     ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
@@ -3016,22 +3036,6 @@ async def compare(ctx, user1: str = None, user2: str = None):
         import traceback
         traceback.print_exc()
         await msg.edit(content=f"❌ Error: {str(e)}")
-
-
-# ============================================================
-# USERNAME LOOKUP (Map Discord usernames to Discord IDs)
-# ============================================================
-# Hardcoded mapping - add your members here
-# Username: Discord ID
-USERNAME_TO_DISCORD_ID = {
-    "rekz": 1084884048884797490,
-    "truvix": 797778630025019402,
-    "azrael": 663715561951461376,
-    "drakken": 401088806432014347,
-    "gato": 937458459115413565,
-    "truffles": 1285424051761713155,
-    "havi": 1244330800019804180,
-}
 
 
 # ============================================================
