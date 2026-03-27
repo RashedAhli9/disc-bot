@@ -40,8 +40,6 @@ import io
 import zipfile
 import asyncio
 import aiohttp
-import shutil
-import os
 
 # ============================================================
 # LOGGING SYSTEM
@@ -67,6 +65,7 @@ OWNER_ID = 1084884048884797490
 ROLE_ID = 1413532222396301322
 BACKUP_CHANNEL_ID = 1444604637377204295
 ABYSS_ROLE_ID = 1413532222396301322
+EVENT_ANNOUNCEMENT_ROLE_ID = 1412464184746053693
 ABYSS_CONFIG_FILE = "abyss_config.json"
 DB = "/data/events.db"
 DB_PROGRESS = "/data/season_progress.db"  # Separate database for seasonal data
@@ -217,7 +216,7 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
             except discord.Forbidden:
                 continue
             except Exception as e:
-                log_info("[ABYSS] DM error:", e)
+                log_info(f"[ABYSS] DM error: {e}")
     
     log_info(f"[ABYSS] Sent DM to {count} members with role {ABYSS_ROLE_ID}")
 
@@ -304,6 +303,7 @@ def get_all_lords_from_guild(guild):
 
 _stats_cache = {}
 CACHE_EXPIRY_HOURS = 72  # 3 days
+CACHE_DURATION = 600  # 10 minutes - for in-memory cache of fetched stats
 
 async def fetch_highest_power(account_id):
     """
@@ -649,7 +649,7 @@ def db_add_event(name, dt, reminder):
         "INSERT INTO events (name, datetime, reminder) VALUES (?, ?, ?)",
         (name, dt, reminder)
     )
-    log_info("[DB ADD EVENT] writing to:", DB)
+    log_info(f"[DB ADD EVENT] writing to: {DB}")
     conn.commit()
     conn.close()
     silent_backup()
@@ -786,31 +786,33 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
             data_date = date.today().isoformat()
         
         conn = sqlite3.connect(DB_PROGRESS)
-        c = conn.cursor()
-        now = datetime.utcnow().isoformat()
-        
-        c.execute("""
-            INSERT OR REPLACE INTO season_progress 
-            (season_id, account_id, data_date, lord_name, power_gain, merits, kills_gain, deads_gain, healed_gain,
-             t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
-             gold_spent, wood_spent, ore_spent, mana_spent,
-             gold_gathered, wood_gathered, ore_gathered, mana_gathered, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            season_id, account_id, data_date, lord_name,
-            stats.get("power_gain"), stats.get("merits"), stats.get("kills_gain"), 
-            stats.get("deads_gain"), stats.get("healed_gain"),
-            stats.get("t5_gain"), stats.get("t4_gain"), stats.get("t3_gain"), 
-            stats.get("t2_gain"), stats.get("t1_gain"),
-            stats.get("gold_spent"), stats.get("wood_spent"), stats.get("ore_spent"), 
-            stats.get("mana_spent"),
-            stats.get("gold_gathered"), stats.get("wood_gathered"), stats.get("ore_gathered"), 
-            stats.get("mana_gathered"), now
-        ))
-        conn.commit()
-        conn.close()
-        log_info(f"[DB SAVE] {lord_name} ({account_id}) for {data_date}")
-        return True
+        try:
+            c = conn.cursor()
+            now = datetime.utcnow().isoformat()
+            
+            c.execute("""
+                INSERT OR REPLACE INTO season_progress 
+                (season_id, account_id, data_date, lord_name, power_gain, merits, kills_gain, deads_gain, healed_gain,
+                 t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+                 gold_spent, wood_spent, ore_spent, mana_spent,
+                 gold_gathered, wood_gathered, ore_gathered, mana_gathered, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                season_id, account_id, data_date, lord_name,
+                stats.get("power_gain"), stats.get("merits"), stats.get("kills_gain"), 
+                stats.get("deads_gain"), stats.get("healed_gain"),
+                stats.get("t5_gain"), stats.get("t4_gain"), stats.get("t3_gain"), 
+                stats.get("t2_gain"), stats.get("t1_gain"),
+                stats.get("gold_spent"), stats.get("wood_spent"), stats.get("ore_spent"), 
+                stats.get("mana_spent"),
+                stats.get("gold_gathered"), stats.get("wood_gathered"), stats.get("ore_gathered"), 
+                stats.get("mana_gathered"), now
+            ))
+            conn.commit()
+            log_info(f"[DB SAVE] {lord_name} ({account_id}) for {data_date}")
+            return True
+        finally:
+            conn.close()
     except Exception as e:
         log_error(f"[DB SAVE PROGRESS] Error: {e}")
         return False
@@ -822,47 +824,49 @@ def db_get_season_progress(season_id, account_id, data_date=None):
             data_date = date.today().isoformat()
         
         conn = sqlite3.connect(DB_PROGRESS)
-        c = conn.cursor()
-        c.execute("""
-            SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
-                   t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
-                   gold_spent, wood_spent, ore_spent, mana_spent,
-                   gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
-            FROM season_progress
-            WHERE season_id=? AND account_id=? AND data_date=?
-        """, (season_id, account_id, data_date))
-        row = c.fetchone()
-        conn.close()
-        
-        if not row:
-            log_info(f"[DB QUERY] No data: season={season_id}, account={account_id}, date={data_date}")
-            return None
-        
-        # Convert to stats dict format
-        stats = {
-            "power_gain": row[0],
-            "merits": row[1],
-            "kills_gain": row[2],
-            "deads_gain": row[3],
-            "healed_gain": row[4],
-            "t5_gain": row[5],
-            "t4_gain": row[6],
-            "t3_gain": row[7],
-            "t2_gain": row[8],
-            "t1_gain": row[9],
-            "gold_spent": row[10],
-            "wood_spent": row[11],
-            "ore_spent": row[12],
-            "mana_spent": row[13],
-            "gold_gathered": row[14],
-            "wood_gathered": row[15],
-            "ore_gathered": row[16],
-            "mana_gathered": row[17],
-            "lord_name": row[18],
-            "data_date": row[19]
-        }
-        log_info(f"[DB HIT] {row[18]} ({account_id}) for {data_date}")
-        return stats
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
+                       t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+                       gold_spent, wood_spent, ore_spent, mana_spent,
+                       gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+                FROM season_progress
+                WHERE season_id=? AND account_id=? AND data_date=?
+            """, (season_id, account_id, data_date))
+            row = c.fetchone()
+            
+            if not row:
+                log_info(f"[DB QUERY] No data: season={season_id}, account={account_id}, date={data_date}")
+                return None
+            
+            # Convert to stats dict format
+            stats = {
+                "power_gain": row[0],
+                "merits": row[1],
+                "kills_gain": row[2],
+                "deads_gain": row[3],
+                "healed_gain": row[4],
+                "t5_gain": row[5],
+                "t4_gain": row[6],
+                "t3_gain": row[7],
+                "t2_gain": row[8],
+                "t1_gain": row[9],
+                "gold_spent": row[10],
+                "wood_spent": row[11],
+                "ore_spent": row[12],
+                "mana_spent": row[13],
+                "gold_gathered": row[14],
+                "wood_gathered": row[15],
+                "ore_gathered": row[16],
+                "mana_gathered": row[17],
+                "lord_name": row[18],
+                "data_date": row[19]
+            }
+            log_info(f"[DB HIT] {row[18]} ({account_id}) for {data_date}")
+            return stats
+        finally:
+            conn.close()
     except Exception as e:
         log_error(f"[DB GET PROGRESS] Error: {e}")
         return None
@@ -871,62 +875,66 @@ def db_get_latest_season_progress(season_id, account_id):
     """Get the latest (most recent date) progress for a member in a season"""
     try:
         conn = sqlite3.connect(DB_PROGRESS)
-        c = conn.cursor()
-        c.execute("""
-            SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
-                   t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
-                   gold_spent, wood_spent, ore_spent, mana_spent,
-                   gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
-            FROM season_progress
-            WHERE season_id=? AND account_id=?
-            ORDER BY data_date DESC
-            LIMIT 1
-        """, (season_id, account_id))
-        row = c.fetchone()
-        conn.close()
-        
-        if not row:
-            return None
-        
-        # Convert to stats dict format
-        stats = {
-            "power_gain": row[0],
-            "merits": row[1],
-            "kills_gain": row[2],
-            "deads_gain": row[3],
-            "healed_gain": row[4],
-            "t5_gain": row[5],
-            "t4_gain": row[6],
-            "t3_gain": row[7],
-            "t2_gain": row[8],
-            "t1_gain": row[9],
-            "gold_spent": row[10],
-            "wood_spent": row[11],
-            "ore_spent": row[12],
-            "mana_spent": row[13],
-            "gold_gathered": row[14],
-            "wood_gathered": row[15],
-            "ore_gathered": row[16],
-            "mana_gathered": row[17],
-            "lord_name": row[18],
-            "data_date": row[19]
-        }
-        return stats
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
+                       t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
+                       gold_spent, wood_spent, ore_spent, mana_spent,
+                       gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+                FROM season_progress
+                WHERE season_id=? AND account_id=?
+                ORDER BY data_date DESC
+                LIMIT 1
+            """, (season_id, account_id))
+            row = c.fetchone()
+            
+            if not row:
+                return None
+            
+            # Convert to stats dict format
+            stats = {
+                "power_gain": row[0],
+                "merits": row[1],
+                "kills_gain": row[2],
+                "deads_gain": row[3],
+                "healed_gain": row[4],
+                "t5_gain": row[5],
+                "t4_gain": row[6],
+                "t3_gain": row[7],
+                "t2_gain": row[8],
+                "t1_gain": row[9],
+                "gold_spent": row[10],
+                "wood_spent": row[11],
+                "ore_spent": row[12],
+                "mana_spent": row[13],
+                "gold_gathered": row[14],
+                "wood_gathered": row[15],
+                "ore_gathered": row[16],
+                "mana_gathered": row[17],
+                "lord_name": row[18],
+                "data_date": row[19]
+            }
+            return stats
+        finally:
+            conn.close()
     except Exception as e:
         log_error(f"[DB GET LATEST PROGRESS] Error: {e}")
         return None
 
 def db_get_lord(account_id):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT id, lord_name, account_id FROM lords WHERE account_id=?", (account_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-# ============================================================
-# CALLOFSTATS LOGIN & STATS FETCHING
-# ============================================================
+    try:
+        conn = sqlite3.connect(DB)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT id, lord_name, account_id FROM lords WHERE account_id=?", (account_id,))
+            row = c.fetchone()
+            return row
+        finally:
+            conn.close()
+    except Exception as e:
+        log_error(f"[DB GET LORD] Error: {e}")
+        return None
 
 # ============================================================
 # CALLOFSTATS LOGIN & STATS FETCHING
@@ -935,10 +943,6 @@ def db_get_lord(account_id):
 # Global session cache
 _callofstats_session = None
 _session_login_time = None
-
-# Stats cache (key: f"{account_id}_{start_date}_{end_date}", value: (timestamp, stats))
-_stats_cache = {}
-CACHE_DURATION = 600  # 10 minutes
 
 async def get_callofstats_session():
     """Get or create cached authenticated session"""
@@ -2737,17 +2741,22 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         
         for account_id in checked_accounts:
             # Get LATEST row for this account (most recent date = most recent cumulative data)
+            # Build query safely - stat_key is validated above
             query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1"
-            c.execute(query, (season_id, account_id))
-            
-            row = c.fetchone()
-            if row and row[0]:
-                val_str = str(row[0]).replace(",", "").replace("+", "")
-                try:
-                    val = int(val_str) if val_str.lstrip("-").isdigit() else 0
-                    stats_list.append({"account_id": account_id, "value": val})
-                except:
-                    pass
+            try:
+                c.execute(query, (season_id, account_id))
+                
+                row = c.fetchone()
+                if row and row[0]:
+                    val_str = str(row[0]).replace(",", "").replace("+", "")
+                    try:
+                        val = int(val_str) if val_str.lstrip("-").isdigit() else 0
+                        stats_list.append({"account_id": account_id, "value": val})
+                    except:
+                        pass
+            except Exception as e:
+                log_error(f"[RANKINGS] Error querying {account_id}: {e}")
+                continue
         
         conn.close()
         
@@ -2762,7 +2771,6 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         return rankings
     except Exception as e:
         log_error(f"[RANKINGS ERROR] {e}")
-        return {}
         return {}
 
 
@@ -3909,7 +3917,7 @@ async def custom_event_loop():
 
                 if now >= rtime and event_id not in sent_custom:
                     await ch.send(
-                        f"<@&1412464184746053693> ⏰ Reminder: **{name}** in {rem} minutes! "
+                        f"<@&{EVENT_ANNOUNCEMENT_ROLE_ID}> ⏰ Reminder: **{name}** in {rem} minutes! "
                         f"<t:{int(dt_obj.timestamp())}:F>"
                     )
                     sent_custom.add(event_id)
