@@ -2619,7 +2619,7 @@ async def cleandata_slash(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     
     modal = CleanupModal()
-    await interaction.response.show_modal(modal)
+    await interaction.response.send_modal(modal)
 
 
 @bot.command(name="cleandata")
