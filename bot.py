@@ -2537,88 +2537,97 @@ async def datahistory(ctx):
 
 
 class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
-    """Modal for cleanup date and mode input"""
+    """Modal for cleanup inputs"""
     date_input = discord.ui.TextInput(
-        label="Enter date (YYYY-MM-DD)",
-        placeholder="e.g., 2026-03-13",
-        min_length=10,
-        max_length=10
+        label="Date (YYYY-MM-DD) - skip if using 'current'",
+        placeholder="e.g., 2026-03-13 (optional)",
+        min_length=0,
+        max_length=10,
+        required=False
     )
     mode_input = discord.ui.TextInput(
-        label="Delete mode: 'before' or 'after'",
-        placeholder="Type 'before' or 'after'",
+        label="Mode: before, after, or current",
+        placeholder="Type: before OR after OR current",
         min_length=5,
-        max_length=6
+        max_length=7
     )
     
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
         try:
-            date_str = self.date_input.value.strip()
+            date_str = self.date_input.value.strip() if self.date_input.value else None
             mode = self.mode_input.value.strip().lower()
             
-            # Validate inputs
-            if mode not in ["before", "after"]:
-                return await interaction.followup.send("❌ Mode must be 'before' or 'after'")
+            if mode not in ["before", "after", "current"]:
+                return await interaction.followup.send("❌ Mode must be 'before', 'after', or 'current'")
             
-            # Validate date format
-            try:
-                datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
-                return await interaction.followup.send("❌ Invalid date format. Use YYYY-MM-DD")
+            # If mode is "current", get season start date
+            if mode == "current":
+                season = db_get_current_season()
+                if not season:
+                    return await interaction.followup.send("❌ No active season found")
+                date_str = season[2]  # season_start_date
+                mode_display = "before current season start"
+                delete_mode = "before"
+            else:
+                if not date_str:
+                    return await interaction.followup.send("❌ Date is required for 'before' or 'after' mode")
+                
+                try:
+                    datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    return await interaction.followup.send("❌ Invalid date format. Use YYYY-MM-DD")
+                
+                mode_display = mode
+                delete_mode = mode
             
             conn = sqlite3.connect(DB_PROGRESS)
             c = conn.cursor()
             
-            # Delete based on mode
-            if mode == "before":
+            if delete_mode == "before":
                 c.execute("DELETE FROM season_progress WHERE data_date < ?", (date_str,))
-            else:  # after
+            else:
                 c.execute("DELETE FROM season_progress WHERE data_date > ?", (date_str,))
             
             deleted_count = c.rowcount
             conn.commit()
             conn.close()
             
-            # Create result embed
             embed = discord.Embed(
                 title="🗑️ Data Cleanup Complete",
-                description=f"Deleted data {mode} {date_str}",
+                description=f"Deleted data {mode_display}",
                 color=0x2ecc71
             )
             embed.add_field(name="📅 Cutoff Date", value=date_str, inline=True)
             embed.add_field(name="🎯 Mode", value=mode.capitalize(), inline=True)
             embed.add_field(name="🗑️ Rows Deleted", value=str(deleted_count), inline=True)
-            embed.add_field(name="✅ Status", value="Cleanup complete!", inline=False)
             
             await interaction.followup.send(embed=embed)
-            log_info(f"[CLEANUP] Deleted {deleted_count} snapshots {mode} {date_str}")
+            log_info(f"[CLEANUP] Deleted {deleted_count} snapshots {mode_display}")
             
         except Exception as e:
             log_error(f"[CLEANUP ERROR] {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}")
 
 
-class CleanupView(discord.ui.View):
-    """View with cleanup button"""
-    @discord.ui.button(label="🗑️ Delete Data", style=discord.ButtonStyle.danger)
-    async def cleanup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = CleanupModal()
-        await interaction.response.show_modal(modal)
+@bot.tree.command(name="cleandata", description="Delete data before or after a specific date")
+@app_commands.default_permissions(administrator=True)
+async def cleandata_slash(interaction: discord.Interaction):
+    """Delete data - Admin only"""
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    
+    modal = CleanupModal()
+    await interaction.response.show_modal(modal)
 
 
 @bot.command(name="cleandata")
-async def cleanupempty(ctx):
-    """
-    [OWNER ONLY]
-    Interactive data cleanup - choose to delete before or after a date.
-    """
-    if ctx.author.id != OWNER_ID:
-        return await ctx.send("❌ Owner only.")
-    
-    view = CleanupView()
-    await ctx.send("Click the button to delete data before or after a specific date:", view=view)
+async def cleandata_text(ctx):
+    """[ADMIN ONLY] Use /cleandata slash command instead"""
+    if not ctx.author.guild_permissions.administrator:
+        return await ctx.send("❌ Admin only.")
+    await ctx.send("Use the slash command `/cleandata` instead!")
 
 
 class GainsDateSelector(discord.ui.View):
