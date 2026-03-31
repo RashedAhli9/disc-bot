@@ -1608,8 +1608,14 @@ async def help_cmd(inter):
     )
     
     embed.add_field(
+        name="📈 Advanced Gains (with Autocomplete)",
+        value="`/gain start_date end_date [user]` - View gains with date autocomplete! (e.g., `/gain 2025-12-01 2026-03-31 rekz`)",
+        inline=False
+    )
+    
+    embed.add_field(
         name="📚 Historical Data Commands",
-        value="`!seasonhistory` - View all seasons with dates (name, start → end)\n\n**Note:** All commands above support `[season]` parameter to view specific season data!",
+        value="`!seasonhistory` - View all seasons with dates (name, start → end)\n`!datahistory` - Show oldest/newest saved dates\n\n**Note:** All commands above support `[season]` parameter to view specific season data!",
         inline=False
     )
     
@@ -1634,6 +1640,98 @@ async def help_cmd(inter):
     
     embed.set_footer(text="Use / to see all slash commands | Use ! for text commands")
     await inter.response.send_message(embed=embed, ephemeral=True)
+
+
+# Autocomplete for dates
+async def date_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    """Autocomplete dates from database"""
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT data_date FROM season_progress ORDER BY data_date DESC")
+        all_dates = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        # Filter dates that start with current input
+        filtered = [d for d in all_dates if d.startswith(current.lower())] if current else all_dates[:25]
+        
+        # Return top 25 matches
+        return [
+            app_commands.Choice(name=date, value=date)
+            for date in filtered[:25]
+        ]
+    except Exception as e:
+        log_error(f"[AUTOCOMPLETE] Error: {e}")
+        return []
+
+
+@bot.tree.command(name="gain", description="View gains for a date range (with autocomplete)")
+@app_commands.describe(
+    start_date="Start date (YYYY-MM-DD, autocomplete available)",
+    end_date="End date (YYYY-MM-DD, autocomplete available)",
+    user="Optional: username or account ID (default: your account)"
+)
+@app_commands.autocomplete(start_date=date_autocomplete)
+@app_commands.autocomplete(end_date=date_autocomplete)
+async def gain(interaction: discord.Interaction, start_date: str, end_date: str, user: str = None):
+    """View gains between two dates with autocomplete"""
+    await interaction.response.defer()
+    
+    try:
+        # Validate date format
+        for date_str in [start_date, end_date]:
+            try:
+                parts = date_str.split('-')
+                if len(parts) != 3 or len(parts[0]) != 4 or len(parts[1]) != 2 or len(parts[2]) != 2:
+                    raise ValueError("Invalid format")
+                int(parts[0])
+                int(parts[1])
+                int(parts[2])
+            except:
+                return await interaction.followup.send(f"❌ Invalid date format: `{date_str}`. Use YYYY-MM-DD")
+        
+        if start_date > end_date:
+            return await interaction.followup.send("❌ Start date must be before end date!")
+        
+        # Get account ID
+        account_id = await get_account_id_from_input(interaction, user)
+        if not account_id:
+            return await interaction.followup.send("❌ Could not find account ID.")
+        
+        # Get available dates in range
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(
+            "SELECT DISTINCT data_date FROM season_progress WHERE account_id=? AND data_date BETWEEN ? AND ? ORDER BY data_date ASC",
+            (account_id, start_date, end_date)
+        )
+        dates = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        if not dates:
+            return await interaction.followup.send(f"❌ No data found between {start_date} and {end_date}")
+        
+        # Show selector for date range
+        embed = discord.Embed(
+            title="📊 Gains Calculator",
+            description="Select start and end dates to see your gains.",
+            color=0x3498db
+        )
+        embed.add_field(name="📅 Date Range", value=f"{start_date} → {end_date}", inline=False)
+        embed.add_field(name="Available dates:", value=f"{len(dates)} days of data", inline=False)
+        embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
+        
+        # Create view with limited dates (25 max per dropdown)
+        view = GainsDateSelector(dates, account_id, None, start_date, interaction)
+        
+        await interaction.followup.send(embed=embed, view=view)
+        
+    except Exception as e:
+        log_error(f"[GAIN COMMAND] Error: {e}")
+        await interaction.followup.send(f"❌ Error: {str(e)}")
 
 
 # ============================================================
@@ -2676,28 +2774,23 @@ class GainsDateSelector(discord.ui.View):
 @bot.command(name="gains")
 async def gains(ctx, param1: str = None, param2: str = None):
     """
-    Interactive GUI to view gains over any date range.
+    Interactive GUI to view gains.
     
     Usage: 
-      !gains (ALL available data from database)
-      !gains rekz (ALL data for rekz)
-      !gains sos1 (Season 1 data only)
-      !gains sos1 rekz (Season 1 data for rekz)
+      !gains rekz (current season for rekz)
       !gains rekz sos1 (Season 1 data for rekz)
     """
     
-    # Try to identify season and user from parameters
+    # Identify user and season from parameters
     season = None
     user_input = None
-    show_all_data = True  # By default, show all data
     
-    # Check if param1 is a season name
+    # Check if param1 is a season name first
     if param1:
         test_season = db_get_season_by_name(param1)
         if test_season:
             season = test_season
             user_input = param2  # If season found, param2 is the user
-            show_all_data = False  # Showing specific season, not all data
         else:
             # param1 might be a user, check param2 for season
             if param2:
@@ -2705,68 +2798,49 @@ async def gains(ctx, param1: str = None, param2: str = None):
                 if test_season:
                     season = test_season
                     user_input = param1  # param1 is the user
-                    show_all_data = False  # Showing specific season, not all data
             else:
-                # No season found, just a user specified
+                # No season found, just a user specified - use current season
                 user_input = param1
-                show_all_data = True  # Show all available data for this user
+                season = db_get_current_season()
+    else:
+        # No params - use current user and current season
+        user_input = None
+        season = db_get_current_season()
     
     # Get account ID
     account_id = await get_account_id_from_input(ctx, user_input)
     if not account_id:
         return await ctx.send("❌ Could not find account ID.")
     
-    # Get available dates
+    # Get available dates for the season
     try:
+        if not season:
+            return await ctx.send("❌ No active season found.")
+        
+        season_id, season_name, start_date, created_at = season
+        
         conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         
-        if show_all_data:
-            # Show ALL available data for this account across all seasons
-            c.execute(
-                "SELECT DISTINCT data_date FROM season_progress WHERE account_id=? ORDER BY data_date ASC",
-                (account_id,)
-            )
-            season_display = "ALL Available Data"
-            date_range_info = ""
-        else:
-            # Show specific season data only
-            season_id, season_name, start_date, created_at = season
-            c.execute(
-                "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
-                (season_id, account_id)
-            )
-            season_display = season_name
-            date_range_info = f"\n📅 {start_date} → {created_at.split()[0]}"
+        # Show specific season data only
+        c.execute(
+            "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
+            (season_id, account_id)
+        )
         
         dates = [row[0] for row in c.fetchall()]
         conn.close()
         
         if not dates:
-            return await ctx.send(f"❌ No saved data found for this account. Run `!loadhistory` first.")
+            return await ctx.send(f"❌ No saved data found for this account in {season_name}. Run `!loadhistory` first.")
         
         # Show selector
         embed = discord.Embed(
             title="📊 Gains Calculator",
-            description=f"Season: **{season_display}**\nSelect start and end dates to see your gains.\n\n**Available dates:** {len(dates)} days of data{date_range_info}",
+            description=f"Season: **{season_name}**\nSelect start and end dates to see your gains.\n\n**Available dates:** {len(dates)} days of data\n📅 {start_date} → {created_at.split()[0]}",
             color=0x3498db
         )
         embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
-        
-        # For gains calculation, we need season_id. If showing all data, use first available season for the account
-        if show_all_data:
-            c_season = sqlite3.connect(DB_PROGRESS)
-            c = c_season.cursor()
-            c.execute(
-                "SELECT DISTINCT season_id FROM season_progress WHERE account_id=? ORDER BY season_id DESC LIMIT 1",
-                (account_id,)
-            )
-            row = c.fetchone()
-            c_season.close()
-            season_id = row[0] if row else None
-            start_date = dates[0]  # Use earliest date as reference
-        else:
-            season_id, _, start_date, _ = season
         
         view = GainsDateSelector(dates, account_id, season_id, start_date, ctx)
         await ctx.send(embed=embed, view=view)
@@ -4327,6 +4401,84 @@ async def custom_event_loop():
             sent_custom.clear()
     except Exception as e:
         log_info(f"[CUSTOM EVENT LOOP ERROR] {type(e).__name__}: {e}")
+
+
+# ============================================================
+# GAIN COMMAND - DATE RANGE WITH AUTOCOMPLETE
+# ============================================================
+
+async def get_available_dates_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Autocomplete for available dates in database"""
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT data_date FROM season_progress ORDER BY data_date DESC LIMIT 100")
+        all_dates = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        # Filter dates that match current input
+        filtered = [d for d in all_dates if d.startswith(current)] if current else all_dates[:25]
+        
+        return [app_commands.Choice(name=d, value=d) for d in filtered[:25]]
+    except:
+        return []
+
+@bot.tree.command(name="gain", description="View gains between specific dates with autocomplete")
+@app_commands.describe(
+    start_date="Start date (YYYY-MM-DD)",
+    end_date="End date (YYYY-MM-DD)",
+    user="Member name (optional)"
+)
+@app_commands.autocomplete(start_date=get_available_dates_autocomplete)
+@app_commands.autocomplete(end_date=get_available_dates_autocomplete)
+async def gain(interaction: discord.Interaction, start_date: str, end_date: str, user: str = None):
+    """View gains between specific dates with autocomplete"""
+    await interaction.response.defer()
+    
+    try:
+        # Get account ID
+        account_id = await get_account_id_from_input(interaction, user)
+        if not account_id:
+            return await interaction.followup.send("❌ Could not find account ID.")
+        
+        # Query dates within range
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(
+            "SELECT DISTINCT data_date FROM season_progress WHERE account_id=? AND data_date BETWEEN ? AND ? ORDER BY data_date ASC",
+            (account_id, start_date, end_date)
+        )
+        dates = [row[0] for row in c.fetchall()]
+        c.execute("SELECT DISTINCT season_id FROM season_progress WHERE account_id=? ORDER BY season_id DESC LIMIT 1", (account_id,))
+        season_row = c.fetchone()
+        conn.close()
+        
+        if not dates:
+            return await interaction.followup.send(f"❌ No data found between {start_date} and {end_date}")
+        
+        # Get season_id for gains calculation
+        season_id = season_row[0] if season_row else None
+        
+        # Create embed
+        embed = discord.Embed(
+            title="📊 Gains Calculator",
+            description=f"**Date Range:** {start_date} → {end_date}\nSelect start and end dates to see your gains.",
+            color=0x3498db
+        )
+        embed.add_field(name="📅 Available dates", value=f"{len(dates)} days of data", inline=False)
+        embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
+        
+        # Show date selector
+        view = GainsDateSelector(dates, account_id, season_id, dates[0], interaction)
+        await interaction.followup.send(embed=embed, view=view)
+        
+    except Exception as e:
+        log_error(f"[GAIN] Error: {e}")
+        await interaction.followup.send("❌ Error loading data. Try again later.")
+
 
 # ============================================================
 # SAFE LOGIN (NO bot.run)
