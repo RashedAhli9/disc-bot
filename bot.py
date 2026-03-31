@@ -1776,14 +1776,14 @@ async def progress(ctx, user_input: str = None):
         for key in ["gold_spent", "wood_spent", "ore_spent", "mana_spent"]:
             val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
             try:
-                total_spent += int(val_str) if val_str.lstrip("-").isdigit() else 0
+                total_spent += abs(int(val_str)) if val_str.lstrip("-").isdigit() else 0
             except Exception as e:
                 pass
         
         for key in ["gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
             val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
             try:
-                total_gathered += int(val_str) if val_str.lstrip("-").isdigit() else 0
+                total_gathered += abs(int(val_str)) if val_str.lstrip("-").isdigit() else 0
             except Exception as e:
                 pass
         
@@ -1834,73 +1834,58 @@ async def progress(ctx, user_input: str = None):
         
         if stats.get("t5_gain"):
             t5_current = current_t_kills.get("t5")
+            t5_gain_clean = stats['t5_gain'].replace("+", "").replace(",", "")
+            t5_gain_val = abs(int(t5_gain_clean)) if t5_gain_clean.lstrip("-").isdigit() else 0
             if t5_current:
-                output += f"T5: {t5_current:,} ({stats['t5_gain']})\n"
+                output += f"T5: {t5_current:,} (+{t5_gain_val:,})\n"
                 total_t_current += t5_current
             else:
-                output += f"T5: {stats['t5_gain']}\n"
-            # Add gain to total
-            t5_gain_str = stats['t5_gain'].replace("+", "").replace(",", "")
-            try:
-                total_t_gain += int(t5_gain_str) if t5_gain_str.lstrip("-").isdigit() else 0
-            except Exception as e:
-                pass
+                output += f"T5: +{t5_gain_val:,}\n"
+            total_t_gain += t5_gain_val
         
         if stats.get("t4_gain"):
             t4_current = current_t_kills.get("t4")
+            t4_gain_clean = stats['t4_gain'].replace("+", "").replace(",", "")
+            t4_gain_val = abs(int(t4_gain_clean)) if t4_gain_clean.lstrip("-").isdigit() else 0
             if t4_current:
-                output += f"T4: {t4_current:,} ({stats['t4_gain']})\n"
+                output += f"T4: {t4_current:,} (+{t4_gain_val:,})\n"
                 total_t_current += t4_current
             else:
-                output += f"T4: {stats['t4_gain']}\n"
-            # Add gain to total
-            t4_gain_str = stats['t4_gain'].replace("+", "").replace(",", "")
-            try:
-                total_t_gain += int(t4_gain_str) if t4_gain_str.lstrip("-").isdigit() else 0
-            except Exception as e:
-                pass
+                output += f"T4: +{t4_gain_val:,}\n"
+            total_t_gain += t4_gain_val
         
         if stats.get("t3_gain"):
             t3_current = current_t_kills.get("t3")
+            t3_gain_clean = stats['t3_gain'].replace("+", "").replace(",", "")
+            t3_gain_val = abs(int(t3_gain_clean)) if t3_gain_clean.lstrip("-").isdigit() else 0
             if t3_current:
-                output += f"T3: {t3_current:,} ({stats['t3_gain']})\n"
+                output += f"T3: {t3_current:,} (+{t3_gain_val:,})\n"
                 total_t_current += t3_current
             else:
-                output += f"T3: {stats['t3_gain']}\n"
-            # Add gain to total
-            t3_gain_str = stats['t3_gain'].replace("+", "").replace(",", "")
-            try:
-                total_t_gain += int(t3_gain_str) if t3_gain_str.lstrip("-").isdigit() else 0
-            except Exception as e:
-                pass
+                output += f"T3: +{t3_gain_val:,}\n"
+            total_t_gain += t3_gain_val
         
         if stats.get("t2_gain"):
             t2_current = current_t_kills.get("t2")
+            t2_gain_clean = stats['t2_gain'].replace("+", "").replace(",", "")
+            t2_gain_val = abs(int(t2_gain_clean)) if t2_gain_clean.lstrip("-").isdigit() else 0
             if t2_current:
-                output += f"T2: {t2_current:,} ({stats['t2_gain']})\n"
+                output += f"T2: {t2_current:,} (+{t2_gain_val:,})\n"
                 total_t_current += t2_current
             else:
-                output += f"T2: {stats['t2_gain']}\n"
-            # Add gain to total
-            t2_gain_str = stats['t2_gain'].replace("+", "").replace(",", "")
-            try:
-                total_t_gain += int(t2_gain_str) if t2_gain_str.lstrip("-").isdigit() else 0
-            except Exception as e:
-                pass
+                output += f"T2: +{t2_gain_val:,}\n"
+            total_t_gain += t2_gain_val
         
         if stats.get("t1_gain"):
             t1_current = current_t_kills.get("t1")
+            t1_gain_clean = stats['t1_gain'].replace("+", "").replace(",", "")
+            t1_gain_val = abs(int(t1_gain_clean)) if t1_gain_clean.lstrip("-").isdigit() else 0
             if t1_current:
-                output += f"T1: {t1_current:,} ({stats['t1_gain']})\n"
+                output += f"T1: {t1_current:,} (+{t1_gain_val:,})\n"
                 total_t_current += t1_current
             else:
-                output += f"T1: {stats['t1_gain']}\n"
-            # Add gain to total
-            t1_gain_str = stats['t1_gain'].replace("+", "").replace(",", "")
-            try:
-                total_t_gain += int(t1_gain_str) if t1_gain_str.lstrip("-").isdigit() else 0
-            except Exception as e:
-                pass
+                output += f"T1: +{t1_gain_val:,}\n"
+            total_t_gain += t1_gain_val
         
         # Add total T-kills
         if total_t_current > 0:
@@ -1910,17 +1895,25 @@ async def progress(ctx, user_input: str = None):
         
         output += f"\n"
         
-        # RSS Spent - each resource on own line
+        # RSS Spent - each resource on own line with absolute values
         output += f"💰 RSS Spent\n"
         if stats.get("gold_spent"):
-            output += f"🪙 Gold: {stats['gold_spent']}\n"
+            gold_clean = stats['gold_spent'].replace(",", "").replace("+", "")
+            gold_val = abs(int(gold_clean)) if gold_clean.lstrip("-").isdigit() else 0
+            output += f"🪙 Gold: -{gold_val:,}\n"
         if stats.get("wood_spent"):
-            output += f"🪵 Wood: {stats['wood_spent']}\n"
+            wood_clean = stats['wood_spent'].replace(",", "").replace("+", "")
+            wood_val = abs(int(wood_clean)) if wood_clean.lstrip("-").isdigit() else 0
+            output += f"🪵 Wood: -{wood_val:,}\n"
         if stats.get("ore_spent"):
-            output += f"⛏️ Ore: {stats['ore_spent']}\n"
+            ore_clean = stats['ore_spent'].replace(",", "").replace("+", "")
+            ore_val = abs(int(ore_clean)) if ore_clean.lstrip("-").isdigit() else 0
+            output += f"⛏️ Ore: -{ore_val:,}\n"
         if stats.get("mana_spent"):
-            output += f"💧 Mana: {stats['mana_spent']}\n"
-        output += f"Total: {total_spent:,}\n"
+            mana_clean = stats['mana_spent'].replace(",", "").replace("+", "")
+            mana_val = abs(int(mana_clean)) if mana_clean.lstrip("-").isdigit() else 0
+            output += f"💧 Mana: -{mana_val:,}\n"
+        output += f"Total: -{total_spent:,}\n"
         output += f"\n"
         
         # RSS Gathered - each resource on own line
@@ -2339,10 +2332,10 @@ class GainsDateSelector(View):
         kills_gain = parse_stat(stats_end.get("kills_gain", "0")) - parse_stat(stats_start.get("kills_gain", "0"))
         deaths_gain = parse_stat(stats_end.get("deads_gain", "0")) - parse_stat(stats_start.get("deads_gain", "0"))
         mana_gain = parse_stat(stats_end.get("mana_gathered", "0")) - parse_stat(stats_start.get("mana_gathered", "0"))
-        mana_spent = parse_stat(stats_end.get("mana_spent", "0"))
-        gold_spent = parse_stat(stats_end.get("gold_spent", "0"))
-        wood_spent = parse_stat(stats_end.get("wood_spent", "0"))
-        ore_spent = parse_stat(stats_end.get("ore_spent", "0"))
+        mana_spent = abs(parse_stat(stats_end.get("mana_spent", "0")))
+        gold_spent = abs(parse_stat(stats_end.get("gold_spent", "0")))
+        wood_spent = abs(parse_stat(stats_end.get("wood_spent", "0")))
+        ore_spent = abs(parse_stat(stats_end.get("ore_spent", "0")))
         
         # Debug logging
         log_info(f"[GAINS DEBUG] Start date {self.selected_start}: power_gain={stats_start.get('power_gain')}")
@@ -2468,11 +2461,11 @@ async def topmana(ctx):
                 if stats:
                     lord_name = stats.get("lord_name", lord["name"])
                     
-                    # Get mana_gathered if it exists
+                    # Get mana_gathered if it exists (use abs() to handle negative values)
                     if stats.get("mana_gathered"):
                         mana_str = stats["mana_gathered"]
                         mana_clean = mana_str.replace(",", "").replace("+", "")
-                        mana_num = int(mana_clean) if mana_clean.lstrip("-").isdigit() else 0
+                        mana_num = abs(int(mana_clean)) if mana_clean.lstrip("-").isdigit() else 0
                     else:
                         log_info(f"[TOPMANA DEBUG] {lord['account_id']} - mana_gathered is None")
                 else:
@@ -2550,11 +2543,11 @@ async def topdeaths(ctx):
                 if stats:
                     lord_name = stats.get("lord_name", lord["name"])
                     
-                    # Get deads_gain if it exists
+                    # Get deads_gain if it exists (use abs() to handle negative values)
                     if stats.get("deads_gain"):
                         deaths_str = stats["deads_gain"]
                         deaths_clean = deaths_str.replace(",", "").replace("+", "")
-                        deaths_num = int(deaths_clean) if deaths_clean.lstrip("-").isdigit() else 0
+                        deaths_num = abs(int(deaths_clean)) if deaths_clean.lstrip("-").isdigit() else 0
                     else:
                         log_info(f"[TOPDEATHS DEBUG] {lord['account_id']} - deads_gain is None")
                 else:
@@ -2628,7 +2621,7 @@ async def topmerits(ctx):
                     if stats.get("merits"):
                         merits_str = stats["merits"]
                         merits_clean = merits_str.replace(",", "").replace("+", "")
-                        merits_num = int(merits_clean) if merits_clean.lstrip("-").isdigit() else 0
+                        merits_num = abs(int(merits_clean)) if merits_clean.lstrip("-").isdigit() else 0
             
             leaderboard.append({"name": lord_name, "merits": merits_num, "merits_str": merits_str})
         except Exception as e:
@@ -2679,11 +2672,12 @@ async def rss_leaderboard(ctx):
                 if stats:
                     lord_name = stats.get("lord_name", lord["name"])
                     
-                    # Sum all resources spent
+                    # Sum all resources spent (use abs() to handle negative values from API)
                     for key in ["gold_spent", "wood_spent", "ore_spent", "mana_spent"]:
                         val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
                         try:
-                            total_rss += int(val_str) if val_str.lstrip("-").isdigit() else 0
+                            val = int(val_str) if val_str.lstrip("-").isdigit() else 0
+                            total_rss += abs(val)  # Use absolute value
                         except Exception as e:
                             pass
             
@@ -3014,10 +3008,20 @@ async def compare(ctx, user1: str = None, user2: str = None):
         ms1 = stats1.get("mana_spent", "+0")
         ms2 = stats2.get("mana_spent", "+0")
         
-        output += f"  Gold: {name1} {gs1} | {name2} {gs2}\n"
-        output += f"  Wood: {name1} {ws1} | {name2} {ws2}\n"
-        output += f"  Ore: {name1} {os1} | {name2} {os2}\n"
-        output += f"  Mana: {name1} {ms1} | {name2} {ms2}\n"
+        # Parse with absolute values
+        gs1_val = abs(int(gs1.replace(",", "").replace("+", ""))) if gs1.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        gs2_val = abs(int(gs2.replace(",", "").replace("+", ""))) if gs2.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        ws1_val = abs(int(ws1.replace(",", "").replace("+", ""))) if ws1.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        ws2_val = abs(int(ws2.replace(",", "").replace("+", ""))) if ws2.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        os1_val = abs(int(os1.replace(",", "").replace("+", ""))) if os1.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        os2_val = abs(int(os2.replace(",", "").replace("+", ""))) if os2.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        ms1_val = abs(int(ms1.replace(",", "").replace("+", ""))) if ms1.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        ms2_val = abs(int(ms2.replace(",", "").replace("+", ""))) if ms2.replace(",", "").replace("+", "").lstrip("-").isdigit() else 0
+        
+        output += f"  Gold: {name1} -{gs1_val:,} | {name2} -{gs2_val:,}\n"
+        output += f"  Wood: {name1} -{ws1_val:,} | {name2} -{ws2_val:,}\n"
+        output += f"  Ore: {name1} -{os1_val:,} | {name2} -{os2_val:,}\n"
+        output += f"  Mana: {name1} -{ms1_val:,} | {name2} -{ms2_val:,}\n"
         output += f"\n"
         
         # RSS Gathered
@@ -3108,14 +3112,19 @@ async def quick_stats(ctx, user_input: str = None):
         else:
             stats["merits_pct"] = "0%"
         
-        # Extract data
+        # Extract data with absolute values
         lord_name = stats.get("lord_name", "Unknown")
         merits = stats.get("merits", "+0")
         merits_pct = stats.get("merits_pct", "0%")
         kills = stats.get("kills_gain", "+0")
         deaths = stats.get("deads_gain", "+0")
         healed = stats.get("healed_gain", "+0")
-        mana_spent = stats.get("mana_spent", "+0")
+        
+        # Parse mana_spent with absolute value
+        mana_spent_str = stats.get("mana_spent", "+0")
+        mana_clean = mana_spent_str.replace(",", "").replace("+", "")
+        mana_spent_val = abs(int(mana_clean)) if mana_clean.lstrip("-").isdigit() else 0
+        mana_spent = f"-{mana_spent_val:,}"
         
         # Get ranking positions as strings
         power_rank_str = f"(#{power_rank[account_id][0]})" if account_id in power_rank else ""
