@@ -714,6 +714,24 @@ def db_get_current_season():
     conn.close()
     return row
 
+def db_get_season_by_name(season_name):
+    """Get season by name (case-insensitive)"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, season_name, start_date, created_at FROM seasons WHERE LOWER(season_name) = LOWER(?) LIMIT 1", (season_name,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_get_all_seasons():
+    """Get all seasons ordered by creation date"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 def db_add_lord(lord_name, account_id):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -1554,7 +1572,13 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats\n`!oldprogress [user]` - View stats from past seasons\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Side-by-side comparison\n`!gains` - Interactive GUI to view gains over any date range\n`!topmana` - Top mana gathered\n`!topdeaths` - Most deaths\n`!topmerits` - Highest merits\n`!rss` - Top resource spenders\n`!active` - Show active vs inactive members",
+        value="`!progress [user]` - Full season stats with gains\n`!oldprogress [user]` - View stats from past seasons\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Side-by-side comparison\n`!gains` - Interactive GUI to view gains over any date range\n`!topmana [season]` - Top mana gathered\n`!topdeaths [season]` - Most deaths\n`!topmerits [season]` - Highest merits\n`!rss [season]` - Top resource spenders\n`!active` - Show active vs inactive members",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📚 Historical Data Commands",
+        value="`!seasonhistory` - View all seasons (name, start date → end date. Current season shows today's date)",
         inline=False
     )
     
@@ -1573,7 +1597,7 @@ async def help_cmd(inter):
     if inter.user.id == OWNER_ID:
         embed.add_field(
             name="⚙️ Admin Commands",
-            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now\n`!loadhistory` - Load ALL historical season data (fixes all commands)",
+            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data\n`!loadhistory all` - Load ALL Call of Stats data",
             inline=False
         )
     
@@ -1633,12 +1657,35 @@ async def newseason(inter: discord.Interaction):
 
 
 @bot.command(name="progress")
-async def progress(ctx, user_input: str = None):
-    """Check season progress. Usage: !progress (uses your role) or !progress truvix (username) or !progress 16322115 (account ID)"""
-    season = db_get_current_season()
-    
-    if not season:
-        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+async def progress(ctx, user_input: str = None, season_input: str = None):
+    """
+    Check season progress. 
+    Usage: 
+      !progress               (your progress, current season)
+      !progress truvix        (truvix's progress, current season)
+      !progress truvix sos1   (truvix's progress in sos1 season)
+      !progress 16322115 sos2 (account 16322115's progress in sos2)
+    """
+    # Determine which season to use
+    if season_input:
+        # Look up specific season by name
+        try:
+            conn = sqlite3.connect(DB)
+            c = conn.cursor()
+            c.execute("SELECT id, season_name, start_date, created_at FROM seasons WHERE LOWER(season_name) = LOWER(?)", (season_input,))
+            season = c.fetchone()
+            conn.close()
+            
+            if not season:
+                return await ctx.send(f"❌ Season '{season_input}' not found. Use `!seasonhistory` to see all seasons.")
+        except Exception as e:
+            return await ctx.send(f"❌ Error looking up season: {e}")
+    else:
+        # Use current season
+        season = db_get_current_season()
+        
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
     account_id = None
     
@@ -1689,7 +1736,7 @@ async def progress(ctx, user_input: str = None):
     
     season_id, season_name, start_date, created_at = season
     
-    msg = await ctx.send(f"📊 Fetching stats for account {account_id}...")
+    msg = await ctx.send(f"📊 Fetching stats for account {account_id} in season {season_name}...")
     
     today = date.today().isoformat()
     
@@ -2189,12 +2236,17 @@ async def forcefetch(ctx):
 
 
 @bot.command(name="loadhistory")
-async def loadhistory(ctx):
+async def loadhistory(ctx, mode: str = None):
     """
     [OWNER ONLY]
-    Load ALL historical data from season start to today - DAILY SNAPSHOTS.
-    Fetches stats for EACH INDIVIDUAL DATE to create complete daily record.
-    This populates the database with every single day of data.
+    Load ALL historical data - DAILY SNAPSHOTS.
+    
+    Usage:
+      !loadhistory        (loads from season start to today)
+      !loadhistory all    (finds oldest Call of Stats data and loads EVERYTHING to today!)
+    
+    With 'all': Automatically detects oldest available date for each member.
+    Perfect for !gains to work with ALL available historical dates.
     """
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
@@ -2203,8 +2255,7 @@ async def loadhistory(ctx):
     if not season:
         return await ctx.send("❌ No season active.")
     
-    season_id, season_name, start_date, created_at = season
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    season_id, season_name, season_start_date, created_at = season
     today = date.today()
     
     # Get all members to fetch for
@@ -2213,13 +2264,30 @@ async def loadhistory(ctx):
         if not any(l["account_id"] == account_id for l in lords):
             lords.append({"account_id": account_id, "name": f"Account {account_id}"})
     
+    # Determine start date
+    if mode and mode.lower() == "all":
+        msg = await ctx.send(f"🔍 Scanning Call of Stats starting from Dec 1, 2025...\nThis may take 2-3 minutes...")
+        
+        # Just start from December 1, 2025
+        start = date(2025, 12, 1)
+        date_range_text = f"{start.isoformat()} → {today.isoformat()} (ALL available data!)"
+        load_mode = "all"
+        
+    else:
+        start = datetime.strptime(season_start_date, "%Y-%m-%d").date()
+        date_range_text = f"{season_start_date} → {today.isoformat()} (season data)"
+        load_mode = "season"
+        msg = await ctx.send(f"⏳ Loading historical data...\n📅 {date_range_text}")
+    
     total_days = (today - start).days + 1
-    msg = await ctx.send(f"⏳ Loading historical data...\nFetching {len(lords)} members × {total_days} days = {total_days * len(lords)} snapshots\nThis may take 5-15 minutes...")
+    
+    await msg.edit(content=f"⏳ Loading historical data...\n📅 {date_range_text}\n👥 {len(lords)} members × {total_days} days = {total_days * len(lords)} snapshots\nThis may take 5-30 minutes depending on data size...")
     
     # Fetch data for each day - fetch EACH DAY INDIVIDUALLY
     current_date = start
     saved_count = 0
     day_num = 0
+    failed_count = 0
     
     while current_date <= today:
         day_num += 1
@@ -2230,47 +2298,103 @@ async def loadhistory(ctx):
                 account_id = lord["account_id"]
                 name = lord.get("name", account_id)
                 
-                # IMPORTANT: Fetch for THIS DAY ONLY (date_str to date_str)
-                # This gives us the snapshot for that specific date
+                # Fetch for THIS DAY ONLY (date_str to date_str)
                 stats, actual_date = await fetch_stats_with_fallback(account_id, date_str, date_str)
                 
                 if stats:
                     # Save to database with the correct date
                     db_save_season_progress(season_id, account_id, stats.get("lord_name", name), stats, actual_date)
                     saved_count += 1
+                else:
+                    failed_count += 1
                     
             except Exception as e:
                 log_error(f"[LOADHISTORY] Error for {account_id} on {date_str}: {e}")
+                failed_count += 1
                 continue
         
-        # Update progress message every 5 days
+        # Update progress message every 5 days or on last day
         if day_num % 5 == 0 or current_date == today:
             progress = (day_num / total_days) * 100
             try:
-                await msg.edit(content=f"⏳ Loading historical data...\nDay {day_num}/{total_days} ({progress:.0f}%)\nSaved {saved_count} snapshots...")
+                await msg.edit(content=f"⏳ Loading historical data...\n📅 {date_range_text}\nDay {day_num}/{total_days} ({progress:.0f}%)\n✅ Saved {saved_count} snapshots")
             except:
                 pass
         
         current_date += timedelta(days=1)
     
+    # Create result embed
     embed = discord.Embed(
-        title="📚 Daily History Load Complete",
+        title="📚 Historical Data Load Complete",
         description=f"Season: {season_name}",
         color=0x2ecc71
     )
-    embed.add_field(name="📅 Date Range", value=f"{start_date} → {today}", inline=False)
+    embed.add_field(name="📅 Date Range", value=date_range_text, inline=False)
+    embed.add_field(name="🎯 Load Mode", value="ALL Available Data" if load_mode == "all" else "Season Data", inline=True)
     embed.add_field(name="👥 Members Tracked", value=str(len(lords)), inline=True)
     embed.add_field(name="📊 Daily Snapshots Saved", value=str(saved_count), inline=True)
-    embed.add_field(name="🎯 Days Covered", value=str(total_days), inline=True)
-    embed.add_field(name="✅ Status", value="Complete daily historical database created!", inline=False)
-    embed.set_footer(text="You now have daily snapshots for all dates in this season")
+    embed.add_field(name="📈 Total Days Covered", value=str(total_days), inline=True)
+    embed.add_field(name="✅ Status", value="Complete database created!\n\n🎯 You can now use `!gains` with dates from this entire range!", inline=False)
+    embed.set_footer(text="!gains is now fully powered with all available historical data")
     
     await ctx.send(embed=embed)
-    log_info(f"[LOADHISTORY] Complete! Saved {saved_count} daily snapshots")
+    log_info(f"[LOADHISTORY] Complete! Mode={load_mode}, Saved {saved_count} daily snapshots from {start.isoformat()} to {today.isoformat()}")
+
+
+@bot.command(name="seasonhistory")
+async def seasonhistory(ctx):
+    """
+    Show all seasons with their start date and end date (or current day if active).
+    """
+    try:
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at ASC")
+        seasons = c.fetchall()
+        conn.close()
+        
+        if not seasons:
+            return await ctx.send("❌ No seasons found in database.")
+        
+        current_season = db_get_current_season()
+        current_season_id = current_season[0] if current_season else None
+        today = date.today().isoformat()
+        
+        # Build output
+        output = "```📅 SEASON HISTORY\n\n"
+        
+        for season_id, season_name, start_date, created_at in seasons:
+            is_current = (season_id == current_season_id)
+            
+            if is_current:
+                # Current season: show start date → today
+                end_display = today
+                status = "🔴 ACTIVE"
+            else:
+                # Past season: try to find end date (last day with data)
+                conn = sqlite3.connect(DB_PROGRESS)
+                c = conn.cursor()
+                c.execute(
+                    "SELECT MAX(data_date) FROM season_progress WHERE season_id = ?",
+                    (season_id,)
+                )
+                row = c.fetchone()
+                conn.close()
+                end_display = row[0] if row and row[0] else "Unknown"
+                status = "✅ ENDED"
+            
+            output += f"{status} {season_name}\n"
+            output += f"   📍 {start_date} → {end_display}\n\n"
+        
+        output += "```"
+        await ctx.send(output)
+        
+    except Exception as e:
+        log_error(f"[SEASONHISTORY ERROR] {e}")
+        await ctx.send(f"❌ Error: {str(e)}")
 
 
 
-class GainsDateSelector(View):
     """Interactive selector for gains date range"""
     
     def __init__(self, available_dates, account_id, season_id, start_date, ctx):
@@ -2436,13 +2560,22 @@ async def gains(ctx, user_input: str = None):
 
 
 @bot.command(name="topmana")
-async def topmana(ctx):
-    """Leaderboard for mana gathered this season (auto-detects numeric roles)"""
-    season = db_get_current_season()
-    if not season:
-        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+async def topmana(ctx, season_name: str = None):
+    """Leaderboard for mana gathered. Usage: !topmana (current) or !topmana sos1 (specific season)"""
     
-    season_id, season_name, start_date, created_at = season
+    # Get season
+    if season_name:
+        season = db_get_season_by_name(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name_display, start_date, created_at = season
     today = date.today().isoformat()
     
     lords = get_all_lords_from_guild(ctx.guild)
@@ -2506,7 +2639,7 @@ async def topmana(ctx):
     leaderboard.sort(key=lambda x: x["mana"], reverse=True)
     
     # Build text output - compact
-    output = f"```🏆 Top Mana Gathered - {season_name}\n"
+    output = f"```🏆 Top Mana Gathered - {season_name_display}\n"
     medals = ["🥇", "🥈", "🥉"]
     
     for i, lord in enumerate(leaderboard):
@@ -2518,13 +2651,22 @@ async def topmana(ctx):
 
 
 @bot.command(name="topdeaths")
-async def topdeaths(ctx):
-    """Leaderboard for most deaths this season (auto-detects numeric roles)"""
-    season = db_get_current_season()
-    if not season:
-        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+async def topdeaths(ctx, season_name: str = None):
+    """Leaderboard for most deaths. Usage: !topdeaths (current) or !topdeaths sos1 (specific season)"""
     
-    season_id, season_name, start_date, created_at = season
+    # Get season
+    if season_name:
+        season = db_get_season_by_name(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name_display, start_date, created_at = season
     today = date.today().isoformat()
     
     lords = get_all_lords_from_guild(ctx.guild)
@@ -2588,7 +2730,7 @@ async def topdeaths(ctx):
     leaderboard.sort(key=lambda x: x["deaths"], reverse=True)
     
     # Build text output - compact
-    output = f"```💀 Most Deaths - {season_name}\n"
+    output = f"```💀 Most Deaths - {season_name_display}\n"
     medals = ["🥇", "🥈", "🥉"]
     
     for i, lord in enumerate(leaderboard):
@@ -2600,13 +2742,22 @@ async def topdeaths(ctx):
 
 
 @bot.command(name="topmerits")
-async def topmerits(ctx):
-    """Leaderboard for highest merits this season (auto-detects numeric roles)"""
-    season = db_get_current_season()
-    if not season:
-        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+async def topmerits(ctx, season_name: str = None):
+    """Leaderboard for highest merits. Usage: !topmerits (current) or !topmerits sos1 (specific season)"""
     
-    season_id, season_name, start_date, created_at = season
+    # Get season
+    if season_name:
+        season = db_get_season_by_name(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name_display, start_date, created_at = season
     today = date.today().isoformat()
     
     lords = get_all_lords_from_guild(ctx.guild)
@@ -2644,7 +2795,7 @@ async def topmerits(ctx):
     
     leaderboard.sort(key=lambda x: x["merits"], reverse=True)
     
-    output = f"```🏅 Top Merits - {season_name}\n"
+    output = f"```🏅 Top Merits - {season_name_display}\n"
     medals = ["🥇", "🥈", "🥉"]
     for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
@@ -2654,13 +2805,22 @@ async def topmerits(ctx):
 
 
 @bot.command(name="rss")
-async def rss_leaderboard(ctx):
-    """Top resource spenders (total gold+wood+ore+mana spent this season)"""
-    season = db_get_current_season()
-    if not season:
-        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+async def rss_leaderboard(ctx, season_name: str = None):
+    """Top resource spenders. Usage: !rss (current) or !rss sos1 (specific season)"""
     
-    season_id, season_name, start_date, created_at = season
+    # Get season
+    if season_name:
+        season = db_get_season_by_name(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    
+    season_id, season_name_display, start_date, created_at = season
     today = date.today().isoformat()
     
     lords = get_all_lords_from_guild(ctx.guild)
