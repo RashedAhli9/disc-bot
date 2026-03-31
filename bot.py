@@ -1646,7 +1646,7 @@ async def help_cmd(inter):
 async def date_autocomplete(
     interaction: discord.Interaction,
     current: str,
-) -> List[app_commands.Choice[str]]:
+) -> list[app_commands.Choice[str]]:
     """Autocomplete dates from database"""
     try:
         conn = sqlite3.connect(DB_PROGRESS)
