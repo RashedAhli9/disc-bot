@@ -2192,8 +2192,9 @@ async def forcefetch(ctx):
 async def loadhistory(ctx):
     """
     [OWNER ONLY]
-    Load ALL historical data from season start to today.
-    This populates the database with every day of data, fixing !active and other commands.
+    Load ALL historical data from season start to today - DAILY SNAPSHOTS.
+    Fetches stats for EACH INDIVIDUAL DATE to create complete daily record.
+    This populates the database with every single day of data.
     """
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
@@ -2213,13 +2214,15 @@ async def loadhistory(ctx):
             lords.append({"account_id": account_id, "name": f"Account {account_id}"})
     
     total_days = (today - start).days + 1
-    await ctx.send(f"⏳ Fetching {len(lords)} members × {total_days} days ({total_days * len(lords)} total requests)...\nThis may take a few minutes.")
+    msg = await ctx.send(f"⏳ Loading historical data...\nFetching {len(lords)} members × {total_days} days = {total_days * len(lords)} snapshots\nThis may take 5-15 minutes...")
     
-    # Fetch data for each day
+    # Fetch data for each day - fetch EACH DAY INDIVIDUALLY
     current_date = start
     saved_count = 0
+    day_num = 0
     
     while current_date <= today:
+        day_num += 1
         date_str = current_date.isoformat()
         
         for lord in lords:
@@ -2227,8 +2230,9 @@ async def loadhistory(ctx):
                 account_id = lord["account_id"]
                 name = lord.get("name", account_id)
                 
-                # Fetch stats for this specific day
-                stats, actual_date = await fetch_stats_with_fallback(account_id, start_date, date_str)
+                # IMPORTANT: Fetch for THIS DAY ONLY (date_str to date_str)
+                # This gives us the snapshot for that specific date
+                stats, actual_date = await fetch_stats_with_fallback(account_id, date_str, date_str)
                 
                 if stats:
                     # Save to database with the correct date
@@ -2239,20 +2243,30 @@ async def loadhistory(ctx):
                 log_error(f"[LOADHISTORY] Error for {account_id} on {date_str}: {e}")
                 continue
         
+        # Update progress message every 5 days
+        if day_num % 5 == 0 or current_date == today:
+            progress = (day_num / total_days) * 100
+            try:
+                await msg.edit(content=f"⏳ Loading historical data...\nDay {day_num}/{total_days} ({progress:.0f}%)\nSaved {saved_count} snapshots...")
+            except:
+                pass
+        
         current_date += timedelta(days=1)
     
     embed = discord.Embed(
-        title="📚 Load History Complete",
+        title="📚 Daily History Load Complete",
         description=f"Season: {season_name}",
-        color=0x3498db
+        color=0x2ecc71
     )
     embed.add_field(name="📅 Date Range", value=f"{start_date} → {today}", inline=False)
-    embed.add_field(name="👥 Members", value=str(len(lords)), inline=True)
-    embed.add_field(name="📊 Data Rows Saved", value=str(saved_count), inline=True)
-    embed.add_field(name="✅ Status", value="All historical data loaded to database", inline=False)
+    embed.add_field(name="👥 Members Tracked", value=str(len(lords)), inline=True)
+    embed.add_field(name="📊 Daily Snapshots Saved", value=str(saved_count), inline=True)
+    embed.add_field(name="🎯 Days Covered", value=str(total_days), inline=True)
+    embed.add_field(name="✅ Status", value="Complete daily historical database created!", inline=False)
+    embed.set_footer(text="You now have daily snapshots for all dates in this season")
     
     await ctx.send(embed=embed)
-    log_info(f"[LOADHISTORY] Complete! Saved {saved_count} data points")
+    log_info(f"[LOADHISTORY] Complete! Saved {saved_count} daily snapshots")
 
 
 
