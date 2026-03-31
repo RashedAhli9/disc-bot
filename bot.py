@@ -2503,6 +2503,7 @@ async def cleanupempty(ctx):
         await msg.edit(content=f"❌ Error during cleanup: {str(e)}")
 
 
+class GainsDateSelector(discord.ui.View):
     """Interactive selector for gains date range"""
     
     def __init__(self, available_dates, account_id, season_id, start_date, ctx):
