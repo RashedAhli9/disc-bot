@@ -4364,19 +4364,40 @@ async def get_available_dates_autocomplete(
 @app_commands.describe(
     start_date="Start date (YYYY-MM-DD)",
     end_date="End date (YYYY-MM-DD)",
-    user="Member name (optional)"
+    user="Member name or account ID"
 )
 @app_commands.autocomplete(start_date=get_available_dates_autocomplete)
 @app_commands.autocomplete(end_date=get_available_dates_autocomplete)
-async def gain(interaction: discord.Interaction, start_date: str, end_date: str, user: str = None):
+async def gain(interaction: discord.Interaction, start_date: str, end_date: str, user: str):
     """View gains between specific dates with autocomplete"""
     await interaction.response.defer()
     
     try:
-        # Get account ID
-        account_id = await get_account_id_from_input(interaction, user)
+        # Get account ID - for slash commands, user is always provided
+        # Check if it's numeric (account ID)
+        if user.isdigit():
+            account_id = user
+        else:
+            # Check username lookup
+            username_lower = user.lower()
+            account_id = None
+            
+            for username, discord_id in USERNAME_TO_DISCORD_ID.items():
+                if username.lower() == username_lower:
+                    # Found in mapping, get their account ID from role
+                    try:
+                        member = interaction.guild.get_member(discord_id)
+                        if member:
+                            for role in member.roles:
+                                if role.name.isdigit():
+                                    account_id = role.name
+                                    break
+                    except:
+                        pass
+                    break
+        
         if not account_id:
-            return await interaction.followup.send("❌ Could not find account ID.")
+            return await interaction.followup.send(f"❌ Could not find account ID for `{user}`")
         
         # Query dates within range
         conn = sqlite3.connect(DB_PROGRESS)
