@@ -1628,7 +1628,7 @@ async def help_cmd(inter):
     if inter.user.id == OWNER_ID:
         embed.add_field(
             name="⚙️ Admin Commands (Owner Only)",
-            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List database backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data from season start\n`!loadhistory all` - Load ALL Call of Stats data (auto-detects oldest date)\n`!cleanupempty` - Scan and delete empty/zero-data snapshots",
+            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List database backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data from season start\n`!loadhistory all` - Load all Call of Stats data (auto-detects oldest date)\n`!datahistory` - Show oldest/newest data range in database\n`!cleanupempty` - Scan and delete empty/zero-data snapshots",
             inline=False
         )
     
@@ -2440,6 +2440,56 @@ async def seasonhistory(ctx):
         await ctx.send(f"❌ Error: {str(e)}")
 
 
+
+
+@bot.command(name="datahistory")
+async def datahistory(ctx):
+    """
+    [OWNER ONLY]
+    Show the oldest and newest data saved in database.
+    Useful to know the date range for !gains with specific dates.
+    """
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        
+        # Get oldest and newest dates
+        c.execute("SELECT MIN(data_date), MAX(data_date), COUNT(*) FROM season_progress")
+        row = c.fetchone()
+        conn.close()
+        
+        oldest_date, newest_date, total_snapshots = row if row else (None, None, 0)
+        
+        if not oldest_date:
+            return await ctx.send("❌ No data found in database.")
+        
+        # Create result embed
+        embed = discord.Embed(
+            title="📊 Database History",
+            description="Complete data range saved",
+            color=0x3498db
+        )
+        embed.add_field(name="📅 Oldest Data", value=f"`{oldest_date}`", inline=True)
+        embed.add_field(name="📅 Newest Data", value=f"`{newest_date}`", inline=True)
+        embed.add_field(name="📦 Total Snapshots", value=str(total_snapshots), inline=True)
+        embed.add_field(
+            name="📝 Usage Example",
+            value=f"`!gains {oldest_date} {newest_date}`\nor\n`!gains {oldest_date} {newest_date} rekz`",
+            inline=False
+        )
+        embed.set_footer(text="You can use any date within this range with !gains command")
+        
+        await ctx.send(embed=embed)
+        log_info(f"[DATAHISTORY] {oldest_date} → {newest_date} ({total_snapshots} snapshots)")
+        
+    except Exception as e:
+        log_error(f"[DATAHISTORY ERROR] {e}")
+        await ctx.send(f"❌ Error: {str(e)}")
+
+
 @bot.command(name="cleanupempty")
 async def cleanupempty(ctx):
     """
@@ -2517,22 +2567,26 @@ class GainsDateSelector(discord.ui.View):
         self.selected_start = None
         self.selected_end = None
         
+        # Discord limit: dropdowns can only have 25 options max
+        # If more than 25 dates, show the most recent 25
+        limited_dates = available_dates[-25:] if len(available_dates) > 25 else available_dates
+        
         # Populate start date dropdown
         start_select = Select(
-            placeholder="📅 Pick Start Date",
+            placeholder="📅 Pick Start Date (recent 25)",
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=d, value=d) for d in available_dates]
+            options=[discord.SelectOption(label=d, value=d) for d in limited_dates]
         )
         start_select.callback = self.on_start_select
         self.add_item(start_select)
         
         # Populate end date dropdown
         end_select = Select(
-            placeholder="📅 Pick End Date",
+            placeholder="📅 Pick End Date (recent 25)",
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=d, value=d) for d in available_dates]
+            options=[discord.SelectOption(label=d, value=d) for d in limited_dates]
         )
         end_select.callback = self.on_end_select
         self.add_item(end_select)
