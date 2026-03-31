@@ -1634,7 +1634,7 @@ async def help_cmd(inter):
     if inter.user.id == OWNER_ID:
         embed.add_field(
             name="⚙️ Admin Commands (Owner Only)",
-            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List database backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data from season start\n`!loadhistory all` - Load all Call of Stats data (auto-detects oldest date)\n`!datahistory` - Show oldest/newest data range in database\n`!cleanupempty` - Scan and delete empty/zero-data snapshots",
+            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List database backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data from season start\n`!loadhistory all` - Load all Call of Stats data (auto-detects oldest date)\n`!datahistory` - Show oldest/newest data range in database\n`!cleandata` - Scan and delete empty/zero-data snapshots",
             inline=False
         )
     
@@ -2522,7 +2522,7 @@ async def datahistory(ctx):
         await ctx.send(f"❌ Error: {str(e)}")
 
 
-@bot.command(name="cleanupempty")
+@bot.command(name="cleandata")
 async def cleanupempty(ctx):
     """
     [OWNER ONLY]
@@ -4406,7 +4406,7 @@ async def gain(interaction: discord.Interaction, start_date: str, end_date: str,
         embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
         
         # Show date selector
-        view = GainsDateSelector(dates, account_id, season_id, dates[0], interaction)
+        view = GainsDateSelector(dates, account_id, season_id, dates[0], None)
         await interaction.followup.send(embed=embed, view=view)
         
     except Exception as e:
