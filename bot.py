@@ -2599,26 +2599,45 @@ class GainsDateSelector(discord.ui.View):
         self.selected_start = None
         self.selected_end = None
         
-        # Discord limit: dropdowns can only have 25 options max
-        # If more than 25 dates, show the most recent 25
-        limited_dates = available_dates[-25:] if len(available_dates) > 25 else available_dates
+        # Smart date splitting with OVERLAP so any date range is possible
+        total_days = len(available_dates)
+        
+        if total_days <= 25:
+            # Show all dates in both dropdowns (complete overlap)
+            start_dates = available_dates
+            end_dates = available_dates
+            start_label = "📅 Pick Start Date"
+            end_label = "📅 Pick End Date"
+        elif total_days <= 50:
+            # Overlap: top shows oldest 25, bottom shows latest 25
+            # Middle dates appear in both dropdowns
+            start_dates = available_dates[:25]
+            end_dates = available_dates[-25:]
+            start_label = f"📅 Pick Start Date (oldest {len(start_dates)})"
+            end_label = f"📅 Pick End Date (latest {len(end_dates)})"
+        else:
+            # More than 50 days: overlap between top 25 and bottom 25
+            start_dates = available_dates[:25]
+            end_dates = available_dates[-25:]
+            start_label = "📅 Pick Start Date (oldest 25)"
+            end_label = "📅 Pick End Date (latest 25)"
         
         # Populate start date dropdown
         start_select = Select(
-            placeholder="📅 Pick Start Date (recent 25)",
+            placeholder=start_label,
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=d, value=d) for d in limited_dates]
+            options=[discord.SelectOption(label=d, value=d) for d in start_dates]
         )
         start_select.callback = self.on_start_select
         self.add_item(start_select)
         
         # Populate end date dropdown
         end_select = Select(
-            placeholder="📅 Pick End Date (recent 25)",
+            placeholder=end_label,
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=d, value=d) for d in limited_dates]
+            options=[discord.SelectOption(label=d, value=d) for d in end_dates]
         )
         end_select.callback = self.on_end_select
         self.add_item(end_select)
