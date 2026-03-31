@@ -2536,6 +2536,78 @@ async def datahistory(ctx):
         await ctx.send(f"❌ Error: {str(e)}")
 
 
+class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
+    """Modal for cleanup date and mode input"""
+    date_input = discord.ui.TextInput(
+        label="Enter date (YYYY-MM-DD)",
+        placeholder="e.g., 2026-03-13",
+        min_length=10,
+        max_length=10
+    )
+    mode_input = discord.ui.TextInput(
+        label="Delete mode: 'before' or 'after'",
+        placeholder="Type 'before' or 'after'",
+        min_length=5,
+        max_length=6
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        try:
+            date_str = self.date_input.value.strip()
+            mode = self.mode_input.value.strip().lower()
+            
+            # Validate inputs
+            if mode not in ["before", "after"]:
+                return await interaction.followup.send("❌ Mode must be 'before' or 'after'")
+            
+            # Validate date format
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                return await interaction.followup.send("❌ Invalid date format. Use YYYY-MM-DD")
+            
+            conn = sqlite3.connect(DB_PROGRESS)
+            c = conn.cursor()
+            
+            # Delete based on mode
+            if mode == "before":
+                c.execute("DELETE FROM season_progress WHERE data_date < ?", (date_str,))
+            else:  # after
+                c.execute("DELETE FROM season_progress WHERE data_date > ?", (date_str,))
+            
+            deleted_count = c.rowcount
+            conn.commit()
+            conn.close()
+            
+            # Create result embed
+            embed = discord.Embed(
+                title="🗑️ Data Cleanup Complete",
+                description=f"Deleted data {mode} {date_str}",
+                color=0x2ecc71
+            )
+            embed.add_field(name="📅 Cutoff Date", value=date_str, inline=True)
+            embed.add_field(name="🎯 Mode", value=mode.capitalize(), inline=True)
+            embed.add_field(name="🗑️ Rows Deleted", value=str(deleted_count), inline=True)
+            embed.add_field(name="✅ Status", value="Cleanup complete!", inline=False)
+            
+            await interaction.followup.send(embed=embed)
+            log_info(f"[CLEANUP] Deleted {deleted_count} snapshots {mode} {date_str}")
+            
+        except Exception as e:
+            log_error(f"[CLEANUP ERROR] {e}")
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class CleanupView(discord.ui.View):
+    """View with cleanup button"""
+    @discord.ui.button(label="🗑️ Delete Data", style=discord.ButtonStyle.danger)
+    async def cleanup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = CleanupModal()
+        await interaction.response.show_modal(modal)
+
+
 @bot.command(name="cleandata")
 async def cleanupempty(ctx):
     """
@@ -2544,79 +2616,6 @@ async def cleanupempty(ctx):
     """
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
-    
-    class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
-        date_input = discord.ui.TextInput(
-            label="Enter date (YYYY-MM-DD)",
-            placeholder="e.g., 2026-03-13",
-            min_length=10,
-            max_length=10
-        )
-        mode_input = discord.ui.TextInput(
-            label="Delete mode: 'before' or 'after'",
-            placeholder="Type 'before' or 'after'",
-            min_length=5,
-            max_length=6
-        )
-        
-        async def on_submit(self, interaction: discord.Interaction):
-            await interaction.response.defer()
-            
-            try:
-                date_str = self.date_input.value.strip()
-                mode = self.mode_input.value.strip().lower()
-                
-                # Validate inputs
-                if mode not in ["before", "after"]:
-                    return await interaction.followup.send("❌ Mode must be 'before' or 'after'")
-                
-                # Validate date format
-                try:
-                    datetime.strptime(date_str, "%Y-%m-%d")
-                except ValueError:
-                    return await interaction.followup.send("❌ Invalid date format. Use YYYY-MM-DD")
-                
-                conn = sqlite3.connect(DB_PROGRESS)
-                c = conn.cursor()
-                
-                # Delete based on mode
-                if mode == "before":
-                    c.execute("DELETE FROM season_progress WHERE data_date < ?", (date_str,))
-                else:  # after
-                    c.execute("DELETE FROM season_progress WHERE data_date > ?", (date_str,))
-                
-                deleted_count = c.rowcount
-                conn.commit()
-                conn.close()
-                
-                # Create result embed
-                embed = discord.Embed(
-                    title="🗑️ Data Cleanup Complete",
-                    description=f"Deleted data {mode} {date_str}",
-                    color=0x2ecc71
-                )
-                embed.add_field(name="📅 Cutoff Date", value=date_str, inline=True)
-                embed.add_field(name="🎯 Mode", value=mode.capitalize(), inline=True)
-                embed.add_field(name="🗑️ Rows Deleted", value=str(deleted_count), inline=True)
-                embed.add_field(name="✅ Status", value="Cleanup complete!", inline=False)
-                
-                await interaction.followup.send(embed=embed)
-                log_info(f"[CLEANUP] Deleted {deleted_count} snapshots {mode} {date_str}")
-                
-            except Exception as e:
-                log_error(f"[CLEANUP ERROR] {e}")
-                await interaction.followup.send(f"❌ Error: {str(e)}")
-    
-    # Show the modal
-    modal = CleanupModal()
-    await ctx.send("Opening cleanup dialog...", ephemeral=True)
-    # Note: Modals can only be shown in response to interactions, so we'll use a button
-    
-    class CleanupView(discord.ui.View):
-        @discord.ui.button(label="🗑️ Delete Data", style=discord.ButtonStyle.danger)
-        async def cleanup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            modal = CleanupModal()
-            await interaction.response.show_modal(modal)
     
     view = CleanupView()
     await ctx.send("Click the button to delete data before or after a specific date:", view=view)
