@@ -797,6 +797,37 @@ def db_is_update_notified():
     conn.close()
     return row[0] if row else 0
 
+def db_snapshot_exists(season_id, account_id, data_date):
+    """Check if a snapshot already exists for a given date"""
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(
+            "SELECT id FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
+            (season_id, account_id, data_date)
+        )
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        log_error(f"[DB CHECK] Error checking snapshot: {e}")
+        return False
+
+def is_stats_empty(stats):
+    """Check if stats are empty/all zeros"""
+    if not stats:
+        return True
+    
+    # Check if key stat fields are empty or zero
+    key_fields = ["power_gain", "merits", "kills_gain", "lord_name"]
+    
+    for field in key_fields:
+        value = stats.get(field, "")
+        if value and value != "+0" and value != "0" and value != "Unknown":
+            return False
+    
+    return True
+
 def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=None):
     """Save a member's progress for a specific date in a season"""
     try:
@@ -1572,13 +1603,13 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats with gains\n`!oldprogress [user]` - View stats from past seasons\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Side-by-side comparison\n`!gains` - Interactive GUI to view gains over any date range\n`!topmana [season]` - Top mana gathered\n`!topdeaths [season]` - Most deaths\n`!topmerits [season]` - Highest merits\n`!rss [season]` - Top resource spenders\n`!active` - Show active vs inactive members",
+        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members",
         inline=False
     )
     
     embed.add_field(
         name="📚 Historical Data Commands",
-        value="`!seasonhistory` - View all seasons (name, start date → end date. Current season shows today's date)",
+        value="`!seasonhistory` - View all seasons with dates (name, start → end)\n\n**Note:** All commands above support `[season]` parameter to view specific season data!",
         inline=False
     )
     
@@ -1596,12 +1627,12 @@ async def help_cmd(inter):
     
     if inter.user.id == OWNER_ID:
         embed.add_field(
-            name="⚙️ Admin Commands",
-            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data\n`!loadhistory all` - Load ALL Call of Stats data",
+            name="⚙️ Admin Commands (Owner Only)",
+            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List database backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data from season start\n`!loadhistory all` - Load ALL Call of Stats data (auto-detects oldest date)\n`!cleanupempty` - Scan and delete empty/zero-data snapshots",
             inline=False
         )
     
-    embed.set_footer(text="Use / to see all slash commands or ! for text commands")
+    embed.set_footer(text="Use / to see all slash commands | Use ! for text commands")
     await inter.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -2286,6 +2317,7 @@ async def loadhistory(ctx, mode: str = None):
     # Fetch data for each day - fetch EACH DAY INDIVIDUALLY
     current_date = start
     saved_count = 0
+    skipped_count = 0
     day_num = 0
     failed_count = 0
     
@@ -2298,8 +2330,21 @@ async def loadhistory(ctx, mode: str = None):
                 account_id = lord["account_id"]
                 name = lord.get("name", account_id)
                 
+                # CHECK: Does this snapshot already exist?
+                if db_snapshot_exists(season_id, account_id, date_str):
+                    # Already saved, skip it!
+                    skipped_count += 1
+                    continue
+                
                 # Fetch for THIS DAY ONLY (date_str to date_str)
                 stats, actual_date = await fetch_stats_with_fallback(account_id, date_str, date_str)
+                
+                # CHECK: Is the data empty/all zeros? If so, DON'T save it
+                if is_stats_empty(stats):
+                    # Empty data, skip but don't delete anything
+                    log_info(f"[LOADHISTORY] Skipping empty data for {account_id} on {date_str}")
+                    skipped_count += 1
+                    continue
                 
                 if stats:
                     # Save to database with the correct date
@@ -2317,7 +2362,7 @@ async def loadhistory(ctx, mode: str = None):
         if day_num % 5 == 0 or current_date == today:
             progress = (day_num / total_days) * 100
             try:
-                await msg.edit(content=f"⏳ Loading historical data...\n📅 {date_range_text}\nDay {day_num}/{total_days} ({progress:.0f}%)\n✅ Saved {saved_count} snapshots")
+                await msg.edit(content=f"⏳ Loading historical data...\n📅 {date_range_text}\nDay {day_num}/{total_days} ({progress:.0f}%)\n✅ Saved {saved_count} | ⏭️ Skipped {skipped_count}")
             except:
                 pass
         
@@ -2332,13 +2377,14 @@ async def loadhistory(ctx, mode: str = None):
     embed.add_field(name="📅 Date Range", value=date_range_text, inline=False)
     embed.add_field(name="🎯 Load Mode", value="ALL Available Data" if load_mode == "all" else "Season Data", inline=True)
     embed.add_field(name="👥 Members Tracked", value=str(len(lords)), inline=True)
-    embed.add_field(name="📊 Daily Snapshots Saved", value=str(saved_count), inline=True)
+    embed.add_field(name="📊 Snapshots Saved", value=str(saved_count), inline=True)
+    embed.add_field(name="⏭️ Snapshots Skipped", value=str(skipped_count), inline=True)
     embed.add_field(name="📈 Total Days Covered", value=str(total_days), inline=True)
     embed.add_field(name="✅ Status", value="Complete database created!\n\n🎯 You can now use `!gains` with dates from this entire range!", inline=False)
     embed.set_footer(text="!gains is now fully powered with all available historical data")
     
     await ctx.send(embed=embed)
-    log_info(f"[LOADHISTORY] Complete! Mode={load_mode}, Saved {saved_count} daily snapshots from {start.isoformat()} to {today.isoformat()}")
+    log_info(f"[LOADHISTORY] Complete! Mode={load_mode}, Saved {saved_count}, Skipped {skipped_count} from {start.isoformat()} to {today.isoformat()}")
 
 
 @bot.command(name="seasonhistory")
@@ -2393,6 +2439,68 @@ async def seasonhistory(ctx):
         log_error(f"[SEASONHISTORY ERROR] {e}")
         await ctx.send(f"❌ Error: {str(e)}")
 
+
+@bot.command(name="cleanupempty")
+async def cleanupempty(ctx):
+    """
+    [OWNER ONLY]
+    Scan database and delete any snapshots with no lord_name (truly empty data).
+    Useful for removing bad/corrupted snapshots.
+    """
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    
+    msg = await ctx.send("🔍 Scanning database for empty data...")
+    
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        
+        # Get ALL snapshots with lord_name
+        c.execute("SELECT id, season_id, account_id, data_date, lord_name FROM season_progress")
+        rows = c.fetchall()
+        conn.close()
+        
+        deleted_count = 0
+        total_checked = len(rows)
+        
+        log_info(f"[CLEANUP] Scanning {total_checked} snapshots for empty data...")
+        
+        for row_id, season_id, account_id, data_date, lord_name in rows:
+            # Check if lord_name is empty (means no real data)
+            is_empty = not lord_name or lord_name.strip() == ""
+            
+            # If empty, delete it
+            if is_empty:
+                try:
+                    conn = sqlite3.connect(DB_PROGRESS)
+                    c = conn.cursor()
+                    c.execute("DELETE FROM season_progress WHERE id = ?", (row_id,))
+                    conn.commit()
+                    conn.close()
+                    deleted_count += 1
+                    log_info(f"[CLEANUP] Deleted empty snapshot: {account_id} on {data_date}")
+                except Exception as e:
+                    log_error(f"[CLEANUP] Error deleting row {row_id}: {e}")
+        
+        # Create result embed
+        embed = discord.Embed(
+            title="🧹 Database Cleanup Complete",
+            description="Removed snapshots with no lord data",
+            color=0x2ecc71
+        )
+        embed.add_field(name="📊 Total Snapshots Scanned", value=str(total_checked), inline=True)
+        embed.add_field(name="🗑️ Invalid Snapshots Deleted", value=str(deleted_count), inline=True)
+        embed.add_field(name="✅ Valid Snapshots Kept", value=str(total_checked - deleted_count), inline=True)
+        embed.add_field(name="Status", value="Database cleaned! Ready to use.", inline=False)
+        embed.set_footer(text="You can now run !loadhistory all safely")
+        
+        await msg.edit(content="", embed=embed)
+        log_info(f"[CLEANUP] Complete! Deleted {deleted_count}/{total_checked} invalid snapshots")
+        
+    except Exception as e:
+        log_error(f"[CLEANUP ERROR] {e}")
+        await msg.edit(content=f"❌ Error during cleanup: {str(e)}")
 
 
     """Interactive selector for gains date range"""
@@ -2511,45 +2619,99 @@ async def seasonhistory(ctx):
 
 
 @bot.command(name="gains")
-async def gains(ctx, user_input: str = None):
+async def gains(ctx, param1: str = None, param2: str = None):
     """
     Interactive GUI to view gains over any date range.
-    Pick start and end dates to see gains.
     
-    Usage: !gains (your own) or !gains truvix or !gains 16322115
+    Usage: 
+      !gains (ALL available data from database)
+      !gains rekz (ALL data for rekz)
+      !gains sos1 (Season 1 data only)
+      !gains sos1 rekz (Season 1 data for rekz)
+      !gains rekz sos1 (Season 1 data for rekz)
     """
-    season = db_get_current_season()
-    if not season:
-        return await ctx.send("❌ No season active.")
     
-    season_id, season_name, start_date, created_at = season
+    # Try to identify season and user from parameters
+    season = None
+    user_input = None
+    show_all_data = True  # By default, show all data
+    
+    # Check if param1 is a season name
+    if param1:
+        test_season = db_get_season_by_name(param1)
+        if test_season:
+            season = test_season
+            user_input = param2  # If season found, param2 is the user
+            show_all_data = False  # Showing specific season, not all data
+        else:
+            # param1 might be a user, check param2 for season
+            if param2:
+                test_season = db_get_season_by_name(param2)
+                if test_season:
+                    season = test_season
+                    user_input = param1  # param1 is the user
+                    show_all_data = False  # Showing specific season, not all data
+            else:
+                # No season found, just a user specified
+                user_input = param1
+                show_all_data = True  # Show all available data for this user
     
     # Get account ID
     account_id = await get_account_id_from_input(ctx, user_input)
     if not account_id:
         return await ctx.send("❌ Could not find account ID.")
     
-    # Get all available dates for this account from database
+    # Get available dates
     try:
         conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
-        c.execute(
-            "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
-            (season_id, account_id)
-        )
+        
+        if show_all_data:
+            # Show ALL available data for this account across all seasons
+            c.execute(
+                "SELECT DISTINCT data_date FROM season_progress WHERE account_id=? ORDER BY data_date ASC",
+                (account_id,)
+            )
+            season_display = "ALL Available Data"
+            date_range_info = ""
+        else:
+            # Show specific season data only
+            season_id, season_name, start_date, created_at = season
+            c.execute(
+                "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
+                (season_id, account_id)
+            )
+            season_display = season_name
+            date_range_info = f"\n📅 {start_date} → {created_at.split()[0]}"
+        
         dates = [row[0] for row in c.fetchall()]
         conn.close()
         
         if not dates:
-            return await ctx.send("❌ No saved data found for this account this season. Run `!loadhistory` first.")
+            return await ctx.send(f"❌ No saved data found for this account. Run `!loadhistory` first.")
         
         # Show selector
         embed = discord.Embed(
             title="📊 Gains Calculator",
-            description=f"Select start and end dates to see your gains.\n\n**Available dates:** {len(dates)} days of data",
+            description=f"Season: **{season_display}**\nSelect start and end dates to see your gains.\n\n**Available dates:** {len(dates)} days of data{date_range_info}",
             color=0x3498db
         )
         embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
+        
+        # For gains calculation, we need season_id. If showing all data, use first available season for the account
+        if show_all_data:
+            c_season = sqlite3.connect(DB_PROGRESS)
+            c = c_season.cursor()
+            c.execute(
+                "SELECT DISTINCT season_id FROM season_progress WHERE account_id=? ORDER BY season_id DESC LIMIT 1",
+                (account_id,)
+            )
+            row = c.fetchone()
+            c_season.close()
+            season_id = row[0] if row else None
+            start_date = dates[0]  # Use earliest date as reference
+        else:
+            season_id, _, start_date, _ = season
         
         view = GainsDateSelector(dates, account_id, season_id, start_date, ctx)
         await ctx.send(embed=embed, view=view)
