@@ -1569,6 +1569,23 @@ async def on_ready():
     # Pre-load cache from database on startup (so commands work immediately)
     preload_cache_from_db()
 
+    # ✅ DELETE OLD DATA (ONE-TIME CLEANUP ON RESTART)
+    try:
+        season = db_get_current_season()
+        if season:
+            season_id, season_name, start_date, created_at = season
+            conn = sqlite3.connect(DB_PROGRESS)
+            c = conn.cursor()
+            c.execute("DELETE FROM season_progress WHERE data_date < ?", (start_date,))
+            deleted = c.rowcount
+            conn.commit()
+            conn.close()
+            if deleted > 0:
+                log_info(f"🧹 [STARTUP] Deleted {deleted} old snapshots before {start_date}")
+                print(f"✅ Cleaned up {deleted} old data entries")
+    except Exception as e:
+        log_error(f"[STARTUP CLEANUP] Error: {e}")
+
     # ✅ START SELF-PING (CRITICAL)
     if not self_ping.is_running():
         self_ping.start()
@@ -2302,14 +2319,11 @@ async def forcefetch(ctx):
 async def loadhistory(ctx, mode: str = None):
     """
     [OWNER ONLY]
-    Load ALL historical data - DAILY SNAPSHOTS.
+    Load historical data - DAILY SNAPSHOTS.
     
     Usage:
       !loadhistory        (loads from season start to today)
       !loadhistory all    (finds oldest Call of Stats data and loads EVERYTHING to today!)
-    
-    With 'all': Automatically detects oldest available date for each member.
-    Perfect for !gains to work with ALL available historical dates.
     """
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
@@ -2331,14 +2345,14 @@ async def loadhistory(ctx, mode: str = None):
     if mode and mode.lower() == "all":
         msg = await ctx.send(f"🔍 Scanning Call of Stats starting from Dec 1, 2025...\nThis may take 2-3 minutes...")
         
-        # Just start from December 1, 2025
+        # Start from December 1, 2025
         start = date(2025, 12, 1)
         date_range_text = f"{start.isoformat()} → {today.isoformat()} (ALL available data!)"
         load_mode = "all"
         
     else:
         start = datetime.strptime(season_start_date, "%Y-%m-%d").date()
-        date_range_text = f"{season_start_date} → {today.isoformat()} (season data)"
+        date_range_text = f"{start.isoformat()} → {today.isoformat()}"
         load_mode = "season"
         msg = await ctx.send(f"⏳ Loading historical data...\n📅 {date_range_text}")
     
@@ -2526,63 +2540,86 @@ async def datahistory(ctx):
 async def cleanupempty(ctx):
     """
     [OWNER ONLY]
-    Scan database and delete any snapshots with no lord_name (truly empty data).
-    Useful for removing bad/corrupted snapshots.
+    Interactive data cleanup - choose to delete before or after a date.
     """
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
     
-    msg = await ctx.send("🔍 Scanning database for empty data...")
-    
-    try:
-        conn = sqlite3.connect(DB_PROGRESS)
-        c = conn.cursor()
-        
-        # Get ALL snapshots with lord_name
-        c.execute("SELECT id, season_id, account_id, data_date, lord_name FROM season_progress")
-        rows = c.fetchall()
-        conn.close()
-        
-        deleted_count = 0
-        total_checked = len(rows)
-        
-        log_info(f"[CLEANUP] Scanning {total_checked} snapshots for empty data...")
-        
-        for row_id, season_id, account_id, data_date, lord_name in rows:
-            # Check if lord_name is empty (means no real data)
-            is_empty = not lord_name or lord_name.strip() == ""
-            
-            # If empty, delete it
-            if is_empty:
-                try:
-                    conn = sqlite3.connect(DB_PROGRESS)
-                    c = conn.cursor()
-                    c.execute("DELETE FROM season_progress WHERE id = ?", (row_id,))
-                    conn.commit()
-                    conn.close()
-                    deleted_count += 1
-                    log_info(f"[CLEANUP] Deleted empty snapshot: {account_id} on {data_date}")
-                except Exception as e:
-                    log_error(f"[CLEANUP] Error deleting row {row_id}: {e}")
-        
-        # Create result embed
-        embed = discord.Embed(
-            title="🧹 Database Cleanup Complete",
-            description="Removed snapshots with no lord data",
-            color=0x2ecc71
+    class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
+        date_input = discord.ui.TextInput(
+            label="Enter date (YYYY-MM-DD)",
+            placeholder="e.g., 2026-03-13",
+            min_length=10,
+            max_length=10
         )
-        embed.add_field(name="📊 Total Snapshots Scanned", value=str(total_checked), inline=True)
-        embed.add_field(name="🗑️ Invalid Snapshots Deleted", value=str(deleted_count), inline=True)
-        embed.add_field(name="✅ Valid Snapshots Kept", value=str(total_checked - deleted_count), inline=True)
-        embed.add_field(name="Status", value="Database cleaned! Ready to use.", inline=False)
-        embed.set_footer(text="You can now run !loadhistory all safely")
+        mode_input = discord.ui.TextInput(
+            label="Delete mode: 'before' or 'after'",
+            placeholder="Type 'before' or 'after'",
+            min_length=5,
+            max_length=6
+        )
         
-        await msg.edit(content="", embed=embed)
-        log_info(f"[CLEANUP] Complete! Deleted {deleted_count}/{total_checked} invalid snapshots")
-        
-    except Exception as e:
-        log_error(f"[CLEANUP ERROR] {e}")
-        await msg.edit(content=f"❌ Error during cleanup: {str(e)}")
+        async def on_submit(self, interaction: discord.Interaction):
+            await interaction.response.defer()
+            
+            try:
+                date_str = self.date_input.value.strip()
+                mode = self.mode_input.value.strip().lower()
+                
+                # Validate inputs
+                if mode not in ["before", "after"]:
+                    return await interaction.followup.send("❌ Mode must be 'before' or 'after'")
+                
+                # Validate date format
+                try:
+                    datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    return await interaction.followup.send("❌ Invalid date format. Use YYYY-MM-DD")
+                
+                conn = sqlite3.connect(DB_PROGRESS)
+                c = conn.cursor()
+                
+                # Delete based on mode
+                if mode == "before":
+                    c.execute("DELETE FROM season_progress WHERE data_date < ?", (date_str,))
+                else:  # after
+                    c.execute("DELETE FROM season_progress WHERE data_date > ?", (date_str,))
+                
+                deleted_count = c.rowcount
+                conn.commit()
+                conn.close()
+                
+                # Create result embed
+                embed = discord.Embed(
+                    title="🗑️ Data Cleanup Complete",
+                    description=f"Deleted data {mode} {date_str}",
+                    color=0x2ecc71
+                )
+                embed.add_field(name="📅 Cutoff Date", value=date_str, inline=True)
+                embed.add_field(name="🎯 Mode", value=mode.capitalize(), inline=True)
+                embed.add_field(name="🗑️ Rows Deleted", value=str(deleted_count), inline=True)
+                embed.add_field(name="✅ Status", value="Cleanup complete!", inline=False)
+                
+                await interaction.followup.send(embed=embed)
+                log_info(f"[CLEANUP] Deleted {deleted_count} snapshots {mode} {date_str}")
+                
+            except Exception as e:
+                log_error(f"[CLEANUP ERROR] {e}")
+                await interaction.followup.send(f"❌ Error: {str(e)}")
+    
+    # Show the modal
+    modal = CleanupModal()
+    await ctx.send("Opening cleanup dialog...", ephemeral=True)
+    # Note: Modals can only be shown in response to interactions, so we'll use a button
+    
+    class CleanupView(discord.ui.View):
+        @discord.ui.button(label="🗑️ Delete Data", style=discord.ButtonStyle.danger)
+        async def cleanup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            modal = CleanupModal()
+            await interaction.response.show_modal(modal)
+    
+    view = CleanupView()
+    await ctx.send("Click the button to delete data before or after a specific date:", view=view)
 
 
 class GainsDateSelector(discord.ui.View):
@@ -4360,98 +4397,6 @@ async def custom_event_loop():
 # GAIN COMMAND - DATE RANGE WITH AUTOCOMPLETE
 # ============================================================
 
-async def get_available_dates_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-) -> list[app_commands.Choice[str]]:
-    """Autocomplete for available dates in database"""
-    try:
-        conn = sqlite3.connect(DB_PROGRESS)
-        c = conn.cursor()
-        c.execute("SELECT DISTINCT data_date FROM season_progress ORDER BY data_date DESC LIMIT 100")
-        all_dates = [row[0] for row in c.fetchall()]
-        conn.close()
-        
-        # Filter dates that match current input
-        filtered = [d for d in all_dates if d.startswith(current)] if current else all_dates[:25]
-        
-        return [app_commands.Choice(name=d, value=d) for d in filtered[:25]]
-    except:
-        return []
-
-@bot.tree.command(name="gain", description="View gains between specific dates with autocomplete")
-@app_commands.describe(
-    start_date="Start date (YYYY-MM-DD)",
-    end_date="End date (YYYY-MM-DD)",
-    user="Member name or account ID"
-)
-@app_commands.autocomplete(start_date=get_available_dates_autocomplete)
-@app_commands.autocomplete(end_date=get_available_dates_autocomplete)
-async def gain(interaction: discord.Interaction, start_date: str, end_date: str, user: str):
-    """View gains between specific dates with autocomplete"""
-    await interaction.response.defer()
-    
-    try:
-        # Get account ID - for slash commands, user is always provided
-        # Check if it's numeric (account ID)
-        if user.isdigit():
-            account_id = user
-        else:
-            # Check username lookup
-            username_lower = user.lower()
-            account_id = None
-            
-            for username, discord_id in USERNAME_TO_DISCORD_ID.items():
-                if username.lower() == username_lower:
-                    # Found in mapping, get their account ID from role
-                    try:
-                        member = interaction.guild.get_member(discord_id)
-                        if member:
-                            for role in member.roles:
-                                if role.name.isdigit():
-                                    account_id = role.name
-                                    break
-                    except:
-                        pass
-                    break
-        
-        if not account_id:
-            return await interaction.followup.send(f"❌ Could not find account ID for `{user}`")
-        
-        # Query dates within range
-        conn = sqlite3.connect(DB_PROGRESS)
-        c = conn.cursor()
-        c.execute(
-            "SELECT DISTINCT data_date FROM season_progress WHERE account_id=? AND data_date BETWEEN ? AND ? ORDER BY data_date ASC",
-            (account_id, start_date, end_date)
-        )
-        dates = [row[0] for row in c.fetchall()]
-        c.execute("SELECT DISTINCT season_id FROM season_progress WHERE account_id=? ORDER BY season_id DESC LIMIT 1", (account_id,))
-        season_row = c.fetchone()
-        conn.close()
-        
-        if not dates:
-            return await interaction.followup.send(f"❌ No data found between {start_date} and {end_date}")
-        
-        # Get season_id for gains calculation
-        season_id = season_row[0] if season_row else None
-        
-        # Create embed
-        embed = discord.Embed(
-            title="📊 Gains Calculator",
-            description=f"**Date Range:** {start_date} → {end_date}\nSelect start and end dates to see your gains.",
-            color=0x3498db
-        )
-        embed.add_field(name="📅 Available dates", value=f"{len(dates)} days of data", inline=False)
-        embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
-        
-        # Show date selector
-        view = GainsDateSelector(dates, account_id, season_id, dates[0], None)
-        await interaction.followup.send(embed=embed, view=view)
-        
-    except Exception as e:
-        log_error(f"[GAIN] Error: {e}")
-        await interaction.followup.send("❌ Error loading data. Try again later.")
 
 
 # ============================================================
