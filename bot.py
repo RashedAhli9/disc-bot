@@ -307,6 +307,7 @@ CACHE_DURATION = 600  # 10 minutes - for in-memory cache of fetched stats
 
 async def fetch_alliance_tag(account_id):
     """Fetch just the alliance tag from Call of Stats"""
+    import re
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://www.callofstats.com/lord/{account_id}"
