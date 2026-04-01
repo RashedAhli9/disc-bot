@@ -323,6 +323,7 @@ async def fetch_alliance_tag(account_id):
     return ""
 
 
+async def fetch_highest_power(account_id):
     """
     Fetch the HIGHEST POWER from the normal profile page (no date range)
     Uses the authenticated Call of Stats session
@@ -376,36 +377,6 @@ async def fetch_alliance_tag(account_id):
         log_info(f"[HIGHEST POWER ERROR] {account_id}: {e}")
         import traceback
         traceback.print_exc()
-        return None
-    """
-    Fetch the CURRENT highest power for a lord (no date range)
-    Returns the power number as int
-    """
-    import re
-    
-    try:
-        url = f"https://callofstats.com/lord/{account_id}"
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=10)) as session:
-            async with session.get(url, allow_redirects=True) as response:
-                if response.status != 200:
-                    log_info(f"[CURRENT POWER] Failed to fetch {url}: {response.status}")
-                    return None
-                
-                html = await response.text()
-                
-                # Look for <h2>150,000,000</h2> pattern (current highest power)
-                power_match = re.search(r'<h2[^>]*>([0-9,]+)</h2>', html)
-                if power_match:
-                    power_str = power_match.group(1).replace(",", "")
-                    power = int(power_str)
-                    log_info(f"[CURRENT POWER] {account_id} = {power}")
-                    return power
-                
-                log_info(f"[CURRENT POWER] Could not parse power for {account_id}")
-                return None
-    except Exception as e:
-        log_info(f"[CURRENT POWER ERROR] {account_id}: {e}")
         return None
 
 
