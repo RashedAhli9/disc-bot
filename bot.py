@@ -1118,6 +1118,7 @@ def parse_stats(html):
     
     stats = {
         "lord_name": None,
+        "alliance_tag": None,
         "power": None,
         "power_gain": None,
         "merits": None,
@@ -1149,13 +1150,22 @@ def parse_stats(html):
             pattern = f'<span class="subtle">{re.escape(label_name)}</span>\\s*<div class="value">([^<]+)</div>'
             match = re.search(pattern, html)
             if match:
-                return match.group(1).strip()
+                val = match.group(1).strip()
+                log_debug(f"[PARSE DEBUG] Found {label_name}: {val}")
+                return val
+            else:
+                log_debug(f"[PARSE DEBUG] NOT FOUND: {label_name}")
             return None
         
         # Extract lord name - look for <h1 class="higher-value">NAME</h1>
         name_match = re.search(r'<h1 class="higher-value">([^<]+)</h1>', html)
         if name_match:
             stats["lord_name"] = name_match.group(1).strip()
+        
+        # Extract alliance tag - look for <h2 class="higher-value">[TAG]</h2>
+        tag_match = re.search(r'<h2 class="higher-value">([^<]+)</h2>', html)
+        if tag_match:
+            stats["alliance_tag"] = tag_match.group(1).strip()
         
         # Power stats
         stats["power_gain"] = find_stat_value("Highest Power")
@@ -1191,6 +1201,9 @@ def parse_stats(html):
         found_count = len([v for v in stats.values() if v])
         log_info(f"[PARSE] Successfully parsed stats: {found_count} fields found")
         log_info(f"[PARSE] Lord name: {stats['lord_name']}")
+        log_info(f"[PARSE] Alliance tag: {stats['alliance_tag']}")
+        log_info(f"[PARSE] RSS Spent - Gold: {stats['gold_spent']}, Wood: {stats['wood_spent']}, Ore: {stats['ore_spent']}, Mana: {stats['mana_spent']}")
+        log_info(f"[PARSE] T-Kills - T5: {stats['t5_gain']}, T4: {stats['t4_gain']}, T3: {stats['t3_gain']}, T2: {stats['t2_gain']}, T1: {stats['t1_gain']}")
         return stats
     except Exception as e:
         log_info(f"[PARSE STATS] Error: {e}")
@@ -1916,7 +1929,8 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         
         # Build text output - MATCH REFERENCE FORMAT
         lord_name = stats.get("lord_name", "Unknown")
-        output = f"```✅ Progress Report for {lord_name} for season {season_name}\n"
+        alliance_tag = stats.get("alliance_tag", "")
+        output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n"
         output += f"\n"  # Line break before Power
         
         # Power - with highest power + season gain on ONE line
@@ -2205,7 +2219,8 @@ async def oldprogress(ctx, user_input: str = None):
             
             # Build output
             lord_name = stats.get("lord_name", "Unknown")
-            output = f"```✅ Progress Report for {lord_name} for season {season_name}\n\n"
+            alliance_tag = stats.get("alliance_tag", "")
+            output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n\n"
             
             # Power
             if power:
