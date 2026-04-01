@@ -315,6 +315,14 @@ async def fetch_alliance_tag(account_id):
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 200:
                     html = await resp.text()
+                    
+                    # Debug: find where alliance tag might be
+                    if "higher-value" in html:
+                        # Find the section with higher-value
+                        idx = html.find("higher-value")
+                        debug_section = html[max(0, idx-100):min(len(html), idx+300)]
+                        log_info(f"[ALLIANCE TAG DEBUG] HTML around 'higher-value': {debug_section}")
+                    
                     # Extract alliance tag from <h2 class="higher-value">[TAG]</h2>
                     match = re.search(r'<h2 class="higher-value">([^<]+)</h2>', html)
                     if match:
