@@ -305,7 +305,24 @@ _stats_cache = {}
 CACHE_EXPIRY_HOURS = 72  # 3 days
 CACHE_DURATION = 600  # 10 minutes - for in-memory cache of fetched stats
 
-async def fetch_highest_power(account_id):
+async def fetch_alliance_tag(account_id):
+    """Fetch just the alliance tag from Call of Stats"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://www.callofstats.com/lord/{account_id}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    # Extract alliance tag from <h2 class="higher-value">[TAG]</h2>
+                    match = re.search(r'<h2 class="higher-value">([^<]+)</h2>', html)
+                    if match:
+                        return match.group(1).strip()
+    except Exception as e:
+        log_info(f"[ALLIANCE TAG] Error fetching for {account_id}: {e}")
+    
+    return ""
+
+
     """
     Fetch the HIGHEST POWER from the normal profile page (no date range)
     Uses the authenticated Call of Stats session
@@ -1859,6 +1876,9 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         # Get highest power from normal profile (only if not in database)
         highest_power = await fetch_highest_power(account_id)
         
+        # Get alliance tag fresh from Call of Stats
+        alliance_tag = await fetch_alliance_tag(account_id)
+        
         # Get current T-kills from normal profile (only if not in database)
         current_t_kills = await fetch_current_t_kills(account_id)
         
@@ -1929,7 +1949,6 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         
         # Build text output - MATCH REFERENCE FORMAT
         lord_name = stats.get("lord_name", "Unknown")
-        alliance_tag = stats.get("alliance_tag", "")
         output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n"
         output += f"\n"  # Line break before Power
         
@@ -2215,11 +2234,14 @@ async def oldprogress(ctx, user_input: str = None):
             
             # Get highest power and T-kills
             power = await fetch_highest_power(self.account_id)
+            
+            # Get alliance tag fresh from Call of Stats
+            alliance_tag = await fetch_alliance_tag(self.account_id)
+            
             t_kills = await fetch_current_t_kills(self.account_id)
             
             # Build output
             lord_name = stats.get("lord_name", "Unknown")
-            alliance_tag = stats.get("alliance_tag", "")
             output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n\n"
             
             # Power
