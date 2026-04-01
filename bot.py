@@ -308,6 +308,7 @@ CACHE_DURATION = 600  # 10 minutes - for in-memory cache of fetched stats
 async def fetch_alliance_tag(account_id):
     """Fetch just the alliance tag from Call of Stats"""
     import re
+    log_info(f"[ALLIANCE TAG] Fetching for {account_id}...")
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://www.callofstats.com/lord/{account_id}"
@@ -317,10 +318,15 @@ async def fetch_alliance_tag(account_id):
                     # Extract alliance tag from <h2 class="higher-value">[TAG]</h2>
                     match = re.search(r'<h2 class="higher-value">([^<]+)</h2>', html)
                     if match:
-                        return match.group(1).strip()
+                        tag = match.group(1).strip()
+                        log_info(f"[ALLIANCE TAG] Found for {account_id}: {tag}")
+                        return tag
+                    else:
+                        log_info(f"[ALLIANCE TAG] No match found in HTML for {account_id}")
     except Exception as e:
         log_info(f"[ALLIANCE TAG] Error fetching for {account_id}: {e}")
     
+    log_info(f"[ALLIANCE TAG] Returning empty string for {account_id}")
     return ""
 
 
