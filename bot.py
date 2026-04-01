@@ -310,9 +310,12 @@ async def fetch_alliance_tag(account_id):
     import re
     log_info(f"[ALLIANCE TAG] Fetching for {account_id}...")
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://www.callofstats.com/lord/{account_id}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        session = await get_callofstats_session()
+        if not session:
+            log_info(f"[ALLIANCE TAG] No session available")
+            return ""
+        url = f"https://callofstats.com/lord/{account_id}"
+        async with session.get(url, allow_redirects=True) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     
