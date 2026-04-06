@@ -2317,13 +2317,15 @@ async def forcefetch(ctx):
             account_id = lord["account_id"]
             name = lord["name"]
             
-            stats = await fetch_stats_for_account(account_id, start_date, today)
-            if stats:
+            stats, actual_date = await fetch_stats_with_fallback(account_id, start_date, today)
+            if stats and not is_stats_empty(stats):
+                set_cached_stats(account_id, start_date, actual_date, stats)
+                db_save_season_progress(season_id, account_id, stats.get("lord_name", name), stats, actual_date)
                 fetched += 1
-                log_info(f"[FORCEFETCH] ✅ {name} ({account_id})")
+                log_info(f"[FORCEFETCH] ✅ {name} ({account_id}) for {actual_date}")
             else:
                 failed += 1
-                log_info(f"[FORCEFETCH] ❌ {name} ({account_id})")
+                log_info(f"[FORCEFETCH] ❌ {name} ({account_id}) - empty or no data")
         except Exception as e:
             failed += 1
             log_info(f"[FORCEFETCH] ERROR {name}: {e}")
