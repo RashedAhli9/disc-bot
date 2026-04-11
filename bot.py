@@ -310,12 +310,9 @@ async def fetch_alliance_tag(account_id):
     import re
     log_info(f"[ALLIANCE TAG] Fetching for {account_id}...")
     try:
-        session = await get_callofstats_session()
-        if not session:
-            log_info(f"[ALLIANCE TAG] No session available")
-            return ""
-        url = f"https://callofstats.com/lord/{account_id}"
-        async with session.get(url, allow_redirects=True) as resp:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://www.callofstats.com/lord/{account_id}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     
@@ -1506,6 +1503,12 @@ async def check_callofstats_update():
                         # Also mark as notified
                         db_mark_update_notified()
                         log_info(f"[CALLOFSTATS UPDATE] Notification sent to channel {BACKUP_CHANNEL_ID}")
+                        
+                        # Update bot status to show new data date
+                        await bot.change_presence(activity=discord.Activity(
+                            type=discord.ActivityType.watching,
+                            name=f"📊 Last update: {latest_date}"
+                        ))
             except Exception as e:
                 log_info(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
     except Exception as e:
@@ -1571,10 +1574,12 @@ def preload_cache_from_db():
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-    # Set bot status/activity
+    # Set bot status/activity - show last known COS data date
+    last_date = db_get_last_known_data_date()
+    status_text = f"📊 Last update: {last_date}" if last_date else "Abyss events ⚔️"
     activity = discord.Activity(
         type=discord.ActivityType.watching,
-        name="Abyss events ⚔️"
+        name=status_text
     )
     await bot.change_presence(activity=activity)
 
@@ -2317,15 +2322,13 @@ async def forcefetch(ctx):
             account_id = lord["account_id"]
             name = lord["name"]
             
-            stats, actual_date = await fetch_stats_with_fallback(account_id, start_date, today)
-            if stats and not is_stats_empty(stats):
-                set_cached_stats(account_id, start_date, actual_date, stats)
-                db_save_season_progress(season_id, account_id, stats.get("lord_name", name), stats, actual_date)
+            stats = await fetch_stats_for_account(account_id, start_date, today)
+            if stats:
                 fetched += 1
-                log_info(f"[FORCEFETCH] ✅ {name} ({account_id}) for {actual_date}")
+                log_info(f"[FORCEFETCH] ✅ {name} ({account_id})")
             else:
                 failed += 1
-                log_info(f"[FORCEFETCH] ❌ {name} ({account_id}) - empty or no data")
+                log_info(f"[FORCEFETCH] ❌ {name} ({account_id})")
         except Exception as e:
             failed += 1
             log_info(f"[FORCEFETCH] ERROR {name}: {e}")
