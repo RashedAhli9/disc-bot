@@ -1246,6 +1246,7 @@ save_json(ABYSS_CONFIG_FILE, cfg)
 ABYSS_DAYS = cfg["days"]
 ABYSS_HOURS = cfg["hours"]
 REMINDER_HOURS = cfg["reminder_hours"]
+REMINDER_MINS = cfg.get("reminder_mins", 15)
 ROUND2_ENABLED = cfg["round2"]
 
 # ============================================================
@@ -1503,12 +1504,6 @@ async def check_callofstats_update():
                         # Also mark as notified
                         db_mark_update_notified()
                         log_info(f"[CALLOFSTATS UPDATE] Notification sent to channel {BACKUP_CHANNEL_ID}")
-                        
-                        # Update bot status to show new data date
-                        await bot.change_presence(activity=discord.Activity(
-                            type=discord.ActivityType.watching,
-                            name=f"📊 Last update: {latest_date}"
-                        ))
             except Exception as e:
                 log_info(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
     except Exception as e:
@@ -1574,12 +1569,10 @@ def preload_cache_from_db():
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-    # Set bot status/activity - show last known COS data date
-    last_date = db_get_last_known_data_date()
-    status_text = f"📊 Last update: {last_date}" if last_date else "Abyss events ⚔️"
+    # Set bot status/activity
     activity = discord.Activity(
         type=discord.ActivityType.watching,
-        name=status_text
+        name="Abyss events ⚔️"
     )
     await bot.change_presence(activity=activity)
 
@@ -4221,12 +4214,13 @@ async def removeevent(inter: discord.Interaction):
 # ABYSS CONFIG COMMAND
 # ============================================================
 class AbyssConfigView(View):
-    def __init__(self, days, hours, rem, round2):
+    def __init__(self, days, hours, rem, round2, rem_mins):
         super().__init__(timeout=300)
         self.days = days
         self.hours = hours
         self.rem = rem
         self.round2 = round2
+        self.rem_mins = rem_mins
 
         self.day_sel = Select(
             placeholder="Select Abyss Days",
@@ -4276,6 +4270,16 @@ class AbyssConfigView(View):
         self.rem_sel.callback = self.cb_rem
         self.add_item(self.rem_sel)
 
+        # Reminder minutes buttons
+        for mins in [5, 10, 15, 20]:
+            btn = Button(
+                label=f"{mins}m",
+                style=discord.ButtonStyle.primary if rem_mins == mins else discord.ButtonStyle.secondary,
+                custom_id=f"rem_mins_{mins}"
+            )
+            btn.callback = lambda inter, m=mins: self.set_reminder_mins(inter, m)
+            self.add_item(btn)
+
         self.round_btn = Button(
             label=f"Round 2: {'ON' if round2 else 'OFF'}",
             style=discord.ButtonStyle.success if round2 else discord.ButtonStyle.danger
@@ -4307,6 +4311,14 @@ class AbyssConfigView(View):
         save_json(ABYSS_CONFIG_FILE, cfg)
         await interaction.response.send_message("Reminder hours updated ✔", ephemeral=True)
 
+    async def set_reminder_mins(self, interaction, mins):
+        global REMINDER_MINS
+        self.rem_mins = mins
+        REMINDER_MINS = mins
+        cfg["reminder_mins"] = mins
+        save_json(ABYSS_CONFIG_FILE, cfg)
+        await interaction.response.send_message(f"Reminder set to {mins} minutes ✔", ephemeral=True)
+
     async def toggle_round2(self, interaction):
         global ROUND2_ENABLED
         self.round2 = not self.round2
@@ -4329,6 +4341,7 @@ async def abyssconfig(inter):
     emb.add_field(name="Days", value=pretty_days(ABYSS_DAYS), inline=False)
     emb.add_field(name="Hours", value=pretty_hours(ABYSS_HOURS), inline=False)
     emb.add_field(name="Reminder Hours", value=pretty_hours(REMINDER_HOURS), inline=False)
+    emb.add_field(name="Reminder Lead Time", value=f"{REMINDER_MINS} minutes", inline=False)
     emb.add_field(
         name="Round 2",
         value="Enabled" if ROUND2_ENABLED else "Disabled",
@@ -4339,7 +4352,8 @@ async def abyssconfig(inter):
         ABYSS_DAYS,
         ABYSS_HOURS,
         REMINDER_HOURS,
-        ROUND2_ENABLED
+        ROUND2_ENABLED,
+        REMINDER_MINS
     )
 
     await inter.response.send_message(
@@ -4366,7 +4380,7 @@ async def abyss_reminder_loop():
         if now.hour in REMINDER_HOURS and now.minute == 0:
             embed = discord.Embed(
                 title="🕒 Abyss Reminder",
-                description="Abyss starts in **15 minutes**!",
+                description=f"Abyss starts in **{REMINDER_MINS} minutes**!",
                 color=0xE74C3C
             )
             ch = bot.get_channel(channel_id)
@@ -4380,7 +4394,7 @@ async def abyss_reminder_loop():
         if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
             embed = discord.Embed(
                 title="🕒 Abyss Reminder",
-                description="Round 2 starts in **15 minutes**!",
+                description=f"Round 2 starts in **{REMINDER_MINS} minutes**!",
                 color=0xF1C40F
             )
             ch = bot.get_channel(channel_id)
