@@ -42,7 +42,7 @@ import asyncio
 import aiohttp
 
 # ============================================================
-# LOGGING SYSTEM
+# LOGGING SYSTE
 # ============================================================
 
 import logging
