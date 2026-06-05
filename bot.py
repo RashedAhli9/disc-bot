@@ -25,7 +25,7 @@ def run_flask():
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ============================================================
-# DISCORD + SYSTEM IMPORT
+# DISCORD + SYSTEM IMPORTs
 # ============================================================
 
 import discord
