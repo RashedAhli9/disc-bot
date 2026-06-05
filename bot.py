@@ -25,7 +25,7 @@ def run_flask():
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ============================================================
-# DISCORD + SYSTEM IMPORTs
+# DISCORD + SYSTEM IMPORTS
 # ============================================================
 
 import discord
@@ -760,6 +760,14 @@ def count_season_data_dates(season_id, account_id):
 
 
 
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_get_current_season():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at DESC LIMIT 1")
