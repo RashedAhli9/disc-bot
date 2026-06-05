@@ -1850,6 +1850,152 @@ async def newseason(inter: discord.Interaction):
     await inter.response.send_modal(NewSeasonModal())
 
 
+# ============================================================
+# EDIT SEASON COMMAND
+# ============================================================
+
+@bot.tree.command(name="editseason", description="Edit an existing season's name or start date")
+@app_commands.default_permissions(administrator=True)
+async def editseason(inter: discord.Interaction):
+    if not inter.user.guild_permissions.administrator and inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Admin only.", ephemeral=True)
+
+    seasons = db_get_all_seasons()
+    if not seasons:
+        return await inter.response.send_message("❌ No seasons found.", ephemeral=True)
+
+    options = [
+        discord.SelectOption(
+            label=f"{s[1]} (starts {s[2]})",
+            value=str(s[0])
+        )
+        for s in seasons
+    ]
+
+    select = Select(placeholder="Select a season to edit", options=options)
+
+    async def select_cb(i: discord.Interaction):
+        season_id = int(select.values[0])
+        season = next((s for s in seasons if s[0] == season_id), None)
+        if not season:
+            return await i.response.send_message("❌ Season not found.", ephemeral=True)
+
+        class EditSeasonModal(Modal, title="✏️ Edit Season"):
+            season_name = TextInput(
+                label="Season Name",
+                default=season[1]
+            )
+            start_date = TextInput(
+                label="Start Date (YYYY-MM-DD)",
+                default=season[2]
+            )
+
+            async def on_submit(self, modal_inter: discord.Interaction):
+                await modal_inter.response.defer(ephemeral=True)
+                try:
+                    datetime.strptime(self.start_date.value.strip(), "%Y-%m-%d")
+
+                    conn = sqlite3.connect(DB)
+                    c = conn.cursor()
+                    c.execute(
+                        "UPDATE seasons SET season_name=?, start_date=? WHERE id=?",
+                        (self.season_name.value.strip(), self.start_date.value.strip(), season_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                    silent_backup()
+
+                    await modal_inter.followup.send(
+                        f"✅ Season updated!\n**Name:** {self.season_name.value}\n**Start Date:** {self.start_date.value}",
+                        ephemeral=True
+                    )
+                except ValueError:
+                    await modal_inter.followup.send("❌ Invalid date format. Use YYYY-MM-DD", ephemeral=True)
+                except Exception as e:
+                    await modal_inter.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+        await i.response.send_modal(EditSeasonModal())
+
+    select.callback = select_cb
+    view = View()
+    view.add_item(select)
+    await inter.response.send_message("Select a season to edit:", view=view, ephemeral=True)
+
+
+# ============================================================
+# DELETE SEASON COMMAND
+# ============================================================
+
+@bot.tree.command(name="deleteseason", description="Delete a season and all its progress data")
+@app_commands.default_permissions(administrator=True)
+async def deleteseason(inter: discord.Interaction):
+    if not inter.user.guild_permissions.administrator and inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Admin only.", ephemeral=True)
+
+    seasons = db_get_all_seasons()
+    if not seasons:
+        return await inter.response.send_message("❌ No seasons found.", ephemeral=True)
+
+    options = [
+        discord.SelectOption(
+            label=f"{s[1]} (starts {s[2]})",
+            value=str(s[0])
+        )
+        for s in seasons
+    ]
+
+    select = Select(placeholder="Select a season to DELETE", options=options)
+
+    async def select_cb(i: discord.Interaction):
+        season_id = int(select.values[0])
+        season = next((s for s in seasons if s[0] == season_id), None)
+        if not season:
+            return await i.response.send_message("❌ Season not found.", ephemeral=True)
+
+        # Confirm button
+        confirm_btn = Button(label=f"⚠️ Confirm Delete '{season[1]}'", style=discord.ButtonStyle.danger)
+
+        async def confirm_cb(confirm_inter: discord.Interaction):
+            try:
+                # Delete season progress data
+                conn_p = sqlite3.connect(DB_PROGRESS)
+                c_p = conn_p.cursor()
+                c_p.execute("DELETE FROM season_progress WHERE season_id=?", (season_id,))
+                deleted_rows = c_p.rowcount
+                conn_p.commit()
+                conn_p.close()
+
+                # Delete season record
+                conn = sqlite3.connect(DB)
+                c = conn.cursor()
+                c.execute("DELETE FROM seasons WHERE id=?", (season_id,))
+                conn.commit()
+                conn.close()
+                silent_backup()
+
+                await confirm_inter.response.send_message(
+                    f"🗑️ Deleted season **{season[1]}** and {deleted_rows} progress snapshots.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                await confirm_inter.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
+        confirm_btn.callback = confirm_cb
+        confirm_view = View()
+        confirm_view.add_item(confirm_btn)
+
+        await i.response.send_message(
+            f"⚠️ Are you sure you want to delete **{season[1]}** (starts {season[2]})?\nThis will also delete all progress data for this season.",
+            view=confirm_view,
+            ephemeral=True
+        )
+
+    select.callback = select_cb
+    view = View()
+    view.add_item(select)
+    await inter.response.send_message("Select a season to delete:", view=view, ephemeral=True)
+
+
 @bot.command(name="progress")
 async def progress(ctx, user_input: str = None, season_input: str = None):
     """
