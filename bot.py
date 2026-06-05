@@ -42,7 +42,7 @@ import asyncio
 import aiohttp
 
 # ============================================================
-# LOGGING SYSTE
+# LOGGING SYSTEM
 # ============================================================
 
 import logging
@@ -631,6 +631,13 @@ def init_db_progress():
             wood_gathered TEXT,
             ore_gathered TEXT,
             mana_gathered TEXT,
+            infantry_merits TEXT,
+            cavalry_merits TEXT,
+            mage_merits TEXT,
+            marksman_merits TEXT,
+            other_merits TEXT,
+            t45_healed TEXT,
+            t45_dead TEXT,
             created_at TEXT NOT NULL,
             UNIQUE(season_id, account_id, data_date)
         );
@@ -644,6 +651,31 @@ def migrate_db(conn):
         pass  # No migrations needed - using separate databases now
     except Exception as e:
         log_error(f"[DB MIGRATION] Error: {e}")
+
+def migrate_db_progress():
+    """Add new columns to season_progress if they don't exist yet (safe to run every boot)"""
+    new_columns = [
+        ("infantry_merits", "TEXT"),
+        ("cavalry_merits", "TEXT"),
+        ("mage_merits", "TEXT"),
+        ("marksman_merits", "TEXT"),
+        ("other_merits", "TEXT"),
+        ("t45_healed", "TEXT"),
+        ("t45_dead", "TEXT"),
+    ]
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(season_progress)")
+        existing = {row[1] for row in c.fetchall()}
+        for col_name, col_type in new_columns:
+            if col_name not in existing:
+                c.execute(f"ALTER TABLE season_progress ADD COLUMN {col_name} {col_type}")
+                log_info(f"[DB MIGRATE] Added column: {col_name}")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_error(f"[DB MIGRATE PROGRESS] Error: {e}")
 
 def db_add_event(name, dt, reminder):
     conn = sqlite3.connect(DB)
@@ -692,6 +724,7 @@ def db_delete_event(event_id):
 
 init_db()
 init_db_progress()
+migrate_db_progress()
 
 # ============================================================
 # SEASON TRACKER DATABASE FUNCTIONS
@@ -709,7 +742,24 @@ def db_add_season(season_name, start_date):
     conn.close()
     silent_backup()
 
-def db_get_current_season():
+def count_season_data_dates(season_id, account_id):
+    """Count unique dates with data for account in season"""
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(
+            "SELECT COUNT(DISTINCT data_date) FROM season_progress WHERE season_id = ? AND account_id = ?",
+            (season_id, account_id)
+        )
+        count = c.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        log_info(f"[COUNT DATA DATES] Error: {e}")
+        return 0
+
+
+
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at DESC LIMIT 1")
@@ -847,8 +897,10 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
                 (season_id, account_id, data_date, lord_name, power_gain, merits, kills_gain, deads_gain, healed_gain,
                  t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
                  gold_spent, wood_spent, ore_spent, mana_spent,
-                 gold_gathered, wood_gathered, ore_gathered, mana_gathered, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 gold_gathered, wood_gathered, ore_gathered, mana_gathered,
+                 infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
+                 t45_healed, t45_dead, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 season_id, account_id, data_date, lord_name,
                 stats.get("power_gain"), stats.get("merits"), stats.get("kills_gain"), 
@@ -858,7 +910,10 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
                 stats.get("gold_spent"), stats.get("wood_spent"), stats.get("ore_spent"), 
                 stats.get("mana_spent"),
                 stats.get("gold_gathered"), stats.get("wood_gathered"), stats.get("ore_gathered"), 
-                stats.get("mana_gathered"), now
+                stats.get("mana_gathered"),
+                stats.get("infantry_merits"), stats.get("cavalry_merits"), stats.get("mage_merits"),
+                stats.get("marksman_merits"), stats.get("other_merits"),
+                stats.get("t45_healed"), stats.get("t45_dead"), now
             ))
             conn.commit()
             log_info(f"[DB SAVE] {lord_name} ({account_id}) for {data_date}")
@@ -882,7 +937,9 @@ def db_get_season_progress(season_id, account_id, data_date=None):
                 SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
                        t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
                        gold_spent, wood_spent, ore_spent, mana_spent,
-                       gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+                       gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date,
+                       infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
+                       t45_healed, t45_dead
                 FROM season_progress
                 WHERE season_id=? AND account_id=? AND data_date=?
             """, (season_id, account_id, data_date))
@@ -913,7 +970,14 @@ def db_get_season_progress(season_id, account_id, data_date=None):
                 "ore_gathered": row[16],
                 "mana_gathered": row[17],
                 "lord_name": row[18],
-                "data_date": row[19]
+                "data_date": row[19],
+                "infantry_merits": row[20],
+                "cavalry_merits": row[21],
+                "mage_merits": row[22],
+                "marksman_merits": row[23],
+                "other_merits": row[24],
+                "t45_healed": row[25],
+                "t45_dead": row[26]
             }
             log_info(f"[DB HIT] {row[18]} ({account_id}) for {data_date}")
             return stats
@@ -933,7 +997,9 @@ def db_get_latest_season_progress(season_id, account_id):
                 SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
                        t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
                        gold_spent, wood_spent, ore_spent, mana_spent,
-                       gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date
+                       gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date,
+                       infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
+                       t45_healed, t45_dead
                 FROM season_progress
                 WHERE season_id=? AND account_id=?
                 ORDER BY data_date DESC
@@ -965,7 +1031,14 @@ def db_get_latest_season_progress(season_id, account_id):
                 "ore_gathered": row[16],
                 "mana_gathered": row[17],
                 "lord_name": row[18],
-                "data_date": row[19]
+                "data_date": row[19],
+                "infantry_merits": row[20],
+                "cavalry_merits": row[21],
+                "mage_merits": row[22],
+                "marksman_merits": row[23],
+                "other_merits": row[24],
+                "t45_healed": row[25],
+                "t45_dead": row[26]
             }
             return stats
         finally:
@@ -1143,7 +1216,14 @@ def parse_stats(html):
         "wood_gathered": None,
         "ore_gathered": None,
         "mana_gathered": None,
-        "rss_gathered_total": None
+        "rss_gathered_total": None,
+        "infantry_merits": None,
+        "cavalry_merits": None,
+        "mage_merits": None,
+        "marksman_merits": None,
+        "other_merits": None,
+        "t45_healed": None,
+        "t45_dead": None
     }
     
     try:
@@ -1200,6 +1280,15 @@ def parse_stats(html):
         stats["wood_spent"] = find_stat_value("Wood Spent")
         stats["ore_spent"] = find_stat_value("Ore Spent")
         stats["mana_spent"] = find_stat_value("Mana Spent")
+        
+        # Advanced War Stats
+        stats["infantry_merits"] = find_stat_value("Infantry Merits")
+        stats["cavalry_merits"] = find_stat_value("Cavalry Merits")
+        stats["mage_merits"] = find_stat_value("Mage Merits")
+        stats["marksman_merits"] = find_stat_value("Marksman Merits")
+        stats["other_merits"] = find_stat_value("Other Merits")
+        stats["t45_healed"] = find_stat_value("T4/T5 Units Healed")
+        stats["t45_dead"] = find_stat_value("T4/T5 Units Dead")
         
         found_count = len([v for v in stats.values() if v])
         log_info(f"[PARSE] Successfully parsed stats: {found_count} fields found")
@@ -1860,6 +1949,13 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
         
+        # Check how many days of data exist for this season
+        data_date_count = count_season_data_dates(season_id, account_id)
+        is_single_day = data_date_count == 1
+        
+        if is_single_day:
+            log_info(f"[PROGRESS] Only 1 day of data for {account_id} in season {season_id}")
+        
         # Get highest power from normal profile (only if not in database)
         highest_power = await fetch_highest_power(account_id)
         
@@ -1937,6 +2033,10 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         # Build text output - MATCH REFERENCE FORMAT
         lord_name = stats.get("lord_name", "Unknown")
         output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n"
+        
+        if is_single_day:
+            output += f"⚠️  Only 1 day of data available - showing absolute values\n"
+        
         output += f"\n"  # Line break before Power
         
         # Power - with highest power + season gain on ONE line
@@ -1966,79 +2066,29 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if stats.get("deads_gain"):
             output += f"💀 Deaths {stats['deads_gain']}{deads_rank_str}\n"
         
-        # Healed - one line
+        # Healed - combine healed_gain + t45_healed
         if stats.get("healed_gain"):
-            output += f"❤️ Healed {stats['healed_gain']}{healed_rank_str}\n"
+            healed_display = stats['healed_gain']
+            if stats.get("t45_healed"):
+                healed_display += f" (T4/T5: {stats['t45_healed']})"
+            output += f"❤️ Healed {healed_display}{healed_rank_str}\n"
         
         output += f"\n"
         
-        # Kill Breakdown - show current total + season gain
-        output += f"⚔️ Kill Breakdown\n"
-        
-        # Calculate total kills (current + gains)
-        total_t_current = 0
-        total_t_gain = 0
-        
-        if stats.get("t5_gain"):
-            t5_current = current_t_kills.get("t5")
-            t5_gain_clean = stats['t5_gain'].replace("+", "").replace(",", "")
-            t5_gain_val = abs(int(t5_gain_clean)) if t5_gain_clean.lstrip("-").isdigit() else 0
-            if t5_current:
-                output += f"T5: {t5_current:,} (+{t5_gain_val:,})\n"
-                total_t_current += t5_current
-            else:
-                output += f"T5: +{t5_gain_val:,}\n"
-            total_t_gain += t5_gain_val
-        
-        if stats.get("t4_gain"):
-            t4_current = current_t_kills.get("t4")
-            t4_gain_clean = stats['t4_gain'].replace("+", "").replace(",", "")
-            t4_gain_val = abs(int(t4_gain_clean)) if t4_gain_clean.lstrip("-").isdigit() else 0
-            if t4_current:
-                output += f"T4: {t4_current:,} (+{t4_gain_val:,})\n"
-                total_t_current += t4_current
-            else:
-                output += f"T4: +{t4_gain_val:,}\n"
-            total_t_gain += t4_gain_val
-        
-        if stats.get("t3_gain"):
-            t3_current = current_t_kills.get("t3")
-            t3_gain_clean = stats['t3_gain'].replace("+", "").replace(",", "")
-            t3_gain_val = abs(int(t3_gain_clean)) if t3_gain_clean.lstrip("-").isdigit() else 0
-            if t3_current:
-                output += f"T3: {t3_current:,} (+{t3_gain_val:,})\n"
-                total_t_current += t3_current
-            else:
-                output += f"T3: +{t3_gain_val:,}\n"
-            total_t_gain += t3_gain_val
-        
-        if stats.get("t2_gain"):
-            t2_current = current_t_kills.get("t2")
-            t2_gain_clean = stats['t2_gain'].replace("+", "").replace(",", "")
-            t2_gain_val = abs(int(t2_gain_clean)) if t2_gain_clean.lstrip("-").isdigit() else 0
-            if t2_current:
-                output += f"T2: {t2_current:,} (+{t2_gain_val:,})\n"
-                total_t_current += t2_current
-            else:
-                output += f"T2: +{t2_gain_val:,}\n"
-            total_t_gain += t2_gain_val
-        
-        if stats.get("t1_gain"):
-            t1_current = current_t_kills.get("t1")
-            t1_gain_clean = stats['t1_gain'].replace("+", "").replace(",", "")
-            t1_gain_val = abs(int(t1_gain_clean)) if t1_gain_clean.lstrip("-").isdigit() else 0
-            if t1_current:
-                output += f"T1: {t1_current:,} (+{t1_gain_val:,})\n"
-                total_t_current += t1_current
-            else:
-                output += f"T1: +{t1_gain_val:,}\n"
-            total_t_gain += t1_gain_val
-        
-        # Add total T-kills
-        if total_t_current > 0:
-            output += f"Total: {total_t_current:,} (+{total_t_gain:,})\n"
-        elif total_t_gain > 0:
-            output += f"Total: +{total_t_gain:,}\n"
+        # Merit Breakdown (replaces Kill Breakdown)
+        output += f"🏅 Merit Breakdown\n"
+        if stats.get("infantry_merits"):
+            output += f"⚔️ Infantry: {stats['infantry_merits']}\n"
+        if stats.get("cavalry_merits"):
+            output += f"🐴 Cavalry: {stats['cavalry_merits']}\n"
+        if stats.get("mage_merits"):
+            output += f"🔮 Mage: {stats['mage_merits']}\n"
+        if stats.get("marksman_merits"):
+            output += f"🏹 Marksman: {stats['marksman_merits']}\n"
+        if stats.get("other_merits"):
+            output += f"🌀 Other: {stats['other_merits']}\n"
+        if stats.get("t45_dead"):
+            output += f"💀 T4/T5 Dead: {stats['t45_dead']}\n"
         
         output += f"\n"
         
@@ -4376,32 +4426,38 @@ async def abyss_reminder_loop():
         if now.weekday() not in ABYSS_DAYS:
             return
 
-        # Abyss start reminder
-        if now.hour in REMINDER_HOURS and now.minute == 0:
-            embed = discord.Embed(
-                title="🕒 Abyss Reminder",
-                description=f"Abyss starts in **{REMINDER_MINS} minutes**!",
-                color=0xE74C3C
-            )
-            ch = bot.get_channel(channel_id)
-            if ch and ch.guild:
-                await dm_abyss_role(ch.guild, embed)
-            else:
-                log_info("[ABYSS REMINDER] Warning: Channel not found or no guild")
+        # Calculate when to send: 15 minutes before actual event start
+        # Events actually start at REMINDER_HOURS + 15 minutes
+        # So send at REMINDER_HOURS + (15 - REMINDER_MINS)
+        send_minute = 15 - REMINDER_MINS
 
+        # Check if it's time to send Abyss reminder
+        for event_hour in REMINDER_HOURS:
+            
+            if now.hour == event_hour and now.minute == send_minute:
+                embed = discord.Embed(
+                    title="🕒 Abyss Reminder",
+                    description=f"Abyss starts in **{REMINDER_MINS} minutes**!",
+                    color=0xE74C3C
+                )
+                ch = bot.get_channel(channel_id)
+                if ch and ch.guild:
+                    await dm_abyss_role(ch.guild, embed)
+                else:
+                    log_info("[ABYSS REMINDER] Warning: Channel not found or no guild")
 
-        # Round 2 reminder
-        if ROUND2_ENABLED and now.hour in REMINDER_HOURS and now.minute == 30:
-            embed = discord.Embed(
-                title="🕒 Abyss Reminder",
-                description=f"Round 2 starts in **{REMINDER_MINS} minutes**!",
-                color=0xF1C40F
-            )
-            ch = bot.get_channel(channel_id)
-            if ch and ch.guild:
-                await dm_abyss_role(ch.guild, embed)
-            else:
-                log_info("[ABYSS REMINDER] Warning: Channel not found or no guild")
+            # Round 2 reminder (same timing)
+            if ROUND2_ENABLED and now.hour == event_hour and now.minute == send_minute:
+                embed = discord.Embed(
+                    title="🕒 Abyss Reminder",
+                    description=f"Round 2 starts in **{REMINDER_MINS} minutes**!",
+                    color=0xF1C40F
+                )
+                ch = bot.get_channel(channel_id)
+                if ch and ch.guild:
+                    await dm_abyss_role(ch.guild, embed)
+                else:
+                    log_info("[ABYSS REMINDER] Warning: Channel not found or no guild")
     except Exception as e:
         log_info(f"[ABYSS REMINDER ERROR] {type(e).__name__}: {e}")
 
