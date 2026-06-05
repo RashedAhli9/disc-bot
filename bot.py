@@ -504,14 +504,25 @@ async def fetch_stats_with_fallback(account_id, start_date, end_date):
     """
     Fetch stats and automatically fallback to earlier dates if data is empty.
     Returns (stats, actual_end_date_used)
+    Never falls back before start_date.
     """
     from datetime import timedelta
     
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
     
-    # Try up to FALLBACK_DAYS back
+    last_stats = None
+
+    # Try up to FALLBACK_DAYS back, but never below start_date
     for days_back in range(FALLBACK_DAYS):
-        current_end = (end_dt - timedelta(days=days_back)).isoformat()
+        current_end_dt = end_dt - timedelta(days=days_back)
+        
+        # Don't go below season start
+        if current_end_dt < start_dt:
+            log_info(f"[FALLBACK] Reached season start, stopping")
+            break
+        
+        current_end = current_end_dt.isoformat()
         log_info(f"[FALLBACK] Trying date: {current_end}")
         
         stats = await fetch_stats_for_account(account_id, start_date, current_end, skip_cache=True)
@@ -520,14 +531,14 @@ async def fetch_stats_with_fallback(account_id, start_date, end_date):
             log_info(f"[FALLBACK] No stats returned for {current_end}, trying earlier")
             continue
         
+        last_stats = stats
+        
         # Check if any data exists (not all zeros/None)
         has_data = False
-        for key in ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain", 
-                    "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
-                    "gold_spent", "wood_spent", "ore_spent", "mana_spent",
+        for key in ["merits", "kills_gain", "deads_gain", "healed_gain",
                     "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
             val = stats.get(key)
-            if val and val != "+0" and val != "0":
+            if val and val not in ("+0", "0", ""):
                 has_data = True
                 break
         
@@ -537,8 +548,8 @@ async def fetch_stats_with_fallback(account_id, start_date, end_date):
         else:
             log_info(f"[FALLBACK] All zeros for {current_end}, trying earlier")
     
-    # Return the original stats even if empty (for last resort)
-    return stats, end_date
+    # Return last fetched stats even if empty (last resort)
+    return last_stats, end_date
 
 
 def get_cached_stats(account_id, start_date, end_date):
@@ -1183,8 +1194,15 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
                 log_info(f"[CALLOFSTATS] Fetch successful ({len(html)} bytes)")
                 stats = parse_stats(html)
                 
-                # Cache the result (use consistent dict format)
-                _stats_cache[cache_key] = {"timestamp": datetime.utcnow(), "stats": stats}
+                # Only cache if result has real data (don't cache all-zero responses)
+                if stats and not skip_cache:
+                    has_real_data = any(
+                        stats.get(k) and stats.get(k) not in ("+0", "0", "")
+                        for k in ["merits", "kills_gain", "healed_gain", "mana_gathered"]
+                    )
+                    if has_real_data:
+                        _stats_cache[cache_key] = {"timestamp": datetime.utcnow(), "stats": stats}
+                
                 return stats
             else:
                 log_info(f"[CALLOFSTATS] Fetch failed: {resp.status}")
@@ -2230,19 +2248,29 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         output += f"\n"
         
         # Merit Breakdown (replaces Kill Breakdown)
+        # Helper: format merit value as positive number with commas
+        def fmt_merit(val):
+            if not val:
+                return None
+            try:
+                n = abs(int(str(val).replace(",", "").replace("+", "").replace("-", "")))
+                return f"{n:,}"
+            except:
+                return val
+
         output += f"🏅 Merit Breakdown\n"
-        if stats.get("infantry_merits"):
-            output += f"⚔️ Infantry: {stats['infantry_merits']}\n"
-        if stats.get("cavalry_merits"):
-            output += f"🐴 Cavalry: {stats['cavalry_merits']}\n"
-        if stats.get("mage_merits"):
-            output += f"🔮 Mage: {stats['mage_merits']}\n"
-        if stats.get("marksman_merits"):
-            output += f"🏹 Marksman: {stats['marksman_merits']}\n"
-        if stats.get("other_merits"):
-            output += f"🌀 Other: {stats['other_merits']}\n"
-        if stats.get("t45_dead"):
-            output += f"💀 T4/T5 Dead: {stats['t45_dead']}\n"
+        if fmt_merit(stats.get("infantry_merits")):
+            output += f"⚔️ Infantry: {fmt_merit(stats['infantry_merits'])}\n"
+        if fmt_merit(stats.get("cavalry_merits")):
+            output += f"🐴 Cavalry: {fmt_merit(stats['cavalry_merits'])}\n"
+        if fmt_merit(stats.get("mage_merits")):
+            output += f"🔮 Mage: {fmt_merit(stats['mage_merits'])}\n"
+        if fmt_merit(stats.get("marksman_merits")):
+            output += f"🏹 Marksman: {fmt_merit(stats['marksman_merits'])}\n"
+        if fmt_merit(stats.get("other_merits")):
+            output += f"🌀 Other: {fmt_merit(stats['other_merits'])}\n"
+        if fmt_merit(stats.get("t45_dead")):
+            output += f"💀 T4/T5 Dead: {fmt_merit(stats['t45_dead'])}\n"
         
         output += f"\n"
         
