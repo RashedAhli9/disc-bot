@@ -1,5 +1,5 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
@@ -4709,7 +4709,6 @@ async def on_message(message):
             await cmd_servertop(message, n)
         return
 
-    # Process all other bot commands normally
     await bot.process_commands(message)
 
 
@@ -4726,18 +4725,15 @@ async def cmd_servertop(message, n):
         "&compare_mode=false"
     )
 
-    # Use the existing authenticated session so it works like all other fetches
+    # Use a fresh independent session — avoids timeout from shared session under load
     try:
-        session = await get_callofstats_session()
-        if not session:
-            await message.channel.send("❌ Could not connect to Call of Stats. Check bot credentials.")
-            return
-
-        async with session.get(url, allow_redirects=True) as resp:
-            if resp.status != 200:
-                await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
-                return
-            html = await resp.text()
+        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
+                    return
+                html = await resp.text()
     except asyncio.TimeoutError:
         await message.channel.send("❌ Request timed out. Try again.")
         return
@@ -4745,8 +4741,7 @@ async def cmd_servertop(message, n):
         await message.channel.send(f"❌ Error fetching data: {e}")
         return
 
-    # Parse the leaderboard table
-    # Rows look like: <td>1</td><td>#357</td><td class="col-group">[YSS] Why So Serious</td><td>39,560,045,180</td>
+    # Parse leaderboard table rows
     row_pattern = re.compile(
         r'<tr>\s*<td>(\d+)</td>\s*<td>(#\d+)</td>\s*<td[^>]*>([^<]+)</td>\s*<td>\s*([0-9,]+)\s*</td>',
         re.DOTALL
@@ -4769,7 +4764,6 @@ async def cmd_servertop(message, n):
     body = "\n".join(lines)
     full_msg = header + body
 
-    # Discord 2000 char limit — chunk if needed
     if len(full_msg) <= 2000:
         await message.channel.send(full_msg)
     else:
