@@ -1752,7 +1752,7 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members",
+        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members\n`!servertop[N]` - Top N servers by power (e.g., `!servertop10`, `!servertop25`)",
         inline=False
     )
     
@@ -4688,6 +4688,102 @@ async def custom_event_loop():
 # GAIN COMMAND - DATE RANGE WITH AUTOCOMPLETE
 # ============================================================
 
+
+
+# ============================================================
+# SERVER TOP X COMMAND
+# ============================================================
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    import re
+    match = re.match(r'^!servertop(\d+)$', message.content.strip(), re.IGNORECASE)
+    if match:
+        n = int(match.group(1))
+        if n < 1 or n > 100:
+            await message.channel.send("❌ Please use a number between 1 and 100. Example: `!servertop10`")
+        else:
+            await cmd_servertop(message, n)
+        return
+
+    # Process all other bot commands normally
+    await bot.process_commands(message)
+
+
+async def cmd_servertop(message, n):
+    """Fetch and display top N servers by highest power from callofstats.com"""
+    import re
+
+    url = (
+        "https://callofstats.com/server_alliance_rankings"
+        "?selected_stat=highest_power"
+        "&highest_lowest_sort=largest"
+        "&min_power=15000000"
+        "&viewing=server"
+        "&compare_mode=false"
+    )
+
+    # Use the existing authenticated session so it works like all other fetches
+    try:
+        session = await get_callofstats_session()
+        if not session:
+            await message.channel.send("❌ Could not connect to Call of Stats. Check bot credentials.")
+            return
+
+        async with session.get(url, allow_redirects=True) as resp:
+            if resp.status != 200:
+                await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
+                return
+            html = await resp.text()
+    except asyncio.TimeoutError:
+        await message.channel.send("❌ Request timed out. Try again.")
+        return
+    except Exception as e:
+        await message.channel.send(f"❌ Error fetching data: {e}")
+        return
+
+    # Parse the leaderboard table
+    # Rows look like: <td>1</td><td>#357</td><td class="col-group">[YSS] Why So Serious</td><td>39,560,045,180</td>
+    row_pattern = re.compile(
+        r'<tr>\s*<td>(\d+)</td>\s*<td>(#\d+)</td>\s*<td[^>]*>([^<]+)</td>\s*<td>\s*([0-9,]+)\s*</td>',
+        re.DOTALL
+    )
+    rows = row_pattern.findall(html)
+
+    if not rows:
+        await message.channel.send("❌ Could not parse the rankings. The site layout may have changed.")
+        log_info("[SERVERTOP] Failed to parse table rows from HTML")
+        return
+
+    top_rows = rows[:n]
+
+    lines = []
+    for rank, server, alliance, power in top_rows:
+        alliance = alliance.strip()
+        lines.append(f"`#{rank:>3}` **S{server}** — {alliance} — {power}")
+
+    header = f"🏆 **Top {n} Servers by Highest Power**\n"
+    body = "\n".join(lines)
+    full_msg = header + body
+
+    # Discord 2000 char limit — chunk if needed
+    if len(full_msg) <= 2000:
+        await message.channel.send(full_msg)
+    else:
+        await message.channel.send(header)
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await message.channel.send(chunk)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await message.channel.send(chunk)
+
+    log_info(f"[SERVERTOP] Displayed top {n} servers")
 
 
 # ============================================================
