@@ -4716,13 +4716,19 @@ async def cmd_servertop(message, n):
     """Fetch and display top N servers by highest power from callofstats.com"""
     import re
 
+    today = date.today().isoformat()
     url = (
-        "https://callofstats.com/server_alliance_rankings"
-        "?selected_stat=highest_power"
-        "&highest_lowest_sort=largest"
-        "&min_power=15000000"
-        "&viewing=server"
-        "&compare_mode=false"
+        f"https://callofstats.com/server_alliance_rankings"
+        f"?page=1"
+        f"&compare_mode=false"
+        f"&viewing=server"
+        f"&selected_date={today}"
+        f"&start_date=2025-12-01"
+        f"&end_date={today}"
+        f"&highest_lowest_sort=largest"
+        f"&min_power=20000000"
+        f"&server="
+        f"&selected_stat=highest_power"
     )
 
     # Use a fresh independent session — avoids timeout from shared session under load
