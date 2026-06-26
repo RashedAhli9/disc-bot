@@ -4716,16 +4716,9 @@ async def cmd_servertop(message, n):
     """Fetch and display top N servers by highest power from callofstats.com"""
     import re
 
-    url = (
-        "https://callofstats.com/server_alliance_rankings"
-        "?selected_stat=highest_power"
-        "&highest_lowest_sort=largest"
-        "&min_power=15000000"
-        "&viewing=server"
-        "&compare_mode=false"
-    )
+    url = "https://callofstats.com/server_alliance_rankings"
 
-    # Use a fresh independent session — avoids timeout from shared session under load
+    # Fresh independent session — base URL is public, no auth needed
     try:
         timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
