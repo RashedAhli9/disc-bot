@@ -1752,7 +1752,7 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members\n`!servertop[N]` - Top N servers by power (e.g., `!servertop10`, `!servertop25`)",
+        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members\n`!servertop[N]` - Top N servers by power (e.g., `!servertop10`, `!servertop25`)\n`!servercheck[#]` - Find a server's rank (e.g., `!servercheck698`)",
         inline=False
     )
     
@@ -4709,6 +4709,12 @@ async def on_message(message):
             await cmd_servertop(message, n)
         return
 
+    match = re.match(r'^!servercheck(\d+)$', message.content.strip(), re.IGNORECASE)
+    if match:
+        server_num = match.group(1)
+        await cmd_servercheck(message, server_num)
+        return
+
     await bot.process_commands(message)
 
 
@@ -4802,6 +4808,67 @@ async def cmd_servertop(message, n):
             await message.channel.send("```\n" + "\n".join(chunk_lines) + "\n```")
 
     log_info(f"[SERVERTOP] Displayed top {n} servers")
+
+
+async def cmd_servercheck(message, server_num):
+    """Find a specific server's rank in the rankings"""
+    import re
+
+    url = "https://callofstats.com/server_alliance_rankings"
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
+                    return
+                html = await resp.text()
+    except asyncio.TimeoutError:
+        await message.channel.send("❌ Request timed out. Try again.")
+        return
+    except Exception as e:
+        await message.channel.send(f"❌ Error fetching data: {e}")
+        return
+
+    row_pattern = re.compile(
+        r'<tr>\s*<td>(\d+)</td>\s*<td>(#\d+)</td>\s*<td[^>]*>([^<]+)</td>\s*<td>\s*(\d+)\s*</td>\s*<td>\s*([0-9,]+)\s*</td>',
+        re.DOTALL
+    )
+    rows = row_pattern.findall(html)
+
+    if not rows:
+        await message.channel.send("❌ Could not parse the rankings. The site layout may have changed.")
+        log_info("[SERVERCHECK] Failed to parse table rows from HTML")
+        return
+
+    # Search for the server number
+    target = f"#{server_num}"
+    found = None
+    for rank, server, alliance, lords, power in rows:
+        if server == target:
+            found = (rank, server, alliance.strip(), lords, power.strip())
+            break
+
+    if not found:
+        await message.channel.send(f"❌ Server **#{server_num}** not found in the rankings. It may be below the minimum power threshold or not tracked yet.")
+        return
+
+    rank, server, alliance, lords, power = found
+    alliance = alliance.replace("&amp;", "&").replace("&#39;", "'")
+
+    msg = (
+        f"🔍 **Server #{server_num} Rankings**\n"
+        f"```"
+        f"Rank     : #{rank}\n"
+        f"Server   : {server}\n"
+        f"Alliance : {alliance}\n"
+        f"Lords    : {lords}\n"
+        f"Power    : {power}"
+        f"```"
+    )
+    await message.channel.send(msg)
+    log_info(f"[SERVERCHECK] Found S#{server_num} at rank #{rank}")
 
 
 # ============================================================
