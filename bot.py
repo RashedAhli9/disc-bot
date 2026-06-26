@@ -4736,7 +4736,7 @@ async def cmd_servertop(message, n):
 
     # Parse leaderboard table rows
     row_pattern = re.compile(
-        r'<tr>\s*<td>(\d+)</td>\s*<td>(#\d+)</td>\s*<td[^>]*>([^<]+)</td>\s*<td>\s*([0-9,]+)\s*</td>',
+        r'<tr>\s*<td>(\d+)</td>\s*<td>(#\d+)</td>\s*<td[^>]*>([^<]+)</td>\s*<td>\s*(\d+)\s*</td>\s*<td>\s*([0-9,]+)\s*</td>',
         re.DOTALL
     )
     rows = row_pattern.findall(html)
@@ -4749,11 +4749,11 @@ async def cmd_servertop(message, n):
     top_rows = rows[:n]
 
     lines = []
-    for rank, server, alliance, power in top_rows:
+    for rank, server, alliance, lords, power in top_rows:
         alliance = alliance.strip()
-        lines.append(f"`#{rank:>3}` **S{server}** — {alliance} — {power}")
+        lines.append(f"`#{rank:>3}` **S{server}** — {alliance} — 👥{lords} — {power}")
 
-    header = f"🏆 **Top {n} Servers by Highest Power**\n"
+    header = f"🏆 **Top {n} Servers by Highest Power**\n`Rank — Server — Name — Lords — Power`\n"
     body = "\n".join(lines)
     full_msg = header + body
 
