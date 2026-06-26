@@ -4716,42 +4716,30 @@ async def cmd_servertop(message, n):
     """Fetch and display top N servers by highest power from callofstats.com"""
     import re
 
-    today = date.today().isoformat()
     url = (
-        f"https://callofstats.com/server_alliance_rankings"
-        f"?page=1"
-        f"&compare_mode=false"
-        f"&viewing=server"
-        f"&selected_date={today}"
-        f"&start_date=2025-12-01"
-        f"&end_date={today}"
-        f"&highest_lowest_sort=largest"
-        f"&min_power=20000000"
-        f"&server="
-        f"&selected_stat=highest_power"
+        "https://callofstats.com/server_alliance_rankings"
+        "?selected_stat=highest_power"
+        "&highest_lowest_sort=largest"
+        "&min_power=15000000"
+        "&viewing=server"
+        "&compare_mode=false"
     )
 
-    # Use authenticated session (page requires login) with its own timeout
+    # Use a fresh independent session — avoids timeout from shared session under load
     try:
-        session = await get_callofstats_session()
-        if not session:
-            await message.channel.send("❌ Could not connect to Call of Stats. Check bot credentials.")
-            return
-        timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_read=15)
-        async with session.get(url, allow_redirects=True, timeout=timeout) as resp:
-            if resp.status != 200:
-                await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
-                return
-            html = await resp.text()
+        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
+                    return
+                html = await resp.text()
     except asyncio.TimeoutError:
         await message.channel.send("❌ Request timed out. Try again.")
         return
     except Exception as e:
         await message.channel.send(f"❌ Error fetching data: {e}")
         return
-
-    # Log a snippet so we can debug if parsing fails
-    log_info(f"[SERVERTOP DEBUG] HTML length={len(html)}, snippet={html[2000:2300]!r}")
 
     # Parse leaderboard table rows
     row_pattern = re.compile(
