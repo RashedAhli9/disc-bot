@@ -4748,27 +4748,58 @@ async def cmd_servertop(message, n):
 
     top_rows = rows[:n]
 
-    lines = []
+    # Pre-process for alignment
+    processed = []
     for rank, server, alliance, lords, power in top_rows:
         alliance = alliance.strip()
-        lines.append(f"`#{rank:>3}` **S{server}** — {alliance} — 👥{lords} — {power}")
+        # strip HTML entities
+        alliance = alliance.replace("&amp;", "&").replace("&#39;", "'")
+        processed.append((rank, server, alliance, lords, power))
 
-    header = f"🏆 **Top {n} Servers by Highest Power**\n`Rank — Server — Name — Lords — Power`\n"
-    body = "\n".join(lines)
-    full_msg = header + body
+    # Calculate column widths
+    max_server  = max(len(s) for _, s, _, _, _ in processed)
+    max_name    = max(len(a) for _, _, a, _, _ in processed)
+    max_lords   = max(len(l) for _, _, _, l, _ in processed)
+    max_power   = max(len(p.strip()) for _, _, _, _, p in processed)
+
+    col_server = max(max_server, 6)   # "Server"
+    col_name   = max(max_name,   4)   # "Name"
+    col_lords  = max(max_lords,  6)   # "Lords"
+    col_power  = max(max_power,  5)   # "Power"
+
+    def make_row(rank_str, server, name, lords, power):
+        return f"{rank_str:<5} {server:<{col_server}}  {name:<{col_name}}  {lords:>{col_lords}}  {power:>{col_power}}"
+
+    col_header = make_row("Rank", "Server", "Name", "Lords", "Power")
+    separator  = "-" * len(col_header)
+
+    table_lines = [col_header, separator]
+    for rank, server, alliance, lords, power in processed:
+        power = power.strip()
+        table_lines.append(make_row(f"#{rank}", server, alliance, lords, power))
+
+    title = f"🏆 Top {n} Servers by Highest Power"
+    table_body = "\n".join(table_lines)
+
+    # Wrap in code block for monospace alignment
+    full_msg = f"{title}\n```\n{table_body}\n```"
 
     if len(full_msg) <= 2000:
         await message.channel.send(full_msg)
     else:
-        await message.channel.send(header)
-        chunk = ""
-        for line in lines:
-            if len(chunk) + len(line) + 1 > 1900:
-                await message.channel.send(chunk)
-                chunk = ""
-            chunk += line + "\n"
-        if chunk:
-            await message.channel.send(chunk)
+        # Send title + header separately, then chunk the data rows
+        await message.channel.send(f"{title}\n```\n{col_header}\n{separator}```")
+        chunk_lines = []
+        chunk_len = 0
+        for line in table_lines[2:]:  # skip header+separator already sent
+            if chunk_len + len(line) + 1 > 1800:
+                await message.channel.send("```\n" + "\n".join(chunk_lines) + "\n```")
+                chunk_lines = []
+                chunk_len = 0
+            chunk_lines.append(line)
+            chunk_len += len(line) + 1
+        if chunk_lines:
+            await message.channel.send("```\n" + "\n".join(chunk_lines) + "\n```")
 
     log_info(f"[SERVERTOP] Displayed top {n} servers")
 
