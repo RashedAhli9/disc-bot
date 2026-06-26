@@ -1,5 +1,5 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
@@ -4731,21 +4731,27 @@ async def cmd_servertop(message, n):
         f"&selected_stat=highest_power"
     )
 
-    # Use a fresh independent session — avoids timeout from shared session under load
+    # Use authenticated session (page requires login) with its own timeout
     try:
-        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
-                    return
-                html = await resp.text()
+        session = await get_callofstats_session()
+        if not session:
+            await message.channel.send("❌ Could not connect to Call of Stats. Check bot credentials.")
+            return
+        timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_read=15)
+        async with session.get(url, allow_redirects=True, timeout=timeout) as resp:
+            if resp.status != 200:
+                await message.channel.send(f"❌ Failed to fetch rankings (HTTP {resp.status})")
+                return
+            html = await resp.text()
     except asyncio.TimeoutError:
         await message.channel.send("❌ Request timed out. Try again.")
         return
     except Exception as e:
         await message.channel.send(f"❌ Error fetching data: {e}")
         return
+
+    # Log a snippet so we can debug if parsing fails
+    log_info(f"[SERVERTOP DEBUG] HTML length={len(html)}, snippet={html[2000:2300]!r}")
 
     # Parse leaderboard table rows
     row_pattern = re.compile(
