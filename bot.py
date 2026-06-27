@@ -4761,6 +4761,9 @@ async def custom_event_loop():
 # SERVER TOP X COMMAND
 # ============================================================
 
+# KvK matchup session state: channel_id -> session dict
+kvk_sessions = {}
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -4780,6 +4783,17 @@ async def on_message(message):
     if match:
         server_num = match.group(1)
         await cmd_servercheck(message, server_num)
+        return
+
+    # KvK matchup multi-step flow
+    channel_id_key = message.channel.id
+    if channel_id_key in kvk_sessions:
+        handled = await kvk_session_handle(message, kvk_sessions[channel_id_key])
+        if handled:
+            return
+
+    if message.content.strip().lower() == '!kvkmatchup':
+        await kvk_start(message)
         return
 
     await bot.process_commands(message)
@@ -4936,6 +4950,244 @@ async def cmd_servercheck(message, server_num):
     )
     await message.channel.send(msg)
     log_info(f"[SERVERCHECK] Found S#{server_num} at rank #{rank}")
+
+
+
+
+# ============================================================
+# KVK MATCHUP COMMAND
+# ============================================================
+
+def kvk_fmt(n):
+    try:
+        n = int(n)
+    except:
+        return str(n)
+    if n >= 1_000_000_000:
+        return f"{n/1_000_000_000:.2f}B"
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return str(n)
+
+
+async def kvk_fetch_zones(zone_map, num_zones):
+    import re
+    params = f"starting_zones={num_zones}&min_power=20000000"
+    for z in range(1, num_zones + 1):
+        for s in zone_map.get(z, []):
+            params += f"&zone{z}={s}"
+    params += "&show_results=1"
+    url = f"https://callofstats.com/kvk_matchmaking?{params}"
+    log_info(f"[KVK] Fetching: {url}")
+    try:
+        session = await get_callofstats_session()
+        if not session:
+            return None, "No authenticated session."
+        async with session.get(url, allow_redirects=True) as resp:
+            if resp.status != 200:
+                return None, f"HTTP {resp.status}"
+            html = await resp.text()
+        if "<title>Login" in html:
+            return None, "Got login redirect."
+    except asyncio.TimeoutError:
+        return None, "Request timed out."
+    except Exception as e:
+        return None, str(e)
+
+    strip_pattern = re.compile(r'<div class="zone-strip"(.*?)</div>\s*</div>\s*</div>', re.DOTALL)
+    strips = strip_pattern.findall(html)
+    if not strips:
+        return None, "Could not parse zone strips."
+
+    def da(block, attr):
+        m = re.search(r'data-' + attr + r'="([^"]*)"', block)
+        return m.group(1) if m else "0"
+
+    def lv(block, label):
+        m = re.search(r'<span class="zs-left-label">' + re.escape(label) + r'</span>\s*<div class="zs-left-value">([^<]*)</div>', block)
+        return m.group(1).strip() if m else ""
+
+    zones = []
+    for i, strip in enumerate(strips[:num_zones]):
+        z = {
+            "zone_num": i + 1,
+            "servers":  lv(strip, "Servers"),
+            "acronyms": lv(strip, "Acronyms"),
+            "date":     lv(strip, "Dates"),
+            "power":    int(da(strip, "power")),
+            "merits":   int(da(strip, "merits")),
+            "hero_power": int(da(strip, "hero_power")),
+            "kills":    int(da(strip, "kills")),
+            "deads":    int(da(strip, "deads")),
+            "healed":   int(da(strip, "healed")),
+            "mana":     int(da(strip, "mana")),
+            "leg_heroes": int(da(strip, "leg_heroes_awakened")),
+            "max_pets": int(da(strip, "max_pets")),
+            "exemplar": int(da(strip, "exemplar_unlocked")),
+            "players":  int(da(strip, "players")),
+            "t3_lords": int(da(strip, "tier_3_lords")),
+            "t4_lords": int(da(strip, "tier_4_lords")),
+            "t5_lords": int(da(strip, "tier_5_lords")),
+            "full_t5":  int(da(strip, "full_t5_lords")),
+            "b60_80":   int(da(strip, "60_80")),
+            "b80_100":  int(da(strip, "80_100")),
+            "b100_125": int(da(strip, "100_125")),
+            "b125_150": int(da(strip, "125_150")),
+            "b150_200": int(da(strip, "150_200")),
+            "b200_500": int(da(strip, "200_500")),
+            "b500_1b":  int(da(strip, "500_1b")),
+            "b1b_plus": int(da(strip, "1b_plus")),
+        }
+        z["mp_ratio"]  = (z["merits"] / z["power"] * 100) if z["power"] > 0 else 0
+        z["avg_power"] = (z["power"] / z["players"]) if z["players"] > 0 else 0
+        zones.append(z)
+    return zones, None
+
+
+def kvk_zone_block(z):
+    lines = [
+        f"Zone {z['zone_num']} \u2014 S{z['servers']} ({z['acronyms']}) \u2014 {z['date']}",
+        f"Power          {kvk_fmt(z['power'])}  (Avg:{kvk_fmt(z['avg_power'])} | Hero:{kvk_fmt(z['hero_power'])})",
+        f"Merits         {kvk_fmt(z['merits'])}  (M/P:{z['mp_ratio']:.1f}%)",
+        f"Kills          {kvk_fmt(z['kills'])}",
+        f"Deads          {kvk_fmt(z['deads'])}",
+        f"Healed         {kvk_fmt(z['healed'])}",
+        f"Mana Spent     {kvk_fmt(z['mana'])}",
+        f"Players        {z['players']}  (LegHero:{z['leg_heroes']} | MaxPets:{z['max_pets']} | Exemplar:{z['exemplar']})",
+        f"Tier Lords     T3:{z['t3_lords']}  T4:{z['t4_lords']}  T5:{z['t5_lords']}  FullT5:{z['full_t5']}",
+        f"Brackets       60-80M:{z['b60_80']}  80-100M:{z['b80_100']}  100-125M:{z['b100_125']}",
+        f"               125-150M:{z['b125_150']}  150-200M:{z['b150_200']}  200-500M:{z['b200_500']}",
+        f"               500M-1B:{z['b500_1b']}  1B+:{z['b1b_plus']}",
+    ]
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def kvk_team_block(label, zone_indices, zones):
+    selected = [zones[i-1] for i in zone_indices if 0 < i <= len(zones)]
+    if not selected:
+        return f"**{label}**: No zones selected."
+    keys = ["power","merits","hero_power","kills","deads","healed","mana",
+            "leg_heroes","max_pets","exemplar","players",
+            "t3_lords","t4_lords","t5_lords","full_t5",
+            "b60_80","b80_100","b100_125","b125_150","b150_200","b200_500","b500_1b","b1b_plus"]
+    t = {k: sum(z[k] for z in selected) for k in keys}
+    t["mp_ratio"]  = (t["merits"] / t["power"] * 100) if t["power"] > 0 else 0
+    t["avg_power"] = (t["power"] / t["players"]) if t["players"] > 0 else 0
+    servers = "/".join(z["servers"] for z in selected)
+    lines = [
+        f"{label} \u2014 S{servers}",
+        f"Power          {kvk_fmt(t['power'])}  (Avg:{kvk_fmt(t['avg_power'])} | Hero:{kvk_fmt(t['hero_power'])})",
+        f"Merits         {kvk_fmt(t['merits'])}  (M/P:{t['mp_ratio']:.1f}%)",
+        f"Kills          {kvk_fmt(t['kills'])}",
+        f"Deads          {kvk_fmt(t['deads'])}",
+        f"Healed         {kvk_fmt(t['healed'])}",
+        f"Mana Spent     {kvk_fmt(t['mana'])}",
+        f"Players        {t['players']}  (LegHero:{t['leg_heroes']} | MaxPets:{t['max_pets']} | Exemplar:{t['exemplar']})",
+        f"Tier Lords     T3:{t['t3_lords']}  T4:{t['t4_lords']}  T5:{t['t5_lords']}  FullT5:{t['full_t5']}",
+        f"Brackets       60-80M:{t['b60_80']}  80-100M:{t['b80_100']}  100-125M:{t['b100_125']}",
+        f"               125-150M:{t['b125_150']}  150-200M:{t['b150_200']}  200-500M:{t['b200_500']}",
+        f"               500M-1B:{t['b500_1b']}  1B+:{t['b1b_plus']}",
+    ]
+    return f"\u2694\ufe0f **{label}**\n" + "```\n" + "\n".join(lines) + "\n```"
+
+
+async def kvk_start(message):
+    session = {
+        "step": "zones",
+        "user_id": message.author.id,
+        "num_zones": None,
+        "zone_map": {},
+        "current_zone": 1,
+        "zones_data": None,
+    }
+    kvk_sessions[message.channel.id] = session
+    await message.channel.send("⚔️ **KvK Matchup Setup**\nHow many zones? Reply `4` or `6`.\nType `cancel` at any time to stop.")
+
+
+async def kvk_session_handle(message, session):
+    if message.author.id != session["user_id"]:
+        return False
+    content = message.content.strip()
+    if content.lower() in ("cancel", "!cancel"):
+        del kvk_sessions[message.channel.id]
+        await message.channel.send("❌ KvK matchup cancelled.")
+        return True
+    step = session["step"]
+
+    if step == "zones":
+        if content not in ("4", "6"):
+            await message.channel.send("Please reply `4` or `6`.")
+            return True
+        session["num_zones"] = int(content)
+        session["step"] = "collecting"
+        session["current_zone"] = 1
+        await message.channel.send(f"Zone 1 of {session['num_zones']}: Enter server number(s) for Zone 1 (comma-separated).\nExample: `698` or `698, 357`")
+        return True
+
+    if step == "collecting":
+        z = session["current_zone"]
+        servers = [s.strip() for s in content.replace(",", " ").split() if s.strip().isdigit()]
+        if not servers:
+            await message.channel.send("Please enter valid server number(s), e.g. `698` or `698, 357`.")
+            return True
+        session["zone_map"][z] = servers
+        if z < session["num_zones"]:
+            session["current_zone"] += 1
+            nz = session["current_zone"]
+            await message.channel.send(f"Zone {nz} of {session['num_zones']}: Enter server number(s) for Zone {nz}.")
+            return True
+        session["step"] = "fetching"
+        num_zones = session["num_zones"]
+        zone_map = session["zone_map"]
+        zone_display = "  ".join(f"Z{k}:S{','.join(v)}" for k, v in sorted(zone_map.items()))
+        msg = await message.channel.send(f"📡 Fetching KvK data for {zone_display}...")
+        zones_data, error = await kvk_fetch_zones(zone_map, num_zones)
+        if error or not zones_data:
+            del kvk_sessions[message.channel.id]
+            await msg.edit(content=f"❌ Failed to fetch KvK data: {error or 'No zones parsed'}")
+            return True
+        session["zones_data"] = zones_data
+        session["step"] = "teams"
+        await msg.edit(content=f"✅ Fetched data for {len(zones_data)} zones:")
+        for z_data in zones_data:
+            await message.channel.send(kvk_zone_block(z_data))
+        zone_nums = " ".join(str(i+1) for i in range(len(zones_data)))
+        await message.channel.send(
+            f"**Team Assignment** — You have zones: {zone_nums}\n"
+            f"Which zones go to **Team 1**? Enter zone numbers separated by commas (e.g. `1,2`).\n"
+            f"Remaining zones auto-assigned to Team 2. Type `skip` to skip."
+        )
+        return True
+
+    if step == "teams":
+        zones_data = session["zones_data"]
+        num_zones = len(zones_data)
+        if content.lower() == "skip":
+            del kvk_sessions[message.channel.id]
+            await message.channel.send("✅ Done!")
+            return True
+        team1_zones = [int(x.strip()) for x in content.replace(",", " ").split()
+                       if x.strip().isdigit() and 1 <= int(x.strip()) <= num_zones]
+        if not team1_zones:
+            await message.channel.send(f"Please enter valid zone numbers (1\u2013{num_zones}), e.g. `1,2`.")
+            return True
+        team2_zones = [i+1 for i in range(num_zones) if (i+1) not in team1_zones]
+        del kvk_sessions[message.channel.id]
+        await message.channel.send("⚔️ **KvK Team Comparison**")
+        await message.channel.send(kvk_team_block("Team 1", team1_zones, zones_data))
+        if team2_zones:
+            await message.channel.send(kvk_team_block("Team 2", team2_zones, zones_data))
+        t1 = sum(zones_data[i-1]["power"] for i in team1_zones if 0 < i <= len(zones_data))
+        t2 = sum(zones_data[i-1]["power"] for i in team2_zones if 0 < i <= len(zones_data)) if team2_zones else 0
+        if t2 > 0:
+            diff = abs(t1 - t2)
+            stronger = "Team 1" if t1 > t2 else "Team 2"
+            await message.channel.send(f"📊 **Power Gap:** {kvk_fmt(diff)} \u2014 **{stronger}** has more power.")
+        return True
+
+    return False
 
 
 # ============================================================
