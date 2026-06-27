@@ -2122,11 +2122,34 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
 
         # Fetch advanced war stats from YESTERDAY (delayed 1 day by COS)
-        # These are: infantry/cavalry/mage/marksman/other merits, t45_healed, t45_dead
+        # COS only shows real values when end_date < today — so we must fetch with yesterday as end_date
         adv_yesterday  = (date.today() - timedelta(days=1)).isoformat()
         adv_day_before = (date.today() - timedelta(days=2)).isoformat()
+        adv_fields_list = ["infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
+                           "other_merits", "t45_healed", "t45_dead"]
+
+        def _adv_has_data(snap):
+            return snap and any(snap.get(f) for f in adv_fields_list)
+
+        # Try DB first; if advanced fields are all None, live-fetch with correct end_date
         stats_adv_today = db_get_season_progress(season_id, account_id, adv_yesterday)
-        stats_adv_prev  = db_get_season_progress(season_id, account_id, adv_day_before)
+        if not _adv_has_data(stats_adv_today):
+            log_info(f"[ADV STATS] DB missing adv fields for {adv_yesterday}, fetching live from COS")
+            try:
+                stats_adv_today, _ = await fetch_stats_with_fallback(account_id, start_date, adv_yesterday)
+                log_info(f"[ADV STATS] Live fetch done, infantry_merits={stats_adv_today.get('infantry_merits') if stats_adv_today else 'N/A'}")
+            except Exception as e:
+                log_info(f"[ADV STATS] Live fetch failed: {e}")
+                stats_adv_today = None
+
+        stats_adv_prev = db_get_season_progress(season_id, account_id, adv_day_before)
+        if not _adv_has_data(stats_adv_prev):
+            log_info(f"[ADV STATS] DB missing adv fields for {adv_day_before}, fetching live from COS")
+            try:
+                stats_adv_prev, _ = await fetch_stats_with_fallback(account_id, start_date, adv_day_before)
+            except Exception as e:
+                log_info(f"[ADV STATS] Live fetch prev failed: {e}")
+                stats_adv_prev = None
 
         def _adv_int(s):
             if not s:
