@@ -628,6 +628,19 @@ def init_db():
             notified INTEGER DEFAULT 0
         );
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS kvk_matchups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nickname TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            num_zones INTEGER NOT NULL,
+            zones_json TEXT NOT NULL,
+            team1_zones TEXT NOT NULL,
+            team2_zones TEXT NOT NULL,
+            team1_json TEXT NOT NULL,
+            team2_json TEXT NOT NULL
+        );
+    """)
     conn.commit()
     conn.close()
 
@@ -753,6 +766,61 @@ def db_delete_event(event_id):
 
 init_db()
 init_db_progress()
+
+def db_save_kvk_matchup(nickname, num_zones, zones_data, team1_zones, team2_zones, team1_totals, team2_totals):
+    import json
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO kvk_matchups (nickname, created_at, num_zones, zones_json, team1_zones, team2_zones, team1_json, team2_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            nickname,
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            num_zones,
+            json.dumps(zones_data),
+            json.dumps(team1_zones),
+            json.dumps(team2_zones),
+            json.dumps(team1_totals),
+            json.dumps(team2_totals),
+        )
+    )
+    conn.commit()
+    conn.close()
+    log_info(f"[KVK] Saved matchup: {nickname}")
+
+def db_get_kvk_matchups():
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, nickname, created_at, num_zones, team1_zones, team2_zones, team1_json, team2_json FROM kvk_matchups ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_kvk_matchup(matchup_id):
+    import json
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, nickname, created_at, num_zones, zones_json, team1_zones, team2_zones, team1_json, team2_json FROM kvk_matchups WHERE id = ?", (matchup_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0], "nickname": row[1], "created_at": row[2],
+        "num_zones": row[3],
+        "zones_data": json.loads(row[4]),
+        "team1_zones": json.loads(row[5]),
+        "team2_zones": json.loads(row[6]),
+        "team1_totals": json.loads(row[7]),
+        "team2_totals": json.loads(row[8]),
+    }
+
+def db_delete_kvk_matchup(matchup_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM kvk_matchups WHERE id = ?", (matchup_id,))
+    conn.commit()
+    conn.close()
 migrate_db_progress()
 
 # ============================================================
@@ -4796,6 +4864,21 @@ async def on_message(message):
         await kvk_start(message)
         return
 
+    if message.content.strip().lower() == '!matchups':
+        await cmd_matchups_list(message)
+        return
+
+    import re as _re2
+    _m = _re2.match(r'^!matchup\s+(\d+)$', message.content.strip(), _re2.IGNORECASE)
+    if _m:
+        await cmd_matchup_view(message, int(_m.group(1)))
+        return
+
+    _md = _re2.match(r'^!delmatchup\s+(\d+)$', message.content.strip(), _re2.IGNORECASE)
+    if _md:
+        await cmd_matchup_delete(message, int(_md.group(1)))
+        return
+
     await bot.process_commands(message)
 
 
@@ -5103,14 +5186,14 @@ async def kvk_start(message):
         "zones_data": None,
     }
     kvk_sessions[message.channel.id] = session
-    await message.channel.send("⚔️ **KvK Matchup Setup**\nHow many zones? Reply `4` or `6`.\nType `cancel` at any time to stop.")
+    await message.channel.send("⚔️ **KvK Matchup Setup**\nHow many zones? Reply `4` or `6`.\nType `abort` at any time to cancel.")
 
 
 async def kvk_session_handle(message, session):
     if message.author.id != session["user_id"]:
         return False
     content = message.content.strip()
-    if content.lower() in ("cancel", "!cancel"):
+    if content.lower() in ("cancel", "!cancel", "abort", "!abort", "stop", "!stop"):
         del kvk_sessions[message.channel.id]
         await message.channel.send("❌ KvK matchup cancelled.")
         return True
@@ -5123,20 +5206,20 @@ async def kvk_session_handle(message, session):
         session["num_zones"] = int(content)
         session["step"] = "collecting"
         session["current_zone"] = 1
-        await message.channel.send(f"Zone 1 of {session['num_zones']}: Enter server number(s) for Zone 1 (comma-separated).\nExample: `698` or `698, 357`")
+        await message.channel.send(f"Zone 1 of {session['num_zones']}: Enter server number(s) for Zone 1 (comma-separated).\nExample: `698` or `698, 357` — type `abort` to cancel.")
         return True
 
     if step == "collecting":
         z = session["current_zone"]
         servers = [s.strip() for s in content.replace(",", " ").split() if s.strip().isdigit()]
         if not servers:
-            await message.channel.send("Please enter valid server number(s), e.g. `698` or `698, 357`.")
+            await message.channel.send("Please enter valid server number(s), e.g. `698` or `698, 357`. Type `abort` to cancel.")
             return True
         session["zone_map"][z] = servers
         if z < session["num_zones"]:
             session["current_zone"] += 1
             nz = session["current_zone"]
-            await message.channel.send(f"Zone {nz} of {session['num_zones']}: Enter server number(s) for Zone {nz}.")
+            await message.channel.send(f"Zone {nz} of {session['num_zones']}: Enter server number(s) for Zone {nz}. (type `abort` to cancel)")
             return True
         session["step"] = "fetching"
         num_zones = session["num_zones"]
@@ -5171,23 +5254,141 @@ async def kvk_session_handle(message, session):
         team1_zones = [int(x.strip()) for x in content.replace(",", " ").split()
                        if x.strip().isdigit() and 1 <= int(x.strip()) <= num_zones]
         if not team1_zones:
-            await message.channel.send(f"Please enter valid zone numbers (1\u2013{num_zones}), e.g. `1,2`.")
+            await message.channel.send(f"Please enter valid zone numbers (1–{num_zones}), e.g. `1,2`.")
             return True
         team2_zones = [i+1 for i in range(num_zones) if (i+1) not in team1_zones]
-        del kvk_sessions[message.channel.id]
+
         await message.channel.send("⚔️ **KvK Team Comparison**")
         await message.channel.send(kvk_team_block("Team 1", team1_zones, zones_data))
         if team2_zones:
             await message.channel.send(kvk_team_block("Team 2", team2_zones, zones_data))
+
         t1 = sum(zones_data[i-1]["power"] for i in team1_zones if 0 < i <= len(zones_data))
         t2 = sum(zones_data[i-1]["power"] for i in team2_zones if 0 < i <= len(zones_data)) if team2_zones else 0
         if t2 > 0:
             diff = abs(t1 - t2)
             stronger = "Team 1" if t1 > t2 else "Team 2"
-            await message.channel.send(f"📊 **Power Gap:** {kvk_fmt(diff)} \u2014 **{stronger}** has more power.")
+            await message.channel.send(f"📊 **Power Gap:** {kvk_fmt(diff)} — **{stronger}** has more power.")
+
+        def build_totals(zone_indices):
+            keys = ["power","merits","hero_power","kills","deads","healed","mana",
+                    "leg_heroes","max_pets","exemplar","players",
+                    "t3_lords","t4_lords","t5_lords","full_t5",
+                    "b60_80","b80_100","b100_125","b125_150","b150_200","b200_500","b500_1b","b1b_plus"]
+            sel = [zones_data[i-1] for i in zone_indices if 0 < i <= len(zones_data)]
+            t = {k: sum(z[k] for z in sel) for k in keys}
+            t["mp_ratio"]  = (t["merits"] / t["power"] * 100) if t["power"] > 0 else 0
+            t["avg_power"] = (t["power"] / t["players"]) if t["players"] > 0 else 0
+            t["servers"] = "/".join(z["servers"] for z in sel)
+            return t
+
+        session["team1_zones"]  = team1_zones
+        session["team2_zones"]  = team2_zones
+        session["team1_totals"] = build_totals(team1_zones)
+        session["team2_totals"] = build_totals(team2_zones)
+        session["step"] = "nickname"
+        await message.channel.send("💾 Give this matchup a nickname to save it (e.g. `SoS9 Week 1`), or type `skip` to discard.")
+        return True
+
+    if step == "nickname":
+        if content.lower() == "skip":
+            del kvk_sessions[message.channel.id]
+            await message.channel.send("✅ Matchup not saved.")
+            return True
+        nickname = content[:80]
+        db_save_kvk_matchup(
+            nickname,
+            session["num_zones"],
+            session["zones_data"],
+            session["team1_zones"],
+            session["team2_zones"],
+            session["team1_totals"],
+            session["team2_totals"],
+        )
+        del kvk_sessions[message.channel.id]
+        await message.channel.send(f"✅ Matchup **\"{nickname}\"** saved! Use `!matchups` to view all saved matchups.")
         return True
 
     return False
+
+
+
+async def cmd_matchups_list(message):
+    """List all saved KvK matchups."""
+    rows = db_get_kvk_matchups()
+    if not rows:
+        await message.channel.send("No KvK matchups saved yet. Use `!kvkmatchup` to create one.")
+        return
+
+    lines = ["📋 **Saved KvK Matchups**", "```"]
+    lines.append(f"{'ID':<5} {'Nickname':<30} {'Date':<17} {'Zones':<6} {'Teams'}")
+    lines.append("-" * 75)
+    for row in rows:
+        mid, nickname, created_at, num_zones, t1_zones_raw, t2_zones_raw, t1_raw, t2_raw = row
+        import json
+        t1_z = json.loads(t1_zones_raw)
+        t2_z = json.loads(t2_zones_raw)
+        t1 = json.loads(t1_raw)
+        t2 = json.loads(t2_raw)
+        teams_str = f"T1:Z{','.join(str(z) for z in t1_z)} vs T2:Z{','.join(str(z) for z in t2_z)}"
+        lines.append(f"#{str(mid):<4} {nickname[:29]:<30} {created_at:<17} {num_zones:<6} {teams_str}")
+    lines.append("```")
+    lines.append("Use `!matchup <id>` to view full details. `!delmatchup <id>` to delete.")
+    await message.channel.send("\n".join(lines))
+
+
+async def cmd_matchup_view(message, matchup_id):
+    """View full details of a saved KvK matchup."""
+    m = db_get_kvk_matchup(matchup_id)
+    if not m:
+        await message.channel.send(f"❌ No matchup found with ID #{matchup_id}.")
+        return
+
+    await message.channel.send(f"⚔️ **#{m['id']} — {m['nickname']}** _(saved {m['created_at']})_")
+
+    # Show each zone
+    for z in m["zones_data"]:
+        await message.channel.send(kvk_zone_block(z))
+
+    # Show team totals
+    def totals_block(label, t):
+        lines = [
+            f"{label} — S{t['servers']}",
+            f"Power          {kvk_fmt(t['power'])}  (Avg:{kvk_fmt(t['avg_power'])} | Hero:{kvk_fmt(t['hero_power'])})",
+            f"Merits         {kvk_fmt(t['merits'])}  (M/P:{t['mp_ratio']:.1f}%)",
+            f"Kills          {kvk_fmt(t['kills'])}",
+            f"Deads          {kvk_fmt(t['deads'])}",
+            f"Healed         {kvk_fmt(t['healed'])}",
+            f"Mana Spent     {kvk_fmt(t['mana'])}",
+            f"Players        {t['players']}  (LegHero:{t['leg_heroes']} | MaxPets:{t['max_pets']} | Exemplar:{t['exemplar']})",
+            f"Tier Lords     T3:{t['t3_lords']}  T4:{t['t4_lords']}  T5:{t['t5_lords']}  FullT5:{t['full_t5']}",
+            f"Brackets       60-80M:{t['b60_80']}  80-100M:{t['b80_100']}  100-125M:{t['b100_125']}",
+            f"               125-150M:{t['b125_150']}  150-200M:{t['b150_200']}  200-500M:{t['b200_500']}",
+            f"               500M-1B:{t['b500_1b']}  1B+:{t['b1b_plus']}",
+        ]
+        return f"\u2694\ufe0f **{label}**\n" + "```\n" + "\n".join(lines) + "\n```"
+
+    await message.channel.send(totals_block("Team 1", m["team1_totals"]))
+    if m["team2_totals"]["players"] > 0:
+        await message.channel.send(totals_block("Team 2", m["team2_totals"]))
+        t1p = m["team1_totals"]["power"]
+        t2p = m["team2_totals"]["power"]
+        diff = abs(t1p - t2p)
+        stronger = "Team 1" if t1p > t2p else "Team 2"
+        await message.channel.send(f"📊 **Power Gap:** {kvk_fmt(diff)} — **{stronger}** has more power.")
+
+
+async def cmd_matchup_delete(message, matchup_id):
+    """Delete a saved KvK matchup (owner only)."""
+    if message.author.id != OWNER_ID:
+        await message.channel.send("❌ Only the owner can delete matchups.")
+        return
+    m = db_get_kvk_matchup(matchup_id)
+    if not m:
+        await message.channel.send(f"❌ No matchup found with ID #{matchup_id}.")
+        return
+    db_delete_kvk_matchup(matchup_id)
+    await message.channel.send(f"🗑️ Matchup **#{matchup_id} — {m['nickname']}** deleted.")
 
 
 # ============================================================
