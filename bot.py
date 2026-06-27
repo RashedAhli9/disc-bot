@@ -2120,7 +2120,30 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
-        
+
+        # Fetch advanced war stats from YESTERDAY (delayed 1 day by COS)
+        # These are: infantry/cavalry/mage/marksman/other merits, t45_healed, t45_dead
+        adv_yesterday  = (date.today() - timedelta(days=1)).isoformat()
+        adv_day_before = (date.today() - timedelta(days=2)).isoformat()
+        stats_adv_today = db_get_season_progress(season_id, account_id, adv_yesterday)
+        stats_adv_prev  = db_get_season_progress(season_id, account_id, adv_day_before)
+
+        def _adv_int(s):
+            if not s:
+                return 0
+            try:
+                return int(str(s).replace(",", "").replace("+", "").replace("-", "").strip())
+            except:
+                return 0
+
+        def _adv_gain(field):
+            t = _adv_int(stats_adv_today.get(field) if stats_adv_today else None)
+            p = _adv_int(stats_adv_prev.get(field) if stats_adv_prev else None)
+            return t - p if t and t > p else None
+
+        def _adv_total(field):
+            return _adv_int(stats_adv_today.get(field) if stats_adv_today else None) or None
+
         # Check how many days of data exist for this season
         data_date_count = count_season_data_dates(season_id, account_id)
         is_single_day = data_date_count == 1
@@ -2246,34 +2269,37 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             output += f"❤️ Healed {healed_display}{healed_rank_str}\n"
         
         output += f"\n"
-        
-        # Merit Breakdown (replaces Kill Breakdown)
-        # Helper: format merit value as positive number with commas
-        def fmt_merit(val):
-            if not val:
-                return None
-            try:
-                n = abs(int(str(val).replace(",", "").replace("+", "").replace("-", "")))
-                return f"{n:,}"
-            except:
-                return val
 
-        output += f"🏅 Merit Breakdown\n"
-        if fmt_merit(stats.get("infantry_merits")):
-            output += f"⚔️ Infantry: {fmt_merit(stats['infantry_merits'])}\n"
-        if fmt_merit(stats.get("cavalry_merits")):
-            output += f"🐴 Cavalry: {fmt_merit(stats['cavalry_merits'])}\n"
-        if fmt_merit(stats.get("mage_merits")):
-            output += f"🔮 Mage: {fmt_merit(stats['mage_merits'])}\n"
-        if fmt_merit(stats.get("marksman_merits")):
-            output += f"🏹 Marksman: {fmt_merit(stats['marksman_merits'])}\n"
-        if fmt_merit(stats.get("other_merits")):
-            output += f"🌀 Other: {fmt_merit(stats['other_merits'])}\n"
-        if fmt_merit(stats.get("t45_dead")):
-            output += f"💀 T4/T5 Dead: {fmt_merit(stats['t45_dead'])}\n"
-        
+        # Advanced War Stats (Merit Breakdown) — delayed 1 day by COS
+        def _fmt(n):
+            return f"{n:,}" if n else None
+
+        adv_fields = [
+            ("infantry_merits",  "⚔️ Infantry"),
+            ("cavalry_merits",   "🐴 Cavalry"),
+            ("mage_merits",      "🔮 Mage"),
+            ("marksman_merits",  "🏹 Marksman"),
+            ("other_merits",     "🌀 Other"),
+            ("t45_healed",       "💊 T4/T5 RSS Healed"),
+            ("t45_dead",         "💀 T4/T5 Dead"),
+        ]
+
+        adv_has_data = any(_adv_total(f) for f, _ in adv_fields)
+
+        if adv_has_data:
+            output += f"🏅 Advanced War Stats _(data from {adv_yesterday}, delayed 1 day)_\n"
+            for field, label in adv_fields:
+                total = _adv_total(field)
+                gain  = _adv_gain(field)
+                if total:
+                    gain_str  = f" (+{_fmt(gain)} today)" if gain else ""
+                    output += f"{label}: {_fmt(total)}{gain_str}\n"
+        else:
+            output += f"🏅 Advanced War Stats\n"
+            output += f"_(not yet available — delayed 1 day by COS)_\n"
+
         output += f"\n"
-        
+
         # RSS Spent - each resource on own line with absolute values
         output += f"💰 RSS Spent\n"
         if stats.get("gold_spent"):
