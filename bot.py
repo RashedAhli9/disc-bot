@@ -341,7 +341,8 @@ async def fetch_alliance_tag(account_id):
 async def fetch_highest_power(account_id):
     """
     Fetch the HIGHEST POWER from the normal profile page (no date range).
-    Uses a fresh independent session with retry logic for reliability.
+    Uses the authenticated global session (required - page needs login).
+    Retries up to 3 times, re-authenticating if redirected to login page.
     Returns the highest power value as int, or None if not found.
     """
     import re
@@ -355,38 +356,52 @@ async def fetch_highest_power(account_id):
 
     for attempt in range(3):
         try:
-            timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, allow_redirects=True) as response:
-                    if response.status != 200:
-                        log_info(f"[HIGHEST POWER] attempt {attempt+1} HTTP {response.status} for {account_id}")
-                        await asyncio.sleep(1)
-                        continue
+            session = await get_callofstats_session()
+            if not session:
+                log_info(f"[HIGHEST POWER] No session available, attempt {attempt+1}")
+                await asyncio.sleep(2)
+                continue
 
-                    html = await response.text()
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    log_info(f"[HIGHEST POWER] HTTP {response.status} attempt {attempt+1} for {account_id}")
+                    await asyncio.sleep(1)
+                    continue
 
-                    for i, pattern in enumerate(patterns):
-                        match = re.search(pattern, html, re.DOTALL)
-                        if match:
-                            power_str = match.group(1).replace(",", "")
-                            try:
-                                highest_power = int(power_str)
-                                log_info(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i}, attempt {attempt+1})")
-                                return highest_power
-                            except Exception as e:
-                                log_info(f"[HIGHEST POWER] Parse error: {e}")
+                html = await response.text()
 
-                    # Log debug info on last attempt
-                    if attempt == 2:
-                        idx = html.find("Highest Power")
-                        if idx != -1:
-                            log_info(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{html[max(0,idx-100):idx+300]}")
-                        else:
-                            log_info(f"[HIGHEST POWER] 'Highest Power' not found for {account_id}")
-                            log_info(f"[HIGHEST POWER DEBUG] First 500 chars: {html[:500]}")
+                # Detect login redirect
+                if "<title>Login" in html or "Sign in to Call of Stats" in html:
+                    log_info(f"[HIGHEST POWER] Got login page on attempt {attempt+1}, forcing session refresh")
+                    global _callofstats_session, _session_login_time
+                    if _callofstats_session:
+                        await _callofstats_session.close()
+                        _callofstats_session = None
+                        _session_login_time = None
+                    await asyncio.sleep(2)
+                    continue
+
+                for i, pattern in enumerate(patterns):
+                    match = re.search(pattern, html, re.DOTALL)
+                    if match:
+                        power_str = match.group(1).replace(",", "")
+                        try:
+                            highest_power = int(power_str)
+                            log_info(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i}, attempt {attempt+1})")
+                            return highest_power
+                        except Exception as e:
+                            log_info(f"[HIGHEST POWER] Parse error: {e}")
+
+                if attempt == 2:
+                    idx = html.find("Highest Power")
+                    if idx != -1:
+                        log_info(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{html[max(0,idx-100):idx+300]}")
                     else:
-                        log_info(f"[HIGHEST POWER] No match attempt {attempt+1} for {account_id}, retrying...")
-                        await asyncio.sleep(1)
+                        log_info(f"[HIGHEST POWER] Not found for {account_id}")
+                        log_info(f"[HIGHEST POWER DEBUG] First 300 chars: {html[:300]}")
+                else:
+                    log_info(f"[HIGHEST POWER] No match attempt {attempt+1} for {account_id}, retrying...")
+                    await asyncio.sleep(1)
 
         except asyncio.TimeoutError:
             log_info(f"[HIGHEST POWER] Timeout attempt {attempt+1} for {account_id}")
