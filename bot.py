@@ -340,59 +340,62 @@ async def fetch_alliance_tag(account_id):
 
 async def fetch_highest_power(account_id):
     """
-    Fetch the HIGHEST POWER from the normal profile page (no date range)
-    Uses the authenticated Call of Stats session
-    Returns the highest power value as int, or None if not found
+    Fetch the HIGHEST POWER from the normal profile page (no date range).
+    Uses a fresh independent session with retry logic for reliability.
+    Returns the highest power value as int, or None if not found.
     """
     import re
-    
-    try:
-        # Use the authenticated session instead of creating a new one
-        session = await get_callofstats_session()
-        url = f"https://callofstats.com/lord/{account_id}"
-        
-        async with session.get(url, allow_redirects=True) as response:
-            if response.status != 200:
-                log_info(f"[HIGHEST POWER] Failed to fetch {url}: {response.status}")
-                return None
-            
-            html = await response.text()
-            
-            # Try multiple patterns
-            patterns = [
-                r'Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
-                r'<span class="subtle">Highest Power</span>.*?<div class="value">([0-9,]+)</div>',
-                r'Highest Power.*?([0-9,]+)',
-            ]
-            
-            for i, pattern in enumerate(patterns):
-                match = re.search(pattern, html, re.DOTALL)
-                if match:
-                    power_str = match.group(1).replace(",", "")
-                    try:
-                        highest_power = int(power_str)
-                        log_info(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i})")
-                        return highest_power
-                    except Exception as e:
-                        log_info(f"[HIGHEST POWER] Failed to parse: {e}")
-            
-            # Debug: show section around "Highest Power"
-            idx = html.find("Highest Power")
-            if idx != -1:
-                debug_html = html[max(0, idx-200):min(len(html), idx+400)]
-                log_info(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{debug_html}")
-            else:
-                log_info(f"[HIGHEST POWER] 'Highest Power' not found in HTML at all")
-                # Show first 3000 chars
-                log_info(f"[HIGHEST POWER DEBUG] First 3000 chars:\n{html[:3000]}")
-            
-            return None
-    
-    except Exception as e:
-        log_info(f"[HIGHEST POWER ERROR] {account_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+
+    url = f"https://callofstats.com/lord/{account_id}"
+    patterns = [
+        r'<span class="subtle">Highest Power</span>\s*<div class="value">\+?([0-9,]+)</div>',
+        r'Highest Power</span>.*?<div class="value">\+?([0-9,]+)</div>',
+        r'Highest Power.*?\+?([0-9,]+)',
+    ]
+
+    for attempt in range(3):
+        try:
+            timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, allow_redirects=True) as response:
+                    if response.status != 200:
+                        log_info(f"[HIGHEST POWER] attempt {attempt+1} HTTP {response.status} for {account_id}")
+                        await asyncio.sleep(1)
+                        continue
+
+                    html = await response.text()
+
+                    for i, pattern in enumerate(patterns):
+                        match = re.search(pattern, html, re.DOTALL)
+                        if match:
+                            power_str = match.group(1).replace(",", "")
+                            try:
+                                highest_power = int(power_str)
+                                log_info(f"[HIGHEST POWER] {account_id} = {highest_power:,} (pattern {i}, attempt {attempt+1})")
+                                return highest_power
+                            except Exception as e:
+                                log_info(f"[HIGHEST POWER] Parse error: {e}")
+
+                    # Log debug info on last attempt
+                    if attempt == 2:
+                        idx = html.find("Highest Power")
+                        if idx != -1:
+                            log_info(f"[HIGHEST POWER DEBUG] HTML around 'Highest Power':\n{html[max(0,idx-100):idx+300]}")
+                        else:
+                            log_info(f"[HIGHEST POWER] 'Highest Power' not found for {account_id}")
+                            log_info(f"[HIGHEST POWER DEBUG] First 500 chars: {html[:500]}")
+                    else:
+                        log_info(f"[HIGHEST POWER] No match attempt {attempt+1} for {account_id}, retrying...")
+                        await asyncio.sleep(1)
+
+        except asyncio.TimeoutError:
+            log_info(f"[HIGHEST POWER] Timeout attempt {attempt+1} for {account_id}")
+            await asyncio.sleep(1)
+        except Exception as e:
+            log_info(f"[HIGHEST POWER ERROR] attempt {attempt+1} for {account_id}: {e}")
+            await asyncio.sleep(1)
+
+    return None
 
 
 async def fetch_current_t_kills(account_id):
@@ -2265,7 +2268,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             elif highest_power:
                 output += f"{highest_power:,}{power_rank_str}\n"
             elif power_gain:
-                output += f"{power_gain}{power_rank_str}\n"
+                output += f"+{power_gain:,}{power_rank_str}\n"
         
         # Merits - with ranking on ONE line
         if stats.get("merits"):
