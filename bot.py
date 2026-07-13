@@ -1838,7 +1838,7 @@ async def help_cmd(inter):
     
     embed.add_field(
         name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members\n`!servertop[N]` - Top N servers by power (e.g., `!servertop10`, `!servertop25`)\n`!servercheck[#]` - Find a server's rank (e.g., `!servercheck698`)",
+        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topinf [season]` - Top infantry merits (total + daily gain)\n`!topcav [season]` - Top cavalry merits (total + daily gain)\n`!topmage [season]` - Top mage merits (total + daily gain)\n`!toparcher [season]` - Top marksman merits (total + daily gain)\n`!topheal` - Top T4/T5 RSS Healed (current season)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members\n`!servertop[N]` - Top N servers by power (e.g., `!servertop10`, `!servertop25`)\n`!servercheck[#]` - Find a server's rank (e.g., `!servercheck698`)",
         inline=False
     )
     
@@ -3480,6 +3480,152 @@ async def topmerits(ctx, season_name: str = None):
     for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['merits_str']}\n"
+    output += f"📅 {start_date} → {actual_end_date}```"
+    await ctx.send(output)
+
+
+
+async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
+    """Generic advanced merit leaderboard using DB data (delayed 1 day by COS)."""
+    if season_name:
+        season = db_get_season_by_name(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+
+    season_id, season_name_display, start_date, created_at = season
+
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+
+    # Advanced stats are delayed 1 day — use yesterday + day before for gain
+    adv_yesterday  = (date.today() - timedelta(days=1)).isoformat()
+    adv_day_before = (date.today() - timedelta(days=2)).isoformat()
+
+    def parse_val(raw):
+        if not raw:
+            return 0
+        try:
+            return abs(int(str(raw).replace(",", "").replace("+", "").replace("-", "").strip()))
+        except:
+            return 0
+
+    leaderboard = []
+    for lord in lords:
+        account_id = lord["account_id"]
+        snap      = db_get_season_progress(season_id, account_id, adv_yesterday)
+        snap_prev = db_get_season_progress(season_id, account_id, adv_day_before)
+        lord_name = lord["name"]
+        val = gain = 0
+        if snap:
+            lord_name = snap.get("lord_name", lord["name"]) or lord["name"]
+            val  = parse_val(snap.get(field))
+        if snap_prev:
+            prev = parse_val(snap_prev.get(field))
+            gain = val - prev if val > prev else 0
+        leaderboard.append({"name": lord_name, "val": val, "gain": gain})
+
+    leaderboard.sort(key=lambda x: x["val"], reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    output = f"```{emoji} Top {label} — {season_name_display} (data from {adv_yesterday}, +1 day delay)\n"
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        total_str = f"+{lord['val']:,}"
+        gain_str  = f" (+{lord['gain']:,} today)" if lord["gain"] > 0 else ""
+        output += f"{medal} {lord['name']}: {total_str}{gain_str}\n"
+    output += f"📅 {start_date} → {adv_yesterday}```"
+    await ctx.send(output)
+
+
+@bot.command(name="topinf")
+async def topinf(ctx, season_name: str = None):
+    """Leaderboard for Infantry Merits. Usage: !topinf or !topinf sos1"""
+    await _top_adv_merit(ctx, season_name, "infantry_merits", "⚔️", "Infantry Merits", "TOPINF")
+
+
+@bot.command(name="topcav")
+async def topcav(ctx, season_name: str = None):
+    """Leaderboard for Cavalry Merits. Usage: !topcav or !topcav sos1"""
+    await _top_adv_merit(ctx, season_name, "cavalry_merits", "🐴", "Cavalry Merits", "TOPCAV")
+
+
+@bot.command(name="topmage")
+async def topmage(ctx, season_name: str = None):
+    """Leaderboard for Mage Merits. Usage: !topmage or !topmage sos1"""
+    await _top_adv_merit(ctx, season_name, "mage_merits", "🔮", "Mage Merits", "TOPMAGE")
+
+
+@bot.command(name="toparcher")
+async def toparcher(ctx, season_name: str = None):
+    """Leaderboard for Marksman Merits. Usage: !toparcher or !toparcher sos1"""
+    await _top_adv_merit(ctx, season_name, "marksman_merits", "🏹", "Marksman Merits", "TOPARCHER")
+
+
+@bot.command(name="topheal")
+async def topheal(ctx, season_name: str = None):
+    """Leaderboard for overall healed. Usage: !topheal (current) or !topheal sos1"""
+
+    if season_name:
+        season = db_get_season_by_name(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+
+    season_id, season_name_display, start_date, created_at = season
+    today = date.today().isoformat()
+
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+
+    await ctx.send(f"⏳ Fetching heal leaderboard for {len(lords)} lords...")
+
+    fetch_tasks = [
+        fetch_stats_with_fallback(lord["account_id"], start_date, today)
+        for lord in lords
+    ]
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+    leaderboard = []
+    actual_end_date = today
+
+    for lord, result in zip(lords, results):
+        lord_name = lord["name"]
+        healed_num = 0
+        try:
+            if result and not isinstance(result, Exception):
+                stats, end_date_used = result
+                actual_end_date = end_date_used
+                if stats:
+                    lord_name = stats.get("lord_name", lord["name"]) or lord["name"]
+                    raw = stats.get("healed_gain")
+                    if raw:
+                        clean = str(raw).replace(",", "").replace("+", "").strip()
+                        healed_num = abs(int(clean)) if clean.lstrip("-").isdigit() else 0
+        except Exception as e:
+            log_info(f"[TOPHEAL ERROR] {lord['account_id']}: {e}")
+
+        leaderboard.append({"name": lord_name, "val": healed_num})
+
+    leaderboard.sort(key=lambda x: x["val"], reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    output = f"```💊 Top Healed — {season_name_display}\n"
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        output += f"{medal} {lord['name']}: +{lord['val']:,}\n"
     output += f"📅 {start_date} → {actual_end_date}```"
     await ctx.send(output)
 
