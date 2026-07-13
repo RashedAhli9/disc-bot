@@ -3523,9 +3523,10 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
     if not lords:
         return await ctx.send("❌ No members with numeric roles found.")
 
-    # Advanced stats are delayed 1 day — use yesterday + day before for gain
-    adv_yesterday  = (date.today() - timedelta(days=1)).isoformat()
-    adv_day_before = (date.today() - timedelta(days=2)).isoformat()
+    # Advanced stats are delayed — try yesterday, then 2 days ago, then 3 days ago
+    adv_yesterday    = (date.today() - timedelta(days=1)).isoformat()
+    adv_day_before   = (date.today() - timedelta(days=2)).isoformat()
+    adv_three_ago    = (date.today() - timedelta(days=3)).isoformat()
 
     def parse_val(raw):
         if not raw:
@@ -3537,22 +3538,36 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
 
     await ctx.send(f"⏳ Fetching {label} leaderboard...")
 
-    async def fetch_adv_snap(account_id, target_date):
-        """Get DB snapshot, live-fetch from COS if advanced fields are None."""
-        snap = db_get_season_progress(season_id, account_id, target_date)
+    async def fetch_adv_snap(account_id, primary_date, fallback_date):
+        """Get DB snapshot, live-fetch from COS if advanced fields are None.
+        Tries primary_date first, then fallback_date if adv fields still missing."""
+        # Check DB first
+        snap = db_get_season_progress(season_id, account_id, primary_date)
         if snap and snap.get(field):
             return snap
-        # Live-fetch with target_date as end_date to get actual advanced stats
+        # Try live fetch for primary date
         try:
-            live, _ = await fetch_stats_with_fallback(account_id, start_date, target_date)
-            return live
+            live, _ = await fetch_stats_with_fallback(account_id, start_date, primary_date)
+            if live and live.get(field):
+                return live
         except Exception:
-            return snap  # fall back to DB snap even if None
+            pass
+        # Primary date still pending — try fallback date
+        snap2 = db_get_season_progress(season_id, account_id, fallback_date)
+        if snap2 and snap2.get(field):
+            return snap2
+        try:
+            live2, _ = await fetch_stats_with_fallback(account_id, start_date, fallback_date)
+            if live2 and live2.get(field):
+                return live2
+        except Exception:
+            pass
+        return snap  # return whatever we have even if None
 
     fetch_tasks = [
         asyncio.gather(
-            fetch_adv_snap(lord["account_id"], adv_yesterday),
-            fetch_adv_snap(lord["account_id"], adv_day_before)
+            fetch_adv_snap(lord["account_id"], adv_yesterday, adv_day_before),
+            fetch_adv_snap(lord["account_id"], adv_day_before, adv_three_ago)
         )
         for lord in lords
     ]
