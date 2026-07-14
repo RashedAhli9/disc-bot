@@ -1931,6 +1931,18 @@ async def help_cmd(inter):
     )
     
     embed.add_field(
+        name="⚔️ KvK Matchup",
+        value="`!kvkmatchup` - Start interactive KvK zone/team comparison\n`!matchups` - List all saved KvK matchups\n`!matchup [id]` - View a saved matchup's full details\n`!delmatchup [id]` - Delete a saved matchup (owner only)",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🏆 Server Leaderboards (!stop*)",
+        value="`!serverupdate` - Upload Excel file with server stats (**admin only**)\n`!stopmerits [server] [top]` - Top merits\n`!stopdeaths [server] [top]` - Top deaths\n`!stopinf [server] [top]` - Top infantry merits\n`!stopcav [server] [top]` - Top cavalry merits\n`!stopmage [server] [top]` - Top mage merits\n`!stoparcher [server] [top]` - Top marksman merits\n`!stopother [server] [top]` - Top other merits\n`!stopheal [server] [top]` - Top healing\n`!stoppower [server] [top]` - Top current power\n`!stophighest [server] [top]` - Top historical highest power",
+        inline=False
+    )
+
+    embed.add_field(
         name="📈 Advanced Gains (with Autocomplete)",
         value="`/gain start_date end_date [user]` - View gains with date autocomplete! (e.g., `/gain 2025-12-01 2026-03-31 rekz`)",
         inline=False
@@ -5853,7 +5865,14 @@ async def serverupdate(ctx):
     Upload a server stats Excel file to update the leaderboard data.
     Usage: !serverupdate (then attach the .xlsx file in the same or next message)
     Expected filename format: {server_num}_{start_date}_{end_date}.xlsx
+    Admin only.
     """
+    is_admin = ctx.author.id == OWNER_ID or (
+        ctx.guild and ctx.author.guild_permissions.administrator
+    )
+    if not is_admin:
+        return await ctx.send("❌ Only admins can update server data.")
+
     # Check if file already attached to this message
     if ctx.message.attachments:
         await _process_serverupdate_attachment(ctx, ctx.message.attachments[0])
