@@ -1546,7 +1546,7 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 bot.active_edit = None
 
 # ============================================================
@@ -1916,8 +1916,7 @@ async def on_ready():
 # HELP COMMAND
 # ============================================================
 
-@bot.tree.command(name="help", description="Show all available commands")
-async def help_cmd(inter):
+def build_help_embed(is_owner: bool):
     embed = discord.Embed(
         title="📖 Bot Commands",
         description="Here's everything you can do — commands are grouped by category below.",
@@ -1971,9 +1970,11 @@ async def help_cmd(inter):
     embed.add_field(
         name="🖥️ Server Leaderboards",
         value=(
-            "`!stopmerits / !stopdeaths / !stopheal [server] [top]` — Core stats\n"
+            "`!stopmerits / !stopdeaths [server] [top]` — Core stats\n"
+            "`!stopheal [top]` — Top healing\n"
             "`!stopinf / !stopcav / !stopmage / !stoparcher / !stopother [server] [top]` — Merit breakdowns\n"
-            "`!stoppower / !stophighest [server] [top]` — Power stats\n\n"
+            "`!stoppower [server] [top]` — Current power\n"
+            "`!stophighest [top]` — Historical highest power\n\n"
             "*Data comes from the latest Excel upload — see admin section below*"
         ),
         inline=False
@@ -2010,7 +2011,7 @@ async def help_cmd(inter):
     )
 
     # ============ ADMIN / OWNER COMMANDS ============
-    if inter.user.id == OWNER_ID:
+    if is_owner:
         embed.add_field(
             name="\u200b",
             value="\u200b",
@@ -2054,6 +2055,12 @@ async def help_cmd(inter):
         )
 
     embed.set_footer(text="Use / to see all slash commands  •  Use ! for text commands")
+    return embed
+
+
+@bot.tree.command(name="help", description="Show all available commands")
+async def help_cmd(inter):
+    embed = build_help_embed(inter.user.id == OWNER_ID)
     await inter.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -6011,9 +6018,9 @@ async def stopmerits(ctx, server: int = None, top: int = 25):
     await _server_leaderboard(ctx, server, "total_merits", "🏅", "Merits", top)
 
 @bot.command(name="stopheal")
-async def stopheal(ctx, server: int = None, top: int = 25):
-    """Top healing on server. Usage: !stopheal [server] [top]"""
-    await _server_leaderboard(ctx, server, "healing", "❤️", "Healing", top)
+async def stopheal(ctx, top: int = 25):
+    """Top healing on server. Usage: !stopheal [top]"""
+    await _server_leaderboard(ctx, None, "healing", "❤️", "Healing", top)
 
 @bot.command(name="stopinf")
 async def stopinf(ctx, server: int = None, top: int = 25):
@@ -6041,9 +6048,9 @@ async def stoppower(ctx, server: int = None, top: int = 25):
     await _server_leaderboard(ctx, server, "current_power", "⚡", "Current Power", top)
 
 @bot.command(name="stophighest")
-async def stophighest(ctx, server: int = None, top: int = 25):
-    """Top historical highest power on server. Usage: !stophighest [server] [top]"""
-    await _server_leaderboard(ctx, server, "highest_power", "⚡", "Highest Power", top)
+async def stophighest(ctx, top: int = 25):
+    """Top historical highest power on server. Usage: !stophighest [top]"""
+    await _server_leaderboard(ctx, None, "highest_power", "⚡", "Highest Power", top)
 
 @bot.command(name="stopother")
 async def stopother(ctx, server: int = None, top: int = 25):
