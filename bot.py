@@ -1920,60 +1920,140 @@ async def on_ready():
 async def help_cmd(inter):
     embed = discord.Embed(
         title="📖 Bot Commands",
-        description="All available commands for Abyss management and season tracking",
+        description="Here's everything you can do — commands are grouped by category below.",
         color=0x3498db
     )
-    
+
+    # ============ MEMBER COMMANDS ============
     embed.add_field(
-        name="📊 Season Stats Commands (use ! prefix)",
-        value="`!progress [user]` - Full season stats (e.g., !progress or !progress rekz)\n`!oldprogress [user]` - View past season stats\n`!q [user]` - Quick one-liner stats\n`!compare lord1 lord2` - Compare two players\n`!gains [season] [user]` - View gains (e.g., !gains | !gains sos1 | !gains rekz | !gains sos1 rekz)\n`!topmana [season]` - Top mana gathered (e.g., !topmana or !topmana sos1)\n`!topinf [season]` - Top infantry merits (total + daily gain)\n`!topcav [season]` - Top cavalry merits (total + daily gain)\n`!topmage [season]` - Top mage merits (total + daily gain)\n`!toparcher [season]` - Top marksman merits (total + daily gain)\n`!topheal` - Top T4/T5 RSS Healed (current season)\n`!topdeaths [season]` - Most deaths (e.g., !topdeaths sos2)\n`!topmerits [season]` - Highest merits (e.g., !topmerits sos1)\n`!rss [season]` - Top resource spenders (e.g., !rss or !rss sos1)\n`!active` - Active vs inactive members\n`!servertop[N]` - Top N servers by power (e.g., `!servertop10`, `!servertop25`)\n`!servercheck[#]` - Find a server's rank (e.g., `!servercheck698`)",
+        name="🟢 ​ M E M B E R ​ C O M M A N D S",
+        value="\u200b",
         inline=False
     )
-    
+
+    embed.add_field(
+        name="📊 Progress & Stats",
+        value=(
+            "`!progress [user]` — Full season stats\n"
+            "`!oldprogress [user]` — Past season stats\n"
+            "`!q [user]` — Quick one-liner stats\n"
+            "`!compare lord1 lord2` — Compare two players\n"
+            "`!gains [season] [user]` — View gains\n"
+            "`/gain start_date end_date [user]` — Gains with date autocomplete\n"
+            "`!active` — Active vs inactive members"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🏆 Leaderboards",
+        value=(
+            "`!topmana [season]` — Top mana gathered\n"
+            "`!topinf / !topcav / !topmage / !toparcher [season]` — Merit breakdowns (total + daily gain)\n"
+            "`!topheal` — Top T4/T5 RSS healed\n"
+            "`!topdeaths [season]` — Most deaths\n"
+            "`!topmerits [season]` — Highest merits\n"
+            "`!rss [season]` — Top resource spenders\n\n"
+            "*All support an optional `[season]` — e.g. `!topmerits sos1`*"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🌐 Server Lookup",
+        value=(
+            "`!servertop[N]` — Top N servers by power (e.g. `!servertop25`)\n"
+            "`!servercheck[#]` — Find a server's rank (e.g. `!servercheck698`)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🖥️ Server Leaderboards",
+        value=(
+            "`!stopmerits / !stopdeaths / !stopheal [server] [top]` — Core stats\n"
+            "`!stopinf / !stopcav / !stopmage / !stoparcher / !stopother [server] [top]` — Merit breakdowns\n"
+            "`!stoppower / !stophighest [server] [top]` — Power stats\n\n"
+            "*Data comes from the latest Excel upload — see admin section below*"
+        ),
+        inline=False
+    )
+
     embed.add_field(
         name="⚔️ KvK Matchup",
-        value="`!kvkmatchup` - Start interactive KvK zone/team comparison\n`!matchups` - List all saved KvK matchups\n`!matchup [id]` - View a saved matchup's full details\n`!delmatchup [id]` - Delete a saved matchup (owner only)",
+        value=(
+            "`!kvkmatchup` — Interactive zone/team comparison\n"
+            "`!matchups` — List all saved matchups\n"
+            "`!matchup [id]` — View a saved matchup's details"
+        ),
         inline=False
     )
 
     embed.add_field(
-        name="🏆 Server Leaderboards (!stop*)",
-        value="`!serverupdate` - Upload Excel file with server stats (**admin only**)\n`!stopmerits [server] [top]` - Top merits\n`!stopdeaths [server] [top]` - Top deaths\n`!stopinf [server] [top]` - Top infantry merits\n`!stopcav [server] [top]` - Top cavalry merits\n`!stopmage [server] [top]` - Top mage merits\n`!stoparcher [server] [top]` - Top marksman merits\n`!stopother [server] [top]` - Top other merits\n`!stopheal [server] [top]` - Top healing\n`!stoppower [server] [top]` - Top current power\n`!stophighest [server] [top]` - Top historical highest power",
+        name="📚 Historical Data",
+        value=(
+            "`!seasonhistory` — All seasons with dates\n"
+            "`!datahistory` — Oldest/newest saved dates"
+        ),
         inline=False
     )
 
     embed.add_field(
-        name="📈 Advanced Gains (with Autocomplete)",
-        value="`/gain start_date end_date [user]` - View gains with date autocomplete! (e.g., `/gain 2025-12-01 2026-03-31 rekz`)",
+        name="👤 Roles & Events",
+        value=(
+            "`/addrole` — Get Abyss reminders\n"
+            "`/removerole` — Stop Abyss reminders\n"
+            "`/weeklyevent` — Show current weekly events\n"
+            "`/kvkevent` — Show custom events"
+        ),
         inline=False
     )
-    
-    embed.add_field(
-        name="📚 Historical Data Commands",
-        value="`!seasonhistory` - View all seasons with dates (name, start → end)\n`!datahistory` - Show oldest/newest saved dates\n\n**Note:** All commands above support `[season]` parameter to view specific season data!",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="👤 Role Management",
-        value="`/addrole` - Get Abyss reminders\n`/removerole` - Stop Abyss reminders",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📅 Events",
-        value="`/weeklyevent` - Show current weekly events\n`/kvkevent` - Show custom events",
-        inline=False
-    )
-    
+
+    # ============ ADMIN / OWNER COMMANDS ============
     if inter.user.id == OWNER_ID:
         embed.add_field(
-            name="⚙️ Admin Commands (Owner Only)",
-            value="`/newseason` - Start a new season\n`/addevent` - Add custom event\n`/editevent` - Edit event\n`/removeevent` - Delete event\n`/abyssconfig` - Configure Abyss settings\n`/testdm` - Test DM system\n`/backup` - List database backups\n`/forcebackup` - Create backup now\n`!forcefetch` - Fetch latest stats immediately\n`!loadhistory` - Load season data from season start\n`!loadhistory all` - Load all Call of Stats data (auto-detects oldest date)\n`!datahistory` - Show oldest/newest data range in database\n`!cleandata` - Scan and delete empty/zero-data snapshots",
+            name="\u200b",
+            value="\u200b",
             inline=False
         )
-    
-    embed.set_footer(text="Use / to see all slash commands | Use ! for text commands")
+        embed.add_field(
+            name="🔒 ​ A D M I N ​ /  ​ O W N E R ​ C O M M A N D S",
+            value="\u200b",
+            inline=False
+        )
+
+        embed.add_field(
+            name="🖥️ Server Data",
+            value="`!serverupdate` — Upload Excel file with server stats (**admin only**)\n`!delmatchup [id]` — Delete a saved KvK matchup",
+            inline=False
+        )
+
+        embed.add_field(
+            name="⚙️ Season & Data Management",
+            value=(
+                "`/newseason` — Start a new season\n"
+                "`!forcefetch` — Fetch latest stats immediately\n"
+                "`!loadhistory` — Load season data from season start\n"
+                "`!loadhistory all` — Load all Call of Stats data (auto-detects oldest date)\n"
+                "`!datahistory` — Show oldest/newest data range\n"
+                "`!cleandata` — Delete empty/zero-data snapshots"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="📅 Event Management",
+            value="`/addevent` — Add custom event\n`/editevent` — Edit event\n`/removeevent` — Delete event\n`/abyssconfig` — Configure Abyss settings",
+            inline=False
+        )
+
+        embed.add_field(
+            name="🛠️ System",
+            value="`/testdm` — Test DM system\n`/backup` — List database backups\n`/forcebackup` — Create backup now",
+            inline=False
+        )
+
+    embed.set_footer(text="Use / to see all slash commands  •  Use ! for text commands")
     await inter.response.send_message(embed=embed, ephemeral=True)
 
 
