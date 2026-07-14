@@ -40,6 +40,8 @@ import io
 import zipfile
 import asyncio
 import aiohttp
+import openpyxl
+import io
 
 # ============================================================
 # LOGGING SYSTEM
@@ -629,6 +631,35 @@ def init_db():
         );
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS server_config (
+            id INTEGER PRIMARY KEY,
+            server_num INTEGER NOT NULL,
+            set_at TEXT NOT NULL
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS server_lord_stats (
+            server_num INTEGER NOT NULL,
+            account_id TEXT NOT NULL,
+            lord_name TEXT,
+            current_power INTEGER DEFAULT 0,
+            highest_power INTEGER DEFAULT 0,
+            deaths INTEGER DEFAULT 0,
+            total_merits INTEGER DEFAULT 0,
+            gathering INTEGER DEFAULT 0,
+            infantry_merits INTEGER DEFAULT 0,
+            cavalry_merits INTEGER DEFAULT 0,
+            marksman_merits INTEGER DEFAULT 0,
+            mage_merits INTEGER DEFAULT 0,
+            other_merits INTEGER DEFAULT 0,
+            healing INTEGER DEFAULT 0,
+            start_date TEXT,
+            end_date TEXT,
+            uploaded_at TEXT,
+            PRIMARY KEY (server_num, account_id)
+        );
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS kvk_matchups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nickname TEXT NOT NULL,
@@ -821,6 +852,63 @@ def db_delete_kvk_matchup(matchup_id):
     c.execute("DELETE FROM kvk_matchups WHERE id = ?", (matchup_id,))
     conn.commit()
     conn.close()
+
+
+def db_get_server_pick():
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT server_num FROM server_config ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def db_set_server_pick(server_num):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM server_config")
+    c.execute("INSERT INTO server_config (server_num, set_at) VALUES (?, ?)",
+              (server_num, date.today().isoformat()))
+    conn.commit()
+    conn.close()
+
+def db_replace_server_lord_stats(server_num, rows, start_date, end_date):
+    """Delete all existing rows for this server, then insert the new upload."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM server_lord_stats WHERE server_num = ?", (server_num,))
+    now = datetime.utcnow().isoformat()
+    for r in rows:
+        c.execute("""
+            INSERT INTO server_lord_stats (
+                server_num, account_id, lord_name, current_power, highest_power,
+                deaths, total_merits, gathering, infantry_merits, cavalry_merits,
+                marksman_merits, mage_merits, other_merits, healing,
+                start_date, end_date, uploaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            server_num, r["account_id"], r["lord_name"], r["current_power"], r["highest_power"],
+            r["deaths"], r["total_merits"], r["gathering"], r["infantry_merits"], r["cavalry_merits"],
+            r["marksman_merits"], r["mage_merits"], r["other_merits"], r["healing"],
+            start_date, end_date, now
+        ))
+    conn.commit()
+    conn.close()
+
+def db_get_server_lord_stats(server_num):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("""
+        SELECT account_id, lord_name, current_power, highest_power, deaths, total_merits,
+               gathering, infantry_merits, cavalry_merits, marksman_merits, mage_merits,
+               other_merits, healing, start_date, end_date
+        FROM server_lord_stats WHERE server_num = ?
+    """, (server_num,))
+    rows = c.fetchall()
+    conn.close()
+    cols = ["account_id","lord_name","current_power","highest_power","deaths","total_merits",
+            "gathering","infantry_merits","cavalry_merits","marksman_merits","mage_merits",
+            "other_merits","healing","start_date","end_date"]
+    return [dict(zip(cols, r)) for r in rows]
 migrate_db_progress()
 
 # ============================================================
@@ -5057,6 +5145,21 @@ async def on_message(message):
         await cmd_servercheck(message, server_num)
         return
 
+    # Server update: waiting for Excel attachment
+    if message.author.id in serverupdate_pending and message.attachments:
+        if message.content.strip().lower() in ("cancel", "!cancel"):
+            del serverupdate_pending[message.author.id]
+            await message.channel.send("❌ Server update cancelled.")
+            return
+        del serverupdate_pending[message.author.id]
+        await _process_serverupdate_attachment(await bot.get_context(message), message.attachments[0])
+        return
+
+    if message.author.id in serverupdate_pending and message.content.strip().lower() in ("cancel", "!cancel"):
+        del serverupdate_pending[message.author.id]
+        await message.channel.send("❌ Server update cancelled.")
+        return
+
     # KvK matchup multi-step flow
     channel_id_key = message.channel.id
     if channel_id_key in kvk_sessions:
@@ -5593,6 +5696,260 @@ async def cmd_matchup_delete(message, matchup_id):
         return
     db_delete_kvk_matchup(matchup_id)
     await message.channel.send(f"🗑️ Matchup **#{matchup_id} — {m['nickname']}** deleted.")
+
+
+
+# ============================================================
+# SERVER LEADERBOARD COMMANDS (!stop*)
+# ============================================================
+
+def _parse_stat_str(raw):
+    """Parse a stat value (int, string, or '+1,234' style) to a plain int."""
+    if raw is None:
+        return 0
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    try:
+        return abs(int(str(raw).replace(",", "").replace("+", "").replace("-", "").strip()))
+    except:
+        return 0
+
+
+def parse_server_excel(file_bytes):
+    """
+    Parse an uploaded server stats Excel file.
+    Expected columns: Rank, Character ID, Character Name, Current Power,
+    Historical Highest Power, Deaths (T4/T5), Total Merits, Gathering,
+    Infantry Only, Cavalry Only, Marksman Only, Magic Only, Other Merits, Healing (T4/T5)
+    Returns (rows, error).
+    """
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb[wb.sheetnames[0]]
+    except Exception as e:
+        return None, f"Could not open Excel file: {e}"
+
+    header_row = None
+    for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+        header_row = [str(h).strip().lower() if h else "" for h in row]
+        break
+
+    if not header_row:
+        return None, "Excel file appears empty."
+
+    def find_col(*names):
+        for name in names:
+            for i, h in enumerate(header_row):
+                if name in h:
+                    return i
+        return None
+
+    col_id       = find_col("character id", "lord id", "account id")
+    col_name     = find_col("character name", "lord name", "name")
+    col_power    = find_col("current power")
+    col_highest  = find_col("historical highest power", "highest power")
+    col_deaths   = find_col("deaths")
+    col_merits   = find_col("total merits")
+    col_gather   = find_col("gathering")
+    col_inf      = find_col("infantry")
+    col_cav      = find_col("cavalry")
+    col_mark     = find_col("marksman")
+    col_mage     = find_col("magic", "mage")
+    col_other    = find_col("other merits")
+    col_heal     = find_col("healing")
+
+    if col_id is None or col_name is None:
+        return None, f"Could not find required columns. Headers found: {header_row}"
+
+    rows = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or row[col_id] is None:
+            continue
+        try:
+            account_id = str(row[col_id]).strip()
+            if not account_id or account_id.lower() == "none":
+                continue
+            rows.append({
+                "account_id": account_id,
+                "lord_name": str(row[col_name]).strip() if col_name is not None and row[col_name] else account_id,
+                "current_power": _parse_stat_str(row[col_power]) if col_power is not None else 0,
+                "highest_power": _parse_stat_str(row[col_highest]) if col_highest is not None else 0,
+                "deaths": _parse_stat_str(row[col_deaths]) if col_deaths is not None else 0,
+                "total_merits": _parse_stat_str(row[col_merits]) if col_merits is not None else 0,
+                "gathering": _parse_stat_str(row[col_gather]) if col_gather is not None else 0,
+                "infantry_merits": _parse_stat_str(row[col_inf]) if col_inf is not None else 0,
+                "cavalry_merits": _parse_stat_str(row[col_cav]) if col_cav is not None else 0,
+                "marksman_merits": _parse_stat_str(row[col_mark]) if col_mark is not None else 0,
+                "mage_merits": _parse_stat_str(row[col_mage]) if col_mage is not None else 0,
+                "other_merits": _parse_stat_str(row[col_other]) if col_other is not None else 0,
+                "healing": _parse_stat_str(row[col_heal]) if col_heal is not None else 0,
+            })
+        except Exception as e:
+            log_info(f"[SERVERUPDATE] Skipping row due to error: {e}")
+            continue
+
+    if not rows:
+        return None, "No valid lord rows found in the Excel file."
+
+    return rows, None
+
+
+def parse_server_filename(filename):
+    """
+    Try to extract server_num, start_date, end_date from filename like
+    '698_2026-07-02_2026-07-13.xlsx'. Returns (server_num, start_date, end_date) or (None, None, None).
+    """
+    import re
+    m = re.match(r'(\d+)_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})', filename)
+    if m:
+        return int(m.group(1)), m.group(2), m.group(3)
+    # Try just server number at start
+    m2 = re.match(r'(\d+)', filename)
+    if m2:
+        return int(m2.group(1)), None, None
+    return None, None, None
+
+
+async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=25):
+    """Generic server leaderboard from the uploaded Excel data."""
+    picked = db_get_server_pick()
+    if not picked:
+        return await ctx.send("❌ No server picked. Use `!serverupdate` and upload an Excel file first.")
+    if server_num and server_num != picked:
+        return await ctx.send(f"❌ S#{server_num} is not the picked server (current: S#{picked}).")
+
+    lords = db_get_server_lord_stats(picked)
+    if not lords:
+        return await ctx.send(f"❌ No data for S#{picked}. Use `!serverupdate` to upload the Excel file.")
+
+    scored = [{"name": l["lord_name"], "val": l.get(stat_field, 0)} for l in lords]
+    scored.sort(key=lambda x: x["val"], reverse=True)
+    top = scored[:top_n]
+
+    if not any(x["val"] > 0 for x in top):
+        return await ctx.send(f"❌ No {label} data found for S#{picked}.")
+
+    date_range = ""
+    if lords[0].get("start_date") and lords[0].get("end_date"):
+        date_range = f" ({lords[0]['start_date']} → {lords[0]['end_date']})"
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"```{emoji} Top {top_n} {label} — S#{picked}{date_range}"]
+    for i, lord in enumerate(top):
+        if lord["val"] == 0:
+            continue
+        medal = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
+    lines.append("```")
+    await ctx.send("\n".join(lines))
+
+
+# In-progress serverupdate sessions: user_id -> True (awaiting file upload)
+serverupdate_pending = {}
+
+@bot.command(name="serverupdate")
+async def serverupdate(ctx):
+    """
+    Upload a server stats Excel file to update the leaderboard data.
+    Usage: !serverupdate (then attach the .xlsx file in the same or next message)
+    Expected filename format: {server_num}_{start_date}_{end_date}.xlsx
+    """
+    # Check if file already attached to this message
+    if ctx.message.attachments:
+        await _process_serverupdate_attachment(ctx, ctx.message.attachments[0])
+        return
+
+    serverupdate_pending[ctx.author.id] = ctx.channel.id
+    await ctx.send(
+        "📎 Please upload the server stats Excel file now (attach it to your next message).\n"
+        "Expected filename format: `{server}_{start_date}_{end_date}.xlsx` (e.g. `698_2026-07-02_2026-07-13.xlsx`)\n"
+        "Type `cancel` to abort."
+    )
+
+
+async def _process_serverupdate_attachment(ctx, attachment):
+    if not attachment.filename.lower().endswith((".xlsx", ".xls")):
+        return await ctx.send("❌ Please upload an Excel file (.xlsx or .xls).")
+
+    server_num, start_date, end_date = parse_server_filename(attachment.filename)
+    if server_num is None:
+        return await ctx.send(
+            "❌ Could not detect server number from filename. "
+            "Please rename it like `698_2026-07-02_2026-07-13.xlsx` and try again."
+        )
+
+    msg = await ctx.send(f"📥 Downloading and parsing `{attachment.filename}`...")
+
+    try:
+        file_bytes = await attachment.read()
+    except Exception as e:
+        return await msg.edit(content=f"❌ Failed to download file: {e}")
+
+    rows, error = parse_server_excel(file_bytes)
+    if error or not rows:
+        return await msg.edit(content=f"❌ Failed to parse Excel: {error or 'No rows found'}")
+
+    db_set_server_pick(server_num)
+    db_replace_server_lord_stats(server_num, rows, start_date, end_date)
+
+    date_str = f" ({start_date} → {end_date})" if start_date and end_date else ""
+    await msg.edit(content=(
+        f"✅ Server **S#{server_num}** updated{date_str}!\n"
+        f"Loaded **{len(rows)} lords** from the Excel file.\n"
+        f"Use `!stopmerits`, `!stopdeaths`, `!stopinf`, etc. to view leaderboards."
+    ))
+    log_info(f"[SERVERUPDATE] S#{server_num}: {len(rows)} lords loaded from {attachment.filename}")
+
+
+@bot.command(name="stopdeaths")
+async def stopdeaths(ctx, server: int = None, top: int = 25):
+    """Top deaths on server. Usage: !stopdeaths [server] [top]"""
+    await _server_leaderboard(ctx, server, "deaths", "💀", "Deaths", top)
+
+@bot.command(name="stopmerits")
+async def stopmerits(ctx, server: int = None, top: int = 25):
+    """Top merits on server. Usage: !stopmerits [server] [top]"""
+    await _server_leaderboard(ctx, server, "total_merits", "🏅", "Merits", top)
+
+@bot.command(name="stopheal")
+async def stopheal(ctx, server: int = None, top: int = 25):
+    """Top healing on server. Usage: !stopheal [server] [top]"""
+    await _server_leaderboard(ctx, server, "healing", "❤️", "Healing", top)
+
+@bot.command(name="stopinf")
+async def stopinf(ctx, server: int = None, top: int = 25):
+    """Top infantry merits on server. Usage: !stopinf [server] [top]"""
+    await _server_leaderboard(ctx, server, "infantry_merits", "⚔️", "Infantry Merits", top)
+
+@bot.command(name="stopcav")
+async def stopcav(ctx, server: int = None, top: int = 25):
+    """Top cavalry merits on server. Usage: !stopcav [server] [top]"""
+    await _server_leaderboard(ctx, server, "cavalry_merits", "🐴", "Cavalry Merits", top)
+
+@bot.command(name="stopmage")
+async def stopmage(ctx, server: int = None, top: int = 25):
+    """Top mage merits on server. Usage: !stopmage [server] [top]"""
+    await _server_leaderboard(ctx, server, "mage_merits", "🔮", "Mage Merits", top)
+
+@bot.command(name="stoparcher")
+async def stoparcher(ctx, server: int = None, top: int = 25):
+    """Top marksman merits on server. Usage: !stoparcher [server] [top]"""
+    await _server_leaderboard(ctx, server, "marksman_merits", "🏹", "Marksman Merits", top)
+
+@bot.command(name="stoppower")
+async def stoppower(ctx, server: int = None, top: int = 25):
+    """Top current power on server. Usage: !stoppower [server] [top]"""
+    await _server_leaderboard(ctx, server, "current_power", "⚡", "Current Power", top)
+
+@bot.command(name="stophighest")
+async def stophighest(ctx, server: int = None, top: int = 25):
+    """Top historical highest power on server. Usage: !stophighest [server] [top]"""
+    await _server_leaderboard(ctx, server, "highest_power", "⚡", "Highest Power", top)
+
+@bot.command(name="stopother")
+async def stopother(ctx, server: int = None, top: int = 25):
+    """Top other merits on server. Usage: !stopother [server] [top]"""
+    await _server_leaderboard(ctx, server, "other_merits", "🌀", "Other Merits", top)
 
 
 # ============================================================
