@@ -631,6 +631,14 @@ def init_db():
         );
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS bot_status_config (
+            id INTEGER PRIMARY KEY,
+            mode TEXT NOT NULL DEFAULT 'default',
+            custom_text TEXT,
+            updated_at TEXT
+        );
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS server_config (
             id INTEGER PRIMARY KEY,
             server_num INTEGER NOT NULL,
@@ -1009,6 +1017,29 @@ def db_get_last_known_data_date():
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
+
+def db_get_bot_status():
+    """Get current bot status config: (mode, custom_text). mode is 'default' or 'custom'."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT mode, custom_text FROM bot_status_config ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return row[0], row[1]
+    return "default", None
+
+def db_set_bot_status(mode, custom_text=None):
+    """Set bot status config. mode is 'default' or 'custom'."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM bot_status_config")
+    c.execute(
+        "INSERT INTO bot_status_config (mode, custom_text, updated_at) VALUES (?, ?, ?)",
+        (mode, custom_text, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
 
 def db_update_data_date(new_date):
     """Update the latest data date and reset notified flag"""
@@ -1571,6 +1602,25 @@ async def backup(inter):
     )
     await inter.response.send_message(msg, ephemeral=True)
 
+@bot.tree.command(name="setstatus", description="Set the bot's Discord status (owner only)")
+async def setstatus(inter, text: str):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    if text.strip().lower() == "default":
+        db_set_bot_status("default")
+        await update_bot_presence()
+        latest_date = db_get_last_known_data_date()
+        shown = f"Data: {latest_date}" if latest_date else "Abyss events ⚔️"
+        return await inter.response.send_message(
+            f"✅ Status reset to default — now showing: **{shown}**", ephemeral=True
+        )
+
+    db_set_bot_status("custom", text)
+    await update_bot_presence()
+    await inter.response.send_message(f"✅ Status set to: **{text}**", ephemeral=True)
+
+
 @bot.tree.command(name="forcebackup", description="Create a backup now")
 async def forcebackup(inter):
     if inter.user.id != OWNER_ID:
@@ -1771,7 +1821,10 @@ async def check_callofstats_update():
             
             # Update database
             db_update_data_date(latest_date)
-            
+
+            # Refresh bot status/presence to reflect new date (only affects "default" mode)
+            await update_bot_presence()
+
             # IMMEDIATELY refresh cache with new data
             log_info(f"[CALLOFSTATS UPDATE] Triggering cache refresh...")
             await force_refresh_all_stats()
@@ -1854,16 +1907,29 @@ def preload_cache_from_db():
     except Exception as e:
         log_error(f"[PRELOAD ERROR] {e}")
 
+async def update_bot_presence():
+    """Set the bot's Discord status based on bot_status_config: default (latest COS data date) or custom text."""
+    mode, custom_text = db_get_bot_status()
+
+    if mode == "custom" and custom_text:
+        text = custom_text
+    else:
+        latest_date = db_get_last_known_data_date()
+        text = f"Data: {latest_date}" if latest_date else "Abyss events ⚔️"
+
+    try:
+        activity = discord.Activity(type=discord.ActivityType.watching, name=text)
+        await bot.change_presence(activity=activity)
+    except Exception as e:
+        log_info(f"[PRESENCE] Failed to update: {e}")
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
     # Set bot status/activity
-    activity = discord.Activity(
-        type=discord.ActivityType.watching,
-        name="Abyss events ⚔️"
-    )
-    await bot.change_presence(activity=activity)
+    await update_bot_presence()
 
     # Sync commands once
     try:
@@ -2050,7 +2116,7 @@ def build_help_embed(is_owner: bool):
 
         embed.add_field(
             name="🛠️ System",
-            value="`/testdm` — Test DM system\n`/backup` — List database backups\n`/forcebackup` — Create backup now",
+            value="`/testdm` — Test DM system\n`/backup` — List database backups\n`/forcebackup` — Create backup now\n`/setstatus text` — Set bot status (`default` = latest data date)",
             inline=False
         )
 
