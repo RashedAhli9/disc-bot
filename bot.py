@@ -1706,6 +1706,15 @@ async def setstatus(inter, text: str):
     await inter.response.send_message(f"✅ Status set to: **{text}**", ephemeral=True)
 
 
+@bot.tree.command(name="say", description="Make the bot say something (owner only)")
+async def say(inter, text: str):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+
+    await inter.response.send_message("✅ Sent.", ephemeral=True)
+    await inter.channel.send(text)
+
+
 @bot.tree.command(name="forcebackup", description="Create a backup now")
 async def forcebackup(inter):
     if inter.user.id != OWNER_ID:
@@ -2201,7 +2210,7 @@ def build_help_embed(is_owner: bool):
 
         embed.add_field(
             name="🛠️ System",
-            value="`/testdm` — Test DM system\n`/backup` — List database backups\n`/forcebackup` — Create backup now\n`/setstatus text` — Set bot status (`default` = latest data date)",
+            value="`/testdm` — Test DM system\n`/backup` — List database backups\n`/forcebackup` — Create backup now\n`/setstatus text` — Set bot status (`default` = latest data date)\n`/say text` — Make the bot say something",
             inline=False
         )
 
