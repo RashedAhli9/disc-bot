@@ -415,6 +415,87 @@ async def fetch_highest_power(account_id):
     return None
 
 
+async def fetch_achievement_stats(account_id):
+    """
+    Fetch EXCHANGE COINS SPENT and MAX PETS achievement values from the normal
+    profile page (no date range), in a single request. Both are lifetime totals.
+    Returns dict {"exchange_coins_spent": int|None, "max_pets": int|None}.
+    """
+    import re
+
+    url = f"https://callofstats.com/lord/{account_id}"
+    result = {"exchange_coins_spent": None, "max_pets": None}
+
+    achievement_patterns = {
+        "exchange_coins_spent": [
+            r'<div class="achievement-name">Exchange Coins Spent</div>\s*<div class="achievement-labels">.*?<div class="achievement-values">\s*<span>\+?([0-9,]+)</span>',
+            r'Exchange Coins Spent</div>.*?<span>\+?([0-9,]+)</span>',
+        ],
+        "max_pets": [
+            r'<div class="achievement-name">Max Pets</div>\s*<div class="achievement-labels">.*?<div class="achievement-values">\s*<span>\+?([0-9,]+)</span>',
+            r'Max Pets</div>.*?<span>\+?([0-9,]+)</span>',
+        ],
+    }
+
+    for attempt in range(3):
+        try:
+            session = await get_callofstats_session()
+            if not session:
+                log_info(f"[ACHIEVEMENTS] No session available, attempt {attempt+1}")
+                await asyncio.sleep(2)
+                continue
+
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    log_info(f"[ACHIEVEMENTS] HTTP {response.status} attempt {attempt+1} for {account_id}")
+                    await asyncio.sleep(1)
+                    continue
+
+                html = await response.text()
+
+                if "<title>Login" in html or "Sign in to Call of Stats" in html:
+                    log_info(f"[ACHIEVEMENTS] Got login page on attempt {attempt+1}, forcing session refresh")
+                    global _callofstats_session, _session_login_time
+                    if _callofstats_session:
+                        await _callofstats_session.close()
+                        _callofstats_session = None
+                        _session_login_time = None
+                    await asyncio.sleep(2)
+                    continue
+
+                for key, patterns in achievement_patterns.items():
+                    for i, pattern in enumerate(patterns):
+                        match = re.search(pattern, html, re.DOTALL)
+                        if match:
+                            val_str = match.group(1).replace(",", "")
+                            try:
+                                result[key] = int(val_str)
+                                log_info(f"[ACHIEVEMENTS] {account_id} {key} = {result[key]:,} (pattern {i})")
+                                break
+                            except Exception as e:
+                                log_info(f"[ACHIEVEMENTS] Parse error for {key}: {e}")
+
+                # If we got at least one value, or this is the last attempt, return what we have
+                if result["exchange_coins_spent"] is not None or result["max_pets"] is not None or attempt == 2:
+                    if result["exchange_coins_spent"] is None and result["max_pets"] is None:
+                        log_info(f"[ACHIEVEMENTS] Nothing found for {account_id}")
+                    return result
+                else:
+                    log_info(f"[ACHIEVEMENTS] No match attempt {attempt+1} for {account_id}, retrying...")
+                    await asyncio.sleep(1)
+
+        except asyncio.TimeoutError:
+            log_info(f"[ACHIEVEMENTS] Timeout attempt {attempt+1} for {account_id}")
+            await asyncio.sleep(1)
+        except Exception as e:
+            log_info(f"[ACHIEVEMENTS ERROR] attempt {attempt+1} for {account_id}: {e}")
+            await asyncio.sleep(1)
+
+    return result
+
+    return None
+
+
 async def fetch_current_t_kills(account_id):
     """
     Fetch the CURRENT T5-T1 kill totals for a lord (no date range)
@@ -2353,6 +2434,24 @@ async def deleteseason(inter: discord.Interaction):
     await inter.response.send_message("Select a season to delete:", view=view, ephemeral=True)
 
 
+class ExchangeCoinsView(discord.ui.View):
+    """View with a 'Show More' button that reveals Exchange Coins Spent and Max Pets (lifetime totals)."""
+    def __init__(self, exchange_coins_spent, max_pets):
+        super().__init__(timeout=300)
+        self.exchange_coins_spent = exchange_coins_spent
+        self.max_pets = max_pets
+
+    @discord.ui.button(label="🏆 Show Achievements", style=discord.ButtonStyle.secondary)
+    async def show_more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        coins_str = f"{self.exchange_coins_spent:,}" if self.exchange_coins_spent is not None else "not available"
+        pets_str = f"{self.max_pets:,}" if self.max_pets is not None else "not available"
+        msg = (
+            f"🪙 **Exchange Coins Spent** (lifetime): {coins_str}\n"
+            f"🐾 **Max Pets** (lifetime): {pets_str}"
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
 @bot.command(name="progress")
 async def progress(ctx, user_input: str = None, season_input: str = None):
     """
@@ -2540,6 +2639,11 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         
         # Get current T-kills from normal profile (only if not in database)
         current_t_kills = await fetch_current_t_kills(account_id)
+
+        # Get Exchange Coins Spent + Max Pets (achievement stats, shown via "Show More" button)
+        achievement_stats = await fetch_achievement_stats(account_id)
+        exchange_coins_spent = achievement_stats["exchange_coins_spent"]
+        max_pets = achievement_stats["max_pets"]
         
         # Calculate merit to power ratio using highest power and merits
         if stats.get("merits") and highest_power:
@@ -2682,7 +2786,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         output += f"\n"
 
         # RSS Spent - each resource on own line with absolute values
-        output += f"💰 RSS Spent\n"
+        output += f"💰 RSS Spent _(currently broken on COS)_\n"
         if stats.get("gold_spent"):
             gold_clean = stats['gold_spent'].replace(",", "").replace("+", "")
             gold_val = abs(int(gold_clean)) if gold_clean.lstrip("-").isdigit() else 0
@@ -2714,11 +2818,16 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             output += f"💧 Mana: {stats['mana_gathered']}\n"
         output += f"Total: {total_gathered:,}\n"
         output += f"\n"
+
+        # Exchange Coins Spent - hidden behind a "Show More" button
+        output += f"🏆 Achievements _(click Show Achievements below)_\n"
+        output += f"\n"
         
         # Timespan
         output += f"📅 Timespan: {start_date} → {end_date_used}```"
-        
-        await msg.edit(content=output)
+
+        view = ExchangeCoinsView(exchange_coins_spent, max_pets)
+        await msg.edit(content=output, view=view)
         
     except Exception as e:
         log_info(f"[PROGRESS ERROR] {e}")
