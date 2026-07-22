@@ -1,5 +1,5 @@
 # ============================================================
-# FLASKk KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
@@ -71,6 +71,10 @@ EVENT_ANNOUNCEMENT_ROLE_ID = 1412464184746053693
 ABYSS_CONFIG_FILE = "abyss_config.json"
 DB = "/data/events.db"
 DB_PROGRESS = "/data/season_progress.db"  # Separate database for seasonal data
+
+# Ensure the data directory exists so sqlite3.connect() doesn't crash-loop
+# if the persistent volume was momentarily unmounted or missing.
+os.makedirs(os.path.dirname(DB), exist_ok=True)
 
 # ============================================================
 # CALL OF STATS ACCOUNT IDS & CONSTANTS
