@@ -1,5 +1,5 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELYy – KOYEB SAFE)
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
@@ -2453,7 +2453,7 @@ class ExchangeCoinsView(discord.ui.View):
             f"🪙 **Exchange Coins Spent** (lifetime): {coins_str}\n"
             f"🐾 **Max Pets** (lifetime): {pets_str}"
         )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message(msg)
 
 
 @bot.command(name="progress")
