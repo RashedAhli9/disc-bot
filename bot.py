@@ -1,5 +1,5 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
+# FLASKk KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
