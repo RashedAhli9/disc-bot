@@ -2438,24 +2438,6 @@ async def deleteseason(inter: discord.Interaction):
     await inter.response.send_message("Select a season to delete:", view=view, ephemeral=True)
 
 
-class ExchangeCoinsView(discord.ui.View):
-    """View with a 'Show More' button that reveals Exchange Coins Spent and Max Pets (lifetime totals)."""
-    def __init__(self, exchange_coins_spent, max_pets):
-        super().__init__(timeout=300)
-        self.exchange_coins_spent = exchange_coins_spent
-        self.max_pets = max_pets
-
-    @discord.ui.button(label="🏆 Show Achievements", style=discord.ButtonStyle.secondary)
-    async def show_more(self, interaction: discord.Interaction, button: discord.ui.Button):
-        coins_str = f"{self.exchange_coins_spent:,}" if self.exchange_coins_spent is not None else "not available"
-        pets_str = f"{self.max_pets:,}" if self.max_pets is not None else "not available"
-        msg = (
-            f"🪙 **Exchange Coins Spent** (lifetime): {coins_str}\n"
-            f"🐾 **Max Pets** (lifetime): {pets_str}"
-        )
-        await interaction.response.send_message(msg)
-
-
 @bot.command(name="progress")
 async def progress(ctx, user_input: str = None, season_input: str = None):
     """
@@ -2823,15 +2805,18 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         output += f"Total: {total_gathered:,}\n"
         output += f"\n"
 
-        # Exchange Coins Spent - hidden behind a "Show More" button
-        output += f"🏆 Achievements _(click Show Achievements below)_\n"
+        # Achievements - shown directly in the report
+        output += f"🏆 Achievements\n"
+        coins_str = f"{exchange_coins_spent:,}" if exchange_coins_spent is not None else "not available"
+        pets_str = f"{max_pets:,}" if max_pets is not None else "not available"
+        output += f"🪙 Exchange Coins Spent: {coins_str}\n"
+        output += f"🐾 Max Pets: {pets_str}\n"
         output += f"\n"
         
         # Timespan
         output += f"📅 Timespan: {start_date} → {end_date_used}```"
 
-        view = ExchangeCoinsView(exchange_coins_spent, max_pets)
-        await msg.edit(content=output, view=view)
+        await msg.edit(content=output)
         
     except Exception as e:
         log_info(f"[PROGRESS ERROR] {e}")
