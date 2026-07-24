@@ -418,6 +418,74 @@ async def fetch_highest_power(account_id):
 
     return None
 
+async def fetch_highest_power_at_date(account_id, selected_date):
+    """
+    Fetch the HIGHEST POWER as it stood on a SPECIFIC date (selected_date, no range).
+    Used for old/ended seasons instead of fetch_highest_power(), which always returns
+    today's live value — for a past season we want the power at that season's end date.
+    Returns the highest power value as int, or None if not found.
+    """
+    import re
+
+    url = f"https://callofstats.com/lord/{account_id}?selected_date={selected_date}"
+    patterns = [
+        r'<span class="subtle">Highest Power</span>\s*<div class="value">\+?([0-9,]+)</div>',
+        r'Highest Power</span>.*?<div class="value">\+?([0-9,]+)</div>',
+        r'Highest Power.*?\+?([0-9,]+)',
+    ]
+
+    for attempt in range(3):
+        try:
+            session = await get_callofstats_session()
+            if not session:
+                log_info(f"[HIGHEST POWER AT DATE] No session available, attempt {attempt+1}")
+                await asyncio.sleep(2)
+                continue
+
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    log_info(f"[HIGHEST POWER AT DATE] HTTP {response.status} attempt {attempt+1} for {account_id} @ {selected_date}")
+                    await asyncio.sleep(1)
+                    continue
+
+                html = await response.text()
+
+                if "<title>Login" in html or "Sign in to Call of Stats" in html:
+                    log_info(f"[HIGHEST POWER AT DATE] Got login page on attempt {attempt+1}, forcing session refresh")
+                    global _callofstats_session, _session_login_time
+                    if _callofstats_session:
+                        await _callofstats_session.close()
+                        _callofstats_session = None
+                        _session_login_time = None
+                    await asyncio.sleep(2)
+                    continue
+
+                for i, pattern in enumerate(patterns):
+                    match = re.search(pattern, html, re.DOTALL)
+                    if match:
+                        power_str = match.group(1).replace(",", "")
+                        try:
+                            highest_power = int(power_str)
+                            log_info(f"[HIGHEST POWER AT DATE] {account_id} @ {selected_date} = {highest_power:,} (pattern {i}, attempt {attempt+1})")
+                            return highest_power
+                        except Exception as e:
+                            log_info(f"[HIGHEST POWER AT DATE] Parse error: {e}")
+
+                if attempt == 2:
+                    log_info(f"[HIGHEST POWER AT DATE] Not found for {account_id} @ {selected_date}")
+                else:
+                    log_info(f"[HIGHEST POWER AT DATE] No match attempt {attempt+1} for {account_id}, retrying...")
+                    await asyncio.sleep(1)
+
+        except asyncio.TimeoutError:
+            log_info(f"[HIGHEST POWER AT DATE] Timeout attempt {attempt+1} for {account_id}")
+            await asyncio.sleep(1)
+        except Exception as e:
+            log_info(f"[HIGHEST POWER AT DATE ERROR] attempt {attempt+1} for {account_id}: {e}")
+            await asyncio.sleep(1)
+
+    return None
+
 
 async def fetch_achievement_stats(account_id):
     """
@@ -562,6 +630,64 @@ async def fetch_current_t_kills(account_id):
         log_info(f"[CURRENT T-KILLS ERROR] {account_id}: {e}")
         import traceback
         traceback.print_exc()
+        return {}
+
+
+async def fetch_t_kills_at_date(account_id, selected_date):
+    """
+    Fetch T5-T1 kill totals for a lord as they stood on a SPECIFIC date (no range).
+    Used for old/ended seasons instead of fetch_current_t_kills(), which always
+    returns today's live totals.
+    Returns dict: {"t5": 123456, ...} or empty dict if not found.
+    """
+    import re
+
+    url = f"https://callofstats.com/lord/{account_id}?selected_date={selected_date}"
+
+    try:
+        session = await get_callofstats_session()
+        if not session:
+            return {}
+
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status != 200:
+                log_info(f"[T-KILLS AT DATE] Failed to fetch {url}: {response.status}")
+                return {}
+
+            html = await response.text()
+
+            if "<title>Login" in html or "Sign in to Call of Stats" in html:
+                log_info(f"[T-KILLS AT DATE] Got login page, forcing session refresh")
+                global _callofstats_session, _session_login_time
+                if _callofstats_session:
+                    await _callofstats_session.close()
+                    _callofstats_session = None
+                    _session_login_time = None
+                return {}
+
+            t_kills = {}
+            for tier in ["T5", "T4", "T3", "T2", "T1"]:
+                patterns = [
+                    f'{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
+                    f'<span class="subtle">{tier} Kills</span>.*?<div class="value">([0-9,]+)</div>',
+                    f'{tier} Kills.*?([0-9,]+)',
+                ]
+                match = None
+                for pattern in patterns:
+                    match = re.search(pattern, html, re.DOTALL)
+                    if match:
+                        break
+                if match:
+                    kills_str = match.group(1).replace(",", "")
+                    try:
+                        t_kills[tier.lower()] = int(kills_str)
+                    except Exception as e:
+                        log_info(f"[T-KILLS AT DATE] Failed to parse {tier}: {e}")
+
+            log_info(f"[T-KILLS AT DATE] {account_id} @ {selected_date} = {t_kills}")
+            return t_kills
+    except Exception as e:
+        log_info(f"[T-KILLS AT DATE ERROR] {account_id}: {e}")
         return {}
 
 
@@ -1850,7 +1976,7 @@ async def force_refresh_all_stats():
     """
     Force-fetch and cache all members' stats for current season.
     Called when Call of Stats update is detected.
-    Saves progress to database for future !oldprogress queries.
+    Saves progress to database for future !progress queries on past seasons.
     """
     try:
         season = db_get_current_season()
@@ -2169,8 +2295,7 @@ def build_help_embed(is_owner: bool):
     embed.add_field(
         name="📊 Progress & Stats",
         value=(
-            "`!progress [user]` — Full season stats\n"
-            "`!oldprogress [user]` — Past season stats\n"
+            "`!progress [user] [season]` — Full season stats (works for past seasons too, e.g. `!progress rekz 1`)\n"
             "`!q [user]` — Quick one-liner stats\n"
             "`!compare lord1 lord2` — Compare two players\n"
             "`!gains [season] [user]` — View gains\n"
@@ -2720,6 +2845,42 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
 
+        # --- Correct merits/power_gain by subtracting a baseline snapshot taken AT the season's start_date ---
+        # COS's own range-computed delta (season_start -> today) can occasionally be wrong/negative
+        # (e.g. mismatched scan dates). To guard against that, we independently fetch the value
+        # AT start_date and subtract it locally, the same technique already used by !gains.
+        def _parse_stat_num(s):
+            if not s:
+                return 0
+            try:
+                return int(str(s).replace("+", "").replace(",", "").strip() or 0)
+            except:
+                return 0
+
+        stats_start_baseline = db_get_season_progress(season_id, account_id, start_date)
+        if not stats_start_baseline:
+            stats_start_baseline = get_cached_stats(account_id, start_date, start_date)
+        if not stats_start_baseline:
+            try:
+                stats_start_baseline, _ = await fetch_stats_with_fallback(account_id, start_date, start_date)
+            except Exception as e:
+                log_info(f"[PROGRESS] Baseline fetch failed for {account_id} at {start_date}: {e}")
+                stats_start_baseline = None
+
+        if stats_start_baseline:
+            baseline_power = _parse_stat_num(stats_start_baseline.get("power_gain"))
+            baseline_merits = _parse_stat_num(stats_start_baseline.get("merits"))
+
+            if baseline_power:
+                corrected_power_gain = _parse_stat_num(stats.get("power_gain")) - baseline_power
+                stats["power_gain"] = f"+{corrected_power_gain:,}" if corrected_power_gain >= 0 else f"-{abs(corrected_power_gain):,}"
+                log_info(f"[PROGRESS] Corrected power_gain for {account_id}: raw={stats.get('power_gain')} baseline={baseline_power} corrected={corrected_power_gain}")
+
+            if baseline_merits:
+                corrected_merits = _parse_stat_num(stats.get("merits")) - baseline_merits
+                stats["merits"] = f"+{corrected_merits:,}" if corrected_merits >= 0 else f"-{abs(corrected_merits):,}"
+                log_info(f"[PROGRESS] Corrected merits for {account_id}: raw={stats.get('merits')} baseline={baseline_merits} corrected={corrected_merits}")
+
         # Fetch advanced war stats from YESTERDAY (delayed 1 day by COS)
         # COS only shows real values when end_date < today — so we must fetch with yesterday as end_date
         adv_yesterday  = (date.today() - timedelta(days=1)).isoformat()
@@ -2792,8 +2953,17 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if is_single_day:
             log_info(f"[PROGRESS] Only 1 day of data for {account_id} in season {season_id}")
         
-        # Get highest power from normal profile (only if not in database)
-        highest_power = await fetch_highest_power(account_id)
+        # Get highest power — for the CURRENT season use the live/today value,
+        # but for an OLD/ended season use the power as it stood at that season's end date
+        current_season = db_get_current_season()
+        is_current_season = current_season and current_season[0] == season_id
+
+        if is_current_season:
+            highest_power = await fetch_highest_power(account_id)
+        else:
+            season_end_date = db_get_season_end_date(season_id) or end_date_used
+            highest_power = await fetch_highest_power_at_date(account_id, season_end_date)
+            log_info(f"[PROGRESS] Old season #{season_id} — using highest power @ {season_end_date}: {highest_power}")
         
         # Get alliance tag fresh from Call of Stats
         alliance_tag = await fetch_alliance_tag(account_id)
@@ -3012,191 +3182,6 @@ async def addlord_deprecated(inter: discord.Interaction):
     )
 
 
-@bot.command(name="oldprogress")
-async def oldprogress(ctx, user_input: str = None):
-    """View progress from past seasons. Shows season selector."""
-    
-    # Get all seasons
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT id, season_name, start_date FROM seasons ORDER BY created_at DESC")
-    seasons = c.fetchall()
-    conn.close()
-    
-    if not seasons:
-        return await ctx.send("❌ No seasons found.")
-    
-    if len(seasons) == 1:
-        return await ctx.send("❌ Only one season exists. Use `!progress` for current season.")
-    
-    # Get account ID
-    account_id = None
-    
-    if not user_input:
-        for role in ctx.author.roles:
-            if role.name.isdigit():
-                account_id = role.name
-                break
-        if not account_id:
-            return await ctx.send("❌ You don't have a numeric role. Ask the owner to give you one.")
-    elif user_input.isdigit():
-        account_id = user_input
-    else:
-        username_lower = user_input.lower()
-        for username, discord_id in USERNAME_TO_DISCORD_ID.items():
-            if username.lower() == username_lower:
-                try:
-                    member = ctx.guild.get_member(discord_id)
-                    if member:
-                        for role in member.roles:
-                            if role.name.isdigit():
-                                account_id = role.name
-                                break
-                except Exception as e:
-                    pass
-                break
-        if not account_id:
-            return await ctx.send(f"❌ Could not find account ID for '{user_input}'")
-    
-    if not account_id:
-        return await ctx.send("❌ Could not determine account ID.")
-    
-    # Create select menu with seasons (excluding current season)
-    class SeasonSelect(discord.ui.Select):
-        def __init__(self, seasons, account_id, ctx):
-            self.seasons = seasons
-            self.account_id = account_id
-            self.ctx = ctx
-            
-            options = []
-            for i, (season_id, season_name, start_date) in enumerate(seasons[:-1]):  # Exclude current (latest)
-                options.append(discord.SelectOption(label=season_name, value=str(season_id)))
-            
-            if not options:
-                options.append(discord.SelectOption(label="No past seasons", value="none"))
-            
-            super().__init__(placeholder="Choose a season...", options=options, min_values=1, max_values=1)
-        
-        async def callback(self, interaction: discord.Interaction):
-            if self.values[0] == "none":
-                await interaction.response.defer()
-                return
-            
-            season_id = int(self.values[0])
-            
-            # Find season
-            season = None
-            for s in self.seasons:
-                if s[0] == season_id:
-                    season = s
-                    break
-            
-            if not season:
-                await interaction.response.send_message("❌ Season not found.", ephemeral=True)
-                return
-            
-            season_id, season_name, start_date = season
-            
-            # Find next season's start date to know end date
-            end_date = None
-            for s in self.seasons:
-                if s[0] != season_id:
-                    # If this season is older, find next newer season
-                    conn = sqlite3.connect(DB)
-                    c = conn.cursor()
-                    c.execute("SELECT start_date FROM seasons WHERE id=? LIMIT 1", (season_id,))
-                    season_start = c.fetchone()
-                    c.execute("SELECT start_date FROM seasons WHERE start_date > ? ORDER BY start_date ASC LIMIT 1", (season_start[0] if season_start else "2000-01-01",))
-                    next_season = c.fetchone()
-                    conn.close()
-                    
-                    if next_season:
-                        end_date = next_season[0]
-                    break
-            
-            # If no next season, use today
-            if not end_date:
-                end_date = date.today().isoformat()
-            
-            await interaction.response.defer()
-            
-            # Get latest stats from database for past season (no API calls, no dates needed)
-            stats = db_get_latest_season_progress(season_id, self.account_id)
-            
-            if not stats:
-                await interaction.followup.send(f"❌ No data found in database for this season.\n**Note:** Data is only saved for members in our tracking list. If you're a new member, ask the owner to add you!")
-                return
-            
-            if stats.get("lord_name") == "Unknown":
-                await interaction.followup.send("❌ Failed to fetch stats for this season.")
-                return
-            
-            # Get highest power and T-kills
-            power = await fetch_highest_power(self.account_id)
-            
-            # Get alliance tag fresh from Call of Stats
-            alliance_tag = await fetch_alliance_tag(self.account_id)
-            
-            t_kills = await fetch_current_t_kills(self.account_id)
-            
-            # Build output
-            lord_name = stats.get("lord_name", "Unknown")
-            output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n\n"
-            
-            # Power
-            if power:
-                power_gain = 0
-                if stats.get("power_gain"):
-                    try:
-                        pg_str = stats.get("power_gain", "+0").replace("+", "").replace(",", "")
-                        power_gain = int(pg_str)
-                    except Exception as e:
-                        power_gain = 0
-                
-                output += f"⚡ Power {power:,} (+{power_gain:,})\n\n"
-            
-            # Merits
-            merits = stats.get("merits", "+0")
-            merits_pct = stats.get("merits_pct", "0%")
-            output += f"🏅 Merits {merits} ({merits_pct})\n\n"
-            
-            # Deaths, Healed, Kills
-            deaths = stats.get("deads_gain", "+0")
-            healed = stats.get("healed_gain", "+0")
-            kills = stats.get("kills_gain", "+0")
-            total_t = sum(t_kills.values()) if t_kills else 0
-            
-            output += f"💀 Deaths\n{deaths}\n\n"
-            output += f"❤️ Healed\n{healed}\n\n"
-            output += f"⚔️ Kills\n{total_t:,} ({kills})\n\n"
-            
-            # T-Tier
-            t5 = t_kills.get("t5", 0)
-            t4 = t_kills.get("t4", 0)
-            t3 = t_kills.get("t3", 0)
-            t2 = t_kills.get("t2", 0)
-            t1 = t_kills.get("t1", 0)
-            
-            output += f"T5 Kills: {t5:,}\n"
-            output += f"T4 Kills: {t4:,}\n"
-            output += f"T3 Kills: {t3:,}\n"
-            output += f"T2 Kills: {t2:,}\n"
-            output += f"T1 Kills: {t1:,}\n\n"
-            
-            # Mana
-            mana = stats.get("mana_gathered", "+0")
-            output += f"💧 Mana Gathered\n{mana}\n"
-            output += f"```"
-            
-            await interaction.followup.send(output)
-    
-    class SeasonView(discord.ui.View):
-        def __init__(self, seasons, account_id, ctx):
-            super().__init__()
-            self.add_item(SeasonSelect(seasons, account_id, ctx))
-    
-    view = SeasonView(seasons, account_id, ctx)
-    await ctx.send("Choose a season to view progress:", view=view)
 
 
 @bot.command(name="forcefetch")
