@@ -765,6 +765,7 @@ def init_db():
             team2_json TEXT NOT NULL
         );
     """)
+    migrate_db(conn)
     conn.commit()
     conn.close()
 
@@ -814,7 +815,13 @@ def init_db_progress():
 def migrate_db(conn):
     """Handle database schema migrations for backwards compatibility"""
     try:
-        pass  # No migrations needed - using separate databases now
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(seasons)")
+        existing = {row[1] for row in c.fetchall()}
+        if "end_date" not in existing:
+            c.execute("ALTER TABLE seasons ADD COLUMN end_date TEXT")
+            log_info(f"[DB MIGRATE] Added column: seasons.end_date")
+            conn.commit()
     except Exception as e:
         log_error(f"[DB MIGRATION] Error: {e}")
 
@@ -1061,6 +1068,75 @@ def db_get_season_by_name(season_name):
     row = c.fetchone()
     conn.close()
     return row
+
+def db_get_season_by_id(season_id):
+    """Get season by its numeric ID"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, season_name, start_date, created_at FROM seasons WHERE id = ? LIMIT 1", (season_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def resolve_season_input(season_input):
+    """
+    Resolve a user-provided season reference to a season tuple.
+    Accepts either a numeric season ID (e.g. '1') or a season name (e.g. 'sos1').
+    Returns the season tuple (id, season_name, start_date, created_at) or None.
+    """
+    if season_input is None:
+        return None
+    season_input = str(season_input).strip()
+    if season_input.isdigit():
+        season = db_get_season_by_id(int(season_input))
+        if season:
+            return season
+        # Fall through to name lookup in case a season is literally named "1"
+    return db_get_season_by_name(season_input)
+
+def db_get_season_end_date(season_id):
+    """Get the end_date for a season, or None if still active/ongoing."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT end_date FROM seasons WHERE id = ?", (season_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def db_set_season_end_date(season_id, end_date):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE seasons SET end_date = ? WHERE id = ?", (end_date, season_id))
+    conn.commit()
+    conn.close()
+
+def db_end_previous_active_season(new_season_start_date):
+    """
+    Mark the current most-recent season as ended — end_date is set to the day
+    before the new season's start date — if it doesn't already have an end_date.
+    Called right before a new season is created.
+    """
+    current = db_get_current_season()
+    if not current:
+        return
+    season_id = current[0]
+    if db_get_season_end_date(season_id) is None:
+        start_dt = datetime.strptime(new_season_start_date, "%Y-%m-%d")
+        end_dt = start_dt - timedelta(days=1)
+        db_set_season_end_date(season_id, end_dt.strftime("%Y-%m-%d"))
+
+def db_update_season(season_id, season_name=None, start_date=None, end_date=None):
+    """Update one or more fields of a season. Pass None to leave a field unchanged."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    if season_name is not None:
+        c.execute("UPDATE seasons SET season_name = ? WHERE id = ?", (season_name, season_id))
+    if start_date is not None:
+        c.execute("UPDATE seasons SET start_date = ? WHERE id = ?", (start_date, season_id))
+    if end_date is not None:
+        c.execute("UPDATE seasons SET end_date = ? WHERE id = ?", (end_date, season_id))
+    conn.commit()
+    conn.close()
 
 def db_get_all_seasons():
     """Get all seasons ordered by creation date"""
@@ -2192,12 +2268,14 @@ def build_help_embed(is_owner: bool):
         embed.add_field(
             name="⚙️ Season & Data Management",
             value=(
-                "`/newseason` — Start a new season\n"
+                "`/newseason` — Start a new season (auto-ends the previous one)\n"
+                "`!editseason` / `/editseason` — Edit a season's name, start date, or end date\n"
                 "`!forcefetch` — Fetch latest stats immediately\n"
                 "`!loadhistory` — Load season data from season start\n"
                 "`!loadhistory all` — Load all Call of Stats data (auto-detects oldest date)\n"
                 "`!datahistory` — Show oldest/newest data range\n"
-                "`!cleandata` — Delete empty/zero-data snapshots"
+                "`!cleandata` — Delete empty/zero-data snapshots\n\n"
+                "*Seasons have an auto ID (see `!seasonhistory`) — use it in place of a season name, e.g. `!progress rekz 1`*"
             ),
             inline=False
         )
@@ -2270,7 +2348,10 @@ class NewSeasonModal(Modal, title="📅 New Season"):
         try:
             # Validate date format
             start_dt = datetime.strptime(self.start_date.value.strip(), "%Y-%m-%d")
-            
+
+            # Mark the previous active season as ended — end_date = day before this new season starts
+            db_end_previous_active_season(self.start_date.value.strip())
+
             # Store season
             db_add_season(self.season_name.value.strip(), self.start_date.value.strip())
             
@@ -2317,7 +2398,7 @@ async def editseason(inter: discord.Interaction):
 
     options = [
         discord.SelectOption(
-            label=f"{s[1]} (starts {s[2]})",
+            label=f"#{s[0]} — {s[1]} (starts {s[2]})",
             value=str(s[0])
         )
         for s in seasons
@@ -2340,24 +2421,33 @@ async def editseason(inter: discord.Interaction):
                 label="Start Date (YYYY-MM-DD)",
                 default=season[2]
             )
+            end_date = TextInput(
+                label="End Date (YYYY-MM-DD, blank = ongoing)",
+                default=db_get_season_end_date(season[0]) or "",
+                required=False
+            )
 
             async def on_submit(self, modal_inter: discord.Interaction):
                 await modal_inter.response.defer(ephemeral=True)
                 try:
                     datetime.strptime(self.start_date.value.strip(), "%Y-%m-%d")
+                    end_date_val = self.end_date.value.strip()
+                    if end_date_val:
+                        datetime.strptime(end_date_val, "%Y-%m-%d")
 
                     conn = sqlite3.connect(DB)
                     c = conn.cursor()
                     c.execute(
-                        "UPDATE seasons SET season_name=?, start_date=? WHERE id=?",
-                        (self.season_name.value.strip(), self.start_date.value.strip(), season_id)
+                        "UPDATE seasons SET season_name=?, start_date=?, end_date=? WHERE id=?",
+                        (self.season_name.value.strip(), self.start_date.value.strip(), end_date_val or None, season_id)
                     )
                     conn.commit()
                     conn.close()
                     silent_backup()
 
+                    end_display = end_date_val if end_date_val else "Ongoing"
                     await modal_inter.followup.send(
-                        f"✅ Season updated!\n**Name:** {self.season_name.value}\n**Start Date:** {self.start_date.value}",
+                        f"✅ Season updated!\n**Name:** {self.season_name.value}\n**Start Date:** {self.start_date.value}\n**End Date:** {end_display}",
                         ephemeral=True
                     )
                 except ValueError:
@@ -2371,6 +2461,86 @@ async def editseason(inter: discord.Interaction):
     view = View()
     view.add_item(select)
     await inter.response.send_message("Select a season to edit:", view=view, ephemeral=True)
+
+
+@bot.command(name="editseason")
+async def editseason_text(ctx):
+    """[ADMIN ONLY] Edit a season's name, start date, or end date. Shows a season picker."""
+    is_admin = ctx.author.id == OWNER_ID or (
+        ctx.guild and ctx.author.guild_permissions.administrator
+    )
+    if not is_admin:
+        return await ctx.send("❌ Admin only.")
+
+    seasons = db_get_all_seasons()
+    if not seasons:
+        return await ctx.send("❌ No seasons found.")
+
+    options = [
+        discord.SelectOption(
+            label=f"#{s[0]} — {s[1]} (starts {s[2]})",
+            value=str(s[0])
+        )
+        for s in seasons
+    ]
+
+    select = Select(placeholder="Select a season to edit", options=options)
+
+    async def select_cb(i: discord.Interaction):
+        season_id = int(select.values[0])
+        season = next((s for s in seasons if s[0] == season_id), None)
+        if not season:
+            return await i.response.send_message("❌ Season not found.", ephemeral=True)
+
+        class EditSeasonModal(Modal, title="✏️ Edit Season"):
+            season_name = TextInput(
+                label="Season Name",
+                default=season[1]
+            )
+            start_date = TextInput(
+                label="Start Date (YYYY-MM-DD)",
+                default=season[2]
+            )
+            end_date = TextInput(
+                label="End Date (YYYY-MM-DD, blank = ongoing)",
+                default=db_get_season_end_date(season[0]) or "",
+                required=False
+            )
+
+            async def on_submit(self, modal_inter: discord.Interaction):
+                await modal_inter.response.defer(ephemeral=True)
+                try:
+                    datetime.strptime(self.start_date.value.strip(), "%Y-%m-%d")
+                    end_date_val = self.end_date.value.strip()
+                    if end_date_val:
+                        datetime.strptime(end_date_val, "%Y-%m-%d")
+
+                    conn = sqlite3.connect(DB)
+                    c = conn.cursor()
+                    c.execute(
+                        "UPDATE seasons SET season_name=?, start_date=?, end_date=? WHERE id=?",
+                        (self.season_name.value.strip(), self.start_date.value.strip(), end_date_val or None, season_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                    silent_backup()
+
+                    end_display = end_date_val if end_date_val else "Ongoing"
+                    await modal_inter.followup.send(
+                        f"✅ Season updated!\n**Name:** {self.season_name.value}\n**Start Date:** {self.start_date.value}\n**End Date:** {end_display}",
+                        ephemeral=True
+                    )
+                except ValueError:
+                    await modal_inter.followup.send("❌ Invalid date format. Use YYYY-MM-DD", ephemeral=True)
+                except Exception as e:
+                    await modal_inter.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+        await i.response.send_modal(EditSeasonModal())
+
+    select.callback = select_cb
+    view = View()
+    view.add_item(select)
+    await ctx.send("Select a season to edit:", view=view)
 
 
 # ============================================================
@@ -2389,7 +2559,7 @@ async def deleteseason(inter: discord.Interaction):
 
     options = [
         discord.SelectOption(
-            label=f"{s[1]} (starts {s[2]})",
+            label=f"#{s[0]} — {s[1]} (starts {s[2]})",
             value=str(s[0])
         )
         for s in seasons
@@ -2456,17 +2626,13 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
       !progress truvix        (truvix's progress, current season)
       !progress truvix sos1   (truvix's progress in sos1 season)
       !progress 16322115 sos2 (account 16322115's progress in sos2)
+      !progress rekz 1        (rekz's progress in season ID 1)
     """
     # Determine which season to use
     if season_input:
-        # Look up specific season by name
+        # Look up specific season by ID or name
         try:
-            conn = sqlite3.connect(DB)
-            c = conn.cursor()
-            c.execute("SELECT id, season_name, start_date, created_at FROM seasons WHERE LOWER(season_name) = LOWER(?)", (season_input,))
-            season = c.fetchone()
-            conn.close()
-            
+            season = resolve_season_input(season_input)
             if not season:
                 return await ctx.send(f"❌ Season '{season_input}' not found. Use `!seasonhistory` to see all seasons.")
         except Exception as e:
@@ -3206,12 +3372,12 @@ async def loadhistory(ctx, mode: str = None):
 @bot.command(name="seasonhistory")
 async def seasonhistory(ctx):
     """
-    Show all seasons with their start date and end date (or current day if active).
+    Show all seasons with their ID, start date and end date (or ongoing if active).
     """
     try:
         conn = sqlite3.connect(DB)
         c = conn.cursor()
-        c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at ASC")
+        c.execute("SELECT id, season_name, start_date, created_at, end_date FROM seasons ORDER BY created_at ASC")
         seasons = c.fetchall()
         conn.close()
         
@@ -3225,15 +3391,19 @@ async def seasonhistory(ctx):
         # Build output
         output = "```📅 SEASON HISTORY\n\n"
         
-        for season_id, season_name, start_date, created_at in seasons:
+        for season_id, season_name, start_date, created_at, end_date_val in seasons:
             is_current = (season_id == current_season_id)
             
-            if is_current:
-                # Current season: show start date → today
+            if end_date_val:
+                # Explicit end_date stored (set automatically when a new season starts, or edited manually)
+                end_display = end_date_val
+                status = "✅ ENDED"
+            elif is_current:
+                # Current season, no end_date yet: show start date → today
                 end_display = today
                 status = "🔴 ACTIVE"
             else:
-                # Past season: try to find end date (last day with data)
+                # Legacy season with no end_date recorded: fall back to last day with data
                 conn = sqlite3.connect(DB_PROGRESS)
                 c = conn.cursor()
                 c.execute(
@@ -3245,7 +3415,7 @@ async def seasonhistory(ctx):
                 end_display = row[0] if row and row[0] else "Unknown"
                 status = "✅ ENDED"
             
-            output += f"{status} {season_name}\n"
+            output += f"{status} #{season_id} — {season_name}\n"
             output += f"   📍 {start_date} → {end_display}\n\n"
         
         output += "```"
@@ -3624,7 +3794,7 @@ async def topmana(ctx, season_name: str = None):
     
     # Get season
     if season_name:
-        season = db_get_season_by_name(season_name)
+        season = resolve_season_input(season_name)
         if not season:
             all_seasons = db_get_all_seasons()
             season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
@@ -3715,7 +3885,7 @@ async def topdeaths(ctx, season_name: str = None):
     
     # Get season
     if season_name:
-        season = db_get_season_by_name(season_name)
+        season = resolve_season_input(season_name)
         if not season:
             all_seasons = db_get_all_seasons()
             season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
@@ -3806,7 +3976,7 @@ async def topmerits(ctx, season_name: str = None):
     
     # Get season
     if season_name:
-        season = db_get_season_by_name(season_name)
+        season = resolve_season_input(season_name)
         if not season:
             all_seasons = db_get_all_seasons()
             season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
@@ -3867,7 +4037,7 @@ async def topmerits(ctx, season_name: str = None):
 async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
     """Generic advanced merit leaderboard using DB data (delayed 1 day by COS)."""
     if season_name:
-        season = db_get_season_by_name(season_name)
+        season = resolve_season_input(season_name)
         if not season:
             all_seasons = db_get_all_seasons()
             season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
@@ -3991,7 +4161,7 @@ async def topheal(ctx, season_name: str = None):
     """Leaderboard for overall healed. Usage: !topheal (current) or !topheal sos1"""
 
     if season_name:
-        season = db_get_season_by_name(season_name)
+        season = resolve_season_input(season_name)
         if not season:
             all_seasons = db_get_all_seasons()
             season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
@@ -4054,7 +4224,7 @@ async def rss_leaderboard(ctx, season_name: str = None):
     
     # Get season
     if season_name:
-        season = db_get_season_by_name(season_name)
+        season = resolve_season_input(season_name)
         if not season:
             all_seasons = db_get_all_seasons()
             season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
