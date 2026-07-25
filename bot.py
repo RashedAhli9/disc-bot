@@ -2995,20 +2995,27 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             else:
                 log_info(f"[PROGRESS] Could not find valid merits in range, keeping raw value {raw_merits}")
 
-        # Fetch advanced war stats from YESTERDAY (delayed 1 day by COS)
-        # COS only shows real values when end_date < today — so we must fetch with yesterday as end_date
-        adv_yesterday  = (date.today() - timedelta(days=1)).isoformat()
-        adv_day_before = (date.today() - timedelta(days=2)).isoformat()
+        # Fetch advanced war stats. For the CURRENT season these are delayed 1 day by COS,
+        # so we look at yesterday/day-before relative to the season's own query window.
+        # For an OLD/ended season, there's no delay concept at all — that data is long
+        # finalized — so we use the season's end date directly with no offset.
+        if is_current_season:
+            adv_base_dt = datetime.strptime(today, "%Y-%m-%d")
+            adv_yesterday  = (adv_base_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+            adv_day_before = (adv_base_dt - timedelta(days=2)).strftime("%Y-%m-%d")
+            adv_two_days_ago = (adv_base_dt - timedelta(days=2)).strftime("%Y-%m-%d")
+            adv_three_days_ago = (adv_base_dt - timedelta(days=3)).strftime("%Y-%m-%d")
+        else:
+            adv_yesterday  = today
+            adv_day_before = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            adv_two_days_ago = adv_day_before
+            adv_three_days_ago = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
+
         adv_fields_list = ["infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
                            "other_merits", "t45_healed", "t45_dead"]
 
         def _adv_has_data(snap):
             return snap and any(snap.get(f) for f in adv_fields_list)
-
-        # Try DB first; if advanced fields are all None, live-fetch with correct end_date
-        # COS sometimes delays adv stats 2 days — try yesterday, then day before
-        adv_two_days_ago = (date.today() - timedelta(days=2)).isoformat()
-        adv_three_days_ago = (date.today() - timedelta(days=3)).isoformat()
 
         stats_adv_today = db_get_season_progress(season_id, account_id, adv_yesterday)
         if not _adv_has_data(stats_adv_today):
@@ -3217,16 +3224,27 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         adv_has_data = any(_adv_total(f) for f, _ in adv_fields)
 
         if adv_has_data:
-            output += f"🏅 Advanced War Stats _(data from {adv_yesterday}, delayed 1 day)_\n"
+            if is_current_season:
+                output += f"🏅 Advanced War Stats _(data from {adv_yesterday}, delayed 1 day)_\n"
+            else:
+                output += f"🏅 Advanced War Stats _(final data as of {adv_yesterday})_\n"
             for field, label in adv_fields:
                 total = _adv_total(field)
                 gain  = _adv_gain(field)
                 if total:
-                    gain_str  = f" (+{_fmt(gain)} today)" if gain else ""
+                    if gain and is_current_season:
+                        gain_str = f" (+{_fmt(gain)} today)"
+                    elif gain:
+                        gain_str = f" (+{_fmt(gain)} on final day)"
+                    else:
+                        gain_str = ""
                     output += f"{label}: {_fmt(total)}{gain_str}\n"
         else:
             output += f"🏅 Advanced War Stats\n"
-            output += f"_(not yet available — delayed 1 day by COS)_\n"
+            if is_current_season:
+                output += f"_(not yet available — delayed 1 day by COS)_\n"
+            else:
+                output += f"_(no advanced stats recorded for this season)_\n"
 
         output += f"\n"
 
