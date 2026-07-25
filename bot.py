@@ -2395,6 +2395,7 @@ def build_help_embed(is_owner: bool):
             value=(
                 "`/newseason` — Start a new season (auto-ends the previous one)\n"
                 "`!editseason` / `/editseason` — Edit a season's name, start date, or end date\n"
+                "`/deleteseason` / `/removeseason` — Delete a season and its progress data\n"
                 "`!forcefetch` — Fetch latest stats immediately\n"
                 "`!loadhistory` — Load season data from season start\n"
                 "`!loadhistory all` — Load all Call of Stats data (auto-detects oldest date)\n"
@@ -2742,6 +2743,73 @@ async def deleteseason(inter: discord.Interaction):
     await inter.response.send_message("Select a season to delete:", view=view, ephemeral=True)
 
 
+@bot.tree.command(name="removeseason", description="Delete a season and all its progress data (alias of /deleteseason)")
+@app_commands.default_permissions(administrator=True)
+async def removeseason(inter: discord.Interaction):
+    if not inter.user.guild_permissions.administrator and inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Admin only.", ephemeral=True)
+
+    seasons = db_get_all_seasons()
+    if not seasons:
+        return await inter.response.send_message("❌ No seasons found.", ephemeral=True)
+
+    options = [
+        discord.SelectOption(
+            label=f"#{s[0]} — {s[1]} (starts {s[2]})",
+            value=str(s[0])
+        )
+        for s in seasons
+    ]
+
+    select = Select(placeholder="Select a season to REMOVE", options=options)
+
+    async def select_cb(i: discord.Interaction):
+        season_id = int(select.values[0])
+        season = next((s for s in seasons if s[0] == season_id), None)
+        if not season:
+            return await i.response.send_message("❌ Season not found.", ephemeral=True)
+
+        confirm_btn = Button(label=f"⚠️ Confirm Remove '{season[1]}'", style=discord.ButtonStyle.danger)
+
+        async def confirm_cb(confirm_inter: discord.Interaction):
+            try:
+                conn_p = sqlite3.connect(DB_PROGRESS)
+                c_p = conn_p.cursor()
+                c_p.execute("DELETE FROM season_progress WHERE season_id=?", (season_id,))
+                deleted_rows = c_p.rowcount
+                conn_p.commit()
+                conn_p.close()
+
+                conn = sqlite3.connect(DB)
+                c = conn.cursor()
+                c.execute("DELETE FROM seasons WHERE id=?", (season_id,))
+                conn.commit()
+                conn.close()
+                silent_backup()
+
+                await confirm_inter.response.send_message(
+                    f"🗑️ Removed season **{season[1]}** and {deleted_rows} progress snapshots.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                await confirm_inter.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
+        confirm_btn.callback = confirm_cb
+        confirm_view = View()
+        confirm_view.add_item(confirm_btn)
+
+        await i.response.send_message(
+            f"⚠️ Are you sure you want to remove **{season[1]}** (starts {season[2]})?\nThis will also delete all progress data for this season.",
+            view=confirm_view,
+            ephemeral=True
+        )
+
+    select.callback = select_cb
+    view = View()
+    view.add_item(select)
+    await inter.response.send_message("Select a season to remove:", view=view, ephemeral=True)
+
+
 @bot.command(name="progress")
 async def progress(ctx, user_input: str = None, season_input: str = None):
     """
@@ -2820,7 +2888,28 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
     
     msg = await ctx.send(f"📊 Fetching stats for account {account_id} in season {season_name}...")
     
-    today = date.today().isoformat()
+    # For the CURRENT active season, always query up to today.
+    # For an OLD/ended season, the query must be capped at that season's actual end_date —
+    # otherwise the range bleeds into whatever season(s) came after it and COS returns
+    # garbage (wrong totals, negative merits, wrong timespan display, etc).
+    current_season_check = db_get_current_season()
+    is_current_season = current_season_check and current_season_check[0] == season_id
+
+    if is_current_season:
+        today = date.today().isoformat()
+    else:
+        stored_end = db_get_season_end_date(season_id)
+        if stored_end:
+            today = stored_end
+        else:
+            # Legacy season with no stored end_date — fall back to last known data date
+            conn = sqlite3.connect(DB_PROGRESS)
+            c = conn.cursor()
+            c.execute("SELECT MAX(data_date) FROM season_progress WHERE season_id = ?", (season_id,))
+            row = c.fetchone()
+            conn.close()
+            today = row[0] if row and row[0] else date.today().isoformat()
+        log_info(f"[PROGRESS] Old season #{season_id} — capping query end date to {today}")
     
     try:
         # FIRST: Try database for today
@@ -2845,10 +2934,13 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
 
-        # --- Correct merits/power_gain by subtracting a baseline snapshot taken AT the season's start_date ---
+        # --- Fix negative/zero merits & power_gain by shifting the range's start date forward ---
         # COS's own range-computed delta (season_start -> today) can occasionally be wrong/negative
-        # (e.g. mismatched scan dates). To guard against that, we independently fetch the value
-        # AT start_date and subtract it locally, the same technique already used by !gains.
+        # for a specific account (e.g. after a server/alliance transfer). When that happens, we
+        # re-run the SAME query with the start date shifted forward one day at a time (04/06, 05/06,
+        # 06/06, ...) until COS itself returns a positive, non-zero number for that field. Only
+        # merits and power_gain are affected by this glitch — gathering/kills/deaths/healed are not
+        # range-diffed the same way and don't need this.
         def _parse_stat_num(s):
             if not s:
                 return 0
@@ -2857,29 +2949,51 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             except:
                 return 0
 
-        stats_start_baseline = db_get_season_progress(season_id, account_id, start_date)
-        if not stats_start_baseline:
-            stats_start_baseline = get_cached_stats(account_id, start_date, start_date)
-        if not stats_start_baseline:
+        async def _find_valid_range_value(field_name, max_days=20):
+            """Shift the range's start date forward day by day until the field comes back positive."""
             try:
-                stats_start_baseline, _ = await fetch_stats_with_fallback(account_id, start_date, start_date)
-            except Exception as e:
-                log_info(f"[PROGRESS] Baseline fetch failed for {account_id} at {start_date}: {e}")
-                stats_start_baseline = None
+                cursor_date = datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=1)
+                end_dt = datetime.strptime(end_date_used, "%Y-%m-%d")
+            except Exception:
+                return None
 
-        if stats_start_baseline:
-            baseline_power = _parse_stat_num(stats_start_baseline.get("power_gain"))
-            baseline_merits = _parse_stat_num(stats_start_baseline.get("merits"))
+            days_tried = 0
+            while cursor_date < end_dt and days_tried < max_days:
+                candidate_start = cursor_date.strftime("%Y-%m-%d")
+                try:
+                    snap, _ = await fetch_stats_with_fallback(account_id, candidate_start, end_date_used)
+                except Exception:
+                    snap = None
 
-            if baseline_power:
-                corrected_power_gain = _parse_stat_num(stats.get("power_gain")) - baseline_power
-                stats["power_gain"] = f"+{corrected_power_gain:,}" if corrected_power_gain >= 0 else f"-{abs(corrected_power_gain):,}"
-                log_info(f"[PROGRESS] Corrected power_gain for {account_id}: raw={stats.get('power_gain')} baseline={baseline_power} corrected={corrected_power_gain}")
+                if snap:
+                    val = _parse_stat_num(snap.get(field_name))
+                    if val > 0:
+                        log_info(f"[PROGRESS] Found valid {field_name} using start_date={candidate_start}: {val}")
+                        return val
 
-            if baseline_merits:
-                corrected_merits = _parse_stat_num(stats.get("merits")) - baseline_merits
-                stats["merits"] = f"+{corrected_merits:,}" if corrected_merits >= 0 else f"-{abs(corrected_merits):,}"
-                log_info(f"[PROGRESS] Corrected merits for {account_id}: raw={stats.get('merits')} baseline={baseline_merits} corrected={corrected_merits}")
+                cursor_date += timedelta(days=1)
+                days_tried += 1
+
+            return None  # exhausted search, no valid value found
+
+        raw_power_gain = _parse_stat_num(stats.get("power_gain"))
+        raw_merits = _parse_stat_num(stats.get("merits"))
+
+        if raw_power_gain <= 0:
+            corrected = await _find_valid_range_value("power_gain")
+            if corrected is not None:
+                stats["power_gain"] = f"+{corrected:,}"
+                log_info(f"[PROGRESS] Corrected power_gain for {account_id}: raw={raw_power_gain} -> {corrected}")
+            else:
+                log_info(f"[PROGRESS] Could not find valid power_gain in range, keeping raw value {raw_power_gain}")
+
+        if raw_merits <= 0:
+            corrected = await _find_valid_range_value("merits")
+            if corrected is not None:
+                stats["merits"] = f"+{corrected:,}"
+                log_info(f"[PROGRESS] Corrected merits for {account_id}: raw={raw_merits} -> {corrected}")
+            else:
+                log_info(f"[PROGRESS] Could not find valid merits in range, keeping raw value {raw_merits}")
 
         # Fetch advanced war stats from YESTERDAY (delayed 1 day by COS)
         # COS only shows real values when end_date < today — so we must fetch with yesterday as end_date
@@ -3556,61 +3670,113 @@ async def cleandata_text(ctx):
 
 
 class GainsDateSelector(discord.ui.View):
-    """Interactive selector for gains date range"""
+    """Interactive selector for gains date range, with a season dropdown to switch seasons"""
     
-    def __init__(self, available_dates, account_id, season_id, start_date, ctx):
+    def __init__(self, available_dates, account_id, season_id, start_date, ctx, all_seasons=None):
         super().__init__(timeout=120)
         self.available_dates = available_dates
         self.account_id = account_id
         self.season_id = season_id
         self.start_date = start_date
         self.ctx = ctx
+        self.all_seasons = all_seasons or []
         
         self.selected_start = None
         self.selected_end = None
         
-        # Smart date splitting with OVERLAP so any date range is possible
+        self._build_components()
+
+    def _build_components(self):
+        """(Re)build the season select, date selects, and button based on current state."""
+        self.clear_items()
+
+        # Season dropdown — switching this rebuilds the date dropdowns for that season
+        if self.all_seasons:
+            season_options = [
+                discord.SelectOption(
+                    label=f"#{s[0]} — {s[1]} (starts {s[2]})",
+                    value=str(s[0]),
+                    default=(s[0] == self.season_id)
+                )
+                for s in self.all_seasons
+            ]
+            season_select = Select(placeholder="📁 Pick a season", options=season_options)
+            season_select.callback = self.on_season_select
+            self.add_item(season_select)
+
+        available_dates = self.available_dates
         total_days = len(available_dates)
         
         if total_days <= 25:
-            # Show all dates in both dropdowns (complete overlap)
             start_dates = available_dates
             end_dates = available_dates
             start_label = "📅 Pick Start Date"
             end_label = "📅 Pick End Date"
         elif total_days <= 50:
-            # Overlap: top shows oldest 25, bottom shows latest 25
-            # Middle dates appear in both dropdowns
             start_dates = available_dates[:25]
             end_dates = available_dates[-25:]
             start_label = f"📅 Pick Start Date (oldest {len(start_dates)})"
             end_label = f"📅 Pick End Date (latest {len(end_dates)})"
         else:
-            # More than 50 days: overlap between top 25 and bottom 25
             start_dates = available_dates[:25]
             end_dates = available_dates[-25:]
             start_label = "📅 Pick Start Date (oldest 25)"
             end_label = "📅 Pick End Date (latest 25)"
         
-        # Populate start date dropdown
         start_select = Select(
             placeholder=start_label,
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=d, value=d) for d in start_dates]
+            options=[discord.SelectOption(label=d, value=d) for d in start_dates] if start_dates else [discord.SelectOption(label="No data", value="none")]
         )
         start_select.callback = self.on_start_select
         self.add_item(start_select)
         
-        # Populate end date dropdown
         end_select = Select(
             placeholder=end_label,
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=d, value=d) for d in end_dates]
+            options=[discord.SelectOption(label=d, value=d) for d in end_dates] if end_dates else [discord.SelectOption(label="No data", value="none")]
         )
         end_select.callback = self.on_end_select
         self.add_item(end_select)
+
+        show_button = Button(label="📊 Show Gains", style=discord.ButtonStyle.green)
+        show_button.callback = self.show_gains
+        self.add_item(show_button)
+
+    async def on_season_select(self, interaction: discord.Interaction):
+        new_season_id = int(interaction.data["values"][0])
+        season = next((s for s in self.all_seasons if s[0] == new_season_id), None)
+        if not season:
+            return await interaction.response.send_message("❌ Season not found.", ephemeral=True)
+
+        self.season_id = new_season_id
+        self.start_date = season[2]
+        self.selected_start = None
+        self.selected_end = None
+
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(
+            "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
+            (self.season_id, self.account_id)
+        )
+        self.available_dates = [row[0] for row in c.fetchall()]
+        conn.close()
+
+        self._build_components()
+
+        if not self.available_dates:
+            await interaction.response.edit_message(
+                content=f"⚠️ No saved data found for **{season[1]}**. Pick another season or run `!loadhistory`.",
+                view=self
+            )
+        else:
+            await interaction.response.edit_message(
+                content=f"📁 Season switched to **{season[1]}** — {len(self.available_dates)} days of data available.",
+                view=self
+            )
     
     async def on_start_select(self, interaction: discord.Interaction):
         self.selected_start = interaction.data["values"][0]
@@ -3620,8 +3786,7 @@ class GainsDateSelector(discord.ui.View):
         self.selected_end = interaction.data["values"][0]
         await interaction.response.defer()
     
-    @discord.ui.button(label="📊 Show Gains", style=discord.ButtonStyle.green)
-    async def show_gains(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def show_gains(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         if not self.selected_start or not self.selected_end:
             return await interaction.response.send_message("❌ Please select both dates", ephemeral=True)
         
@@ -3765,7 +3930,7 @@ async def gains(ctx, param1: str = None, param2: str = None):
         )
         embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
         
-        view = GainsDateSelector(dates, account_id, season_id, start_date, ctx)
+        view = GainsDateSelector(dates, account_id, season_id, start_date, ctx, all_seasons=db_get_all_seasons())
         await ctx.send(embed=embed, view=view)
         
     except Exception as e:
