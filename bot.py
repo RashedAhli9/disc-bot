@@ -2333,6 +2333,7 @@ def build_help_embed(is_owner: bool):
         value=(
             "`!stopmerits / !stopdeaths [server] [top]` — Core stats\n"
             "`!stopheal [top]` — Top healing\n"
+            "`!stopmana [top]` — Top estimated mana spent (Healing × 72)\n"
             "`!stopinf / !stopcav / !stopmage / !stoparcher / !stopother [server] [top]` — Merit breakdowns\n"
             "`!stoppower [server] [top]` — Current power\n"
             "`!stophighest [top]` — Historical highest power\n\n"
@@ -6533,12 +6534,51 @@ async def stopheal(ctx, top: int = 25):
     """Top healing on server. Usage: !stopheal [top]"""
     await _server_leaderboard(ctx, None, "healing", "❤️", "Healing", top)
 
+MANA_PER_T5_HEAL = 72  # estimated mana cost per T4/T5 unit healed
+
+@bot.command(name="stopmana")
+async def stopmana(ctx, top: int = 25):
+    """
+    Top estimated mana spent on server, calculated as Healing (T4/T5) × 72 mana per unit.
+    This is an estimate since the server Excel export has no direct 'Mana Spent' column.
+    Usage: !stopmana [top]
+    """
+    picked = db_get_server_pick()
+    if not picked:
+        return await ctx.send("❌ No server picked. Use `!serverupdate` and upload an Excel file first.")
+
+    lords = db_get_server_lord_stats(picked)
+    if not lords:
+        return await ctx.send(f"❌ No data for S#{picked}. Use `!serverupdate` to upload the Excel file.")
+
+    scored = [{"name": l["lord_name"], "val": l.get("healing", 0) * MANA_PER_T5_HEAL} for l in lords]
+    scored.sort(key=lambda x: x["val"], reverse=True)
+    top_list = scored[:top]
+
+    if not any(x["val"] > 0 for x in top_list):
+        return await ctx.send(f"❌ No mana spent data found for S#{picked}.")
+
+    date_range = ""
+    if lords[0].get("start_date") and lords[0].get("end_date"):
+        date_range = f" ({lords[0]['start_date']} → {lords[0]['end_date']})"
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"```💧 Top {top} Mana Spent (est.) — S#{picked}{date_range}", f"(Assuming its all T5)", ""]
+    for i, lord in enumerate(top_list):
+        if lord["val"] == 0:
+            continue
+        medal = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
+    lines.append(f"\n*Estimated as Healing (T4/T5) × {MANA_PER_T5_HEAL} mana per unit*")
+    lines.append("```")
+    await ctx.send("\n".join(lines))
+
 @bot.command(name="stopinf")
 async def stopinf(ctx, server: int = None, top: int = 25):
     """Top infantry merits on server. Usage: !stopinf [server] [top]"""
     await _server_leaderboard(ctx, server, "infantry_merits", "⚔️", "Infantry Merits", top)
 
-@bot.command(name="stopcav")
+@bot.command(name="stopcav", aliases=["stopcavs"])
 async def stopcav(ctx, server: int = None, top: int = 25):
     """Top cavalry merits on server. Usage: !stopcav [server] [top]"""
     await _server_leaderboard(ctx, server, "cavalry_merits", "🐴", "Cavalry Merits", top)
