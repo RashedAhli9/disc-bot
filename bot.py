@@ -2996,21 +2996,20 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             else:
                 log_info(f"[PROGRESS] Could not find valid merits in range, keeping raw value {raw_merits}")
 
-        # Fetch advanced war stats. For the CURRENT season these are delayed 1 day by COS,
-        # so we look at yesterday/day-before relative to the season's own query window.
-        # For an OLD/ended season, there's no delay concept at all — that data is long
-        # finalized — so we use the season's end date directly with no offset.
+        # Fetch advanced war stats. COS has historically delayed these by 1 day, but that
+        # delay may be removed (per an 8/11 site update). To handle either case gracefully,
+        # for the CURRENT season we try TODAY first, then fall back to earlier days only if
+        # today's data isn't there yet. For an OLD/ended season there's no delay concept at
+        # all — that data is long finalized — so we just use the season's end date.
         if is_current_season:
-            adv_base_dt = datetime.strptime(today, "%Y-%m-%d")
-            adv_yesterday  = (adv_base_dt - timedelta(days=1)).strftime("%Y-%m-%d")
-            adv_day_before = (adv_base_dt - timedelta(days=2)).strftime("%Y-%m-%d")
-            adv_two_days_ago = (adv_base_dt - timedelta(days=2)).strftime("%Y-%m-%d")
-            adv_three_days_ago = (adv_base_dt - timedelta(days=3)).strftime("%Y-%m-%d")
+            real_today_dt = datetime.strptime(today, "%Y-%m-%d")
+            adv_candidates = [
+                today,
+                (real_today_dt - timedelta(days=1)).strftime("%Y-%m-%d"),
+                (real_today_dt - timedelta(days=2)).strftime("%Y-%m-%d"),
+            ]
         else:
-            adv_yesterday  = today
-            adv_day_before = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-            adv_two_days_ago = adv_day_before
-            adv_three_days_ago = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
+            adv_candidates = [today]
 
         adv_fields_list = ["infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
                            "other_merits", "t45_healed", "t45_dead"]
@@ -3018,39 +3017,38 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         def _adv_has_data(snap):
             return snap and any(snap.get(f) for f in adv_fields_list)
 
-        stats_adv_today = db_get_season_progress(season_id, account_id, adv_yesterday)
-        if not _adv_has_data(stats_adv_today):
-            # Try live fetch for yesterday
-            try:
-                fetched, _ = await fetch_stats_with_fallback(account_id, start_date, adv_yesterday)
-                if _adv_has_data(fetched):
-                    stats_adv_today = fetched
-                    log_info(f"[ADV STATS] Got adv data from {adv_yesterday}: infantry={fetched.get('infantry_merits')}")
-                else:
-                    # Yesterday still pending — try 2 days ago
-                    fetched2, _ = await fetch_stats_with_fallback(account_id, start_date, adv_two_days_ago)
-                    if _adv_has_data(fetched2):
-                        stats_adv_today = fetched2
-                        log_info(f"[ADV STATS] Got adv data from {adv_two_days_ago}: infantry={fetched2.get('infantry_merits')}")
-                    else:
-                        stats_adv_today = None
-                        log_info(f"[ADV STATS] No adv data available for {adv_yesterday} or {adv_two_days_ago}")
-            except Exception as e:
-                log_info(f"[ADV STATS] Live fetch failed: {e}")
-                stats_adv_today = None
+        stats_adv_today = None
+        resolved_adv_date = None
+        for candidate in adv_candidates:
+            snap = db_get_season_progress(season_id, account_id, candidate)
+            if not _adv_has_data(snap):
+                try:
+                    snap, _ = await fetch_stats_with_fallback(account_id, start_date, candidate)
+                except Exception as e:
+                    log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
+                    snap = None
+            if _adv_has_data(snap):
+                stats_adv_today = snap
+                resolved_adv_date = candidate
+                log_info(f"[ADV STATS] Got adv data from {candidate}: infantry={snap.get('infantry_merits')}")
+                break
 
-        stats_adv_prev = db_get_season_progress(season_id, account_id, adv_day_before)
-        if not _adv_has_data(stats_adv_prev):
-            try:
-                fetched_p, _ = await fetch_stats_with_fallback(account_id, start_date, adv_day_before)
-                if _adv_has_data(fetched_p):
-                    stats_adv_prev = fetched_p
-                else:
-                    fetched_p2, _ = await fetch_stats_with_fallback(account_id, start_date, adv_three_days_ago)
-                    stats_adv_prev = fetched_p2 if _adv_has_data(fetched_p2) else None
-            except Exception as e:
-                log_info(f"[ADV STATS] Live fetch prev failed: {e}")
-                stats_adv_prev = None
+        if resolved_adv_date:
+            prev_date = (datetime.strptime(resolved_adv_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            stats_adv_prev = db_get_season_progress(season_id, account_id, prev_date)
+            if not _adv_has_data(stats_adv_prev):
+                try:
+                    stats_adv_prev, _ = await fetch_stats_with_fallback(account_id, start_date, prev_date)
+                except Exception as e:
+                    log_info(f"[ADV STATS] Live fetch prev failed: {e}")
+                    stats_adv_prev = None
+        else:
+            stats_adv_prev = None
+            log_info(f"[ADV STATS] No adv data found in any candidate date for {account_id}")
+
+        # Used below for display — the actual date the advanced stats snapshot came from
+        adv_yesterday = resolved_adv_date or adv_candidates[0]
+        adv_is_up_to_date = is_current_season and resolved_adv_date == today
 
         def _adv_int(s):
             if not s:
@@ -3208,7 +3206,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         
         output += f"\n"
 
-        # Advanced War Stats (Merit Breakdown) — delayed 1 day by COS
+        # Advanced War Stats (Merit Breakdown) — may or may not be delayed by COS, handled dynamically above
         def _fmt(n):
             return f"{n:,}" if n else None
 
@@ -3225,8 +3223,10 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         adv_has_data = any(_adv_total(f) for f, _ in adv_fields)
 
         if adv_has_data:
-            if is_current_season:
-                output += f"🏅 Advanced War Stats _(data from {adv_yesterday}, delayed 1 day)_\n"
+            if is_current_season and adv_is_up_to_date:
+                output += f"🏅 Advanced War Stats _(data from {adv_yesterday}, up to date)_\n"
+            elif is_current_season:
+                output += f"🏅 Advanced War Stats _(data from {adv_yesterday} — COS hasn't released today's yet)_\n"
             else:
                 output += f"🏅 Advanced War Stats _(final data as of {adv_yesterday})_\n"
             for field, label in adv_fields:
@@ -3243,7 +3243,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         else:
             output += f"🏅 Advanced War Stats\n"
             if is_current_season:
-                output += f"_(not yet available — delayed 1 day by COS)_\n"
+                output += f"_(not yet available from COS)_\n"
             else:
                 output += f"_(no advanced stats recorded for this season)_\n"
 
@@ -4204,7 +4204,9 @@ async def topmerits(ctx, season_name: str = None):
 
 
 async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
-    """Generic advanced merit leaderboard using DB data (delayed 1 day by COS)."""
+    """Generic advanced merit leaderboard using DB data. COS has historically delayed these
+    by 1 day, but that delay may be removed (per an 8/11 site update) — so we try today's
+    date first and only fall back to earlier days if today's data isn't there yet."""
     if season_name:
         season = resolve_season_input(season_name)
         if not season:
@@ -4222,10 +4224,11 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
     if not lords:
         return await ctx.send("❌ No members with numeric roles found.")
 
-    # Advanced stats are delayed — try yesterday, then 2 days ago, then 3 days ago
-    adv_yesterday    = (date.today() - timedelta(days=1)).isoformat()
-    adv_day_before   = (date.today() - timedelta(days=2)).isoformat()
-    adv_three_ago    = (date.today() - timedelta(days=3)).isoformat()
+    adv_candidates = [
+        date.today().isoformat(),
+        (date.today() - timedelta(days=1)).isoformat(),
+        (date.today() - timedelta(days=2)).isoformat(),
+    ]
 
     def parse_val(raw):
         if not raw:
@@ -4237,50 +4240,49 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
 
     await ctx.send(f"⏳ Fetching {label} leaderboard...")
 
-    async def fetch_adv_snap(account_id, primary_date, fallback_date):
-        """Get DB snapshot, live-fetch from COS if advanced fields are None.
-        Tries primary_date first, then fallback_date if adv fields still missing."""
-        # Check DB first
-        snap = db_get_season_progress(season_id, account_id, primary_date)
-        if snap and snap.get(field):
-            return snap
-        # Try live fetch for primary date
-        try:
-            live, _ = await fetch_stats_with_fallback(account_id, start_date, primary_date)
-            if live and live.get(field):
-                return live
-        except Exception:
-            pass
-        # Primary date still pending — try fallback date
-        snap2 = db_get_season_progress(season_id, account_id, fallback_date)
-        if snap2 and snap2.get(field):
-            return snap2
-        try:
-            live2, _ = await fetch_stats_with_fallback(account_id, start_date, fallback_date)
-            if live2 and live2.get(field):
-                return live2
-        except Exception:
-            pass
-        return snap  # return whatever we have even if None
+    async def fetch_adv_for_lord(account_id):
+        """Try each candidate date (today, then earlier) until one has real data for `field`."""
+        primary_snap = None
+        primary_date = None
+        for candidate in adv_candidates:
+            snap = db_get_season_progress(season_id, account_id, candidate)
+            if not (snap and snap.get(field)):
+                try:
+                    snap, _ = await fetch_stats_with_fallback(account_id, start_date, candidate)
+                except Exception:
+                    snap = None
+            if snap and snap.get(field):
+                primary_snap = snap
+                primary_date = candidate
+                break
 
-    fetch_tasks = [
-        asyncio.gather(
-            fetch_adv_snap(lord["account_id"], adv_yesterday, adv_day_before),
-            fetch_adv_snap(lord["account_id"], adv_day_before, adv_three_ago)
-        )
-        for lord in lords
-    ]
+        if not primary_date:
+            return None, None, None
+
+        prev_date = (datetime.strptime(primary_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        prev_snap = db_get_season_progress(season_id, account_id, prev_date)
+        if not (prev_snap and prev_snap.get(field)):
+            try:
+                prev_snap, _ = await fetch_stats_with_fallback(account_id, start_date, prev_date)
+            except Exception:
+                prev_snap = None
+
+        return primary_snap, prev_snap, primary_date
+
+    fetch_tasks = [fetch_adv_for_lord(lord["account_id"]) for lord in lords]
     all_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     leaderboard = []
+    resolved_dates = []
     for lord, result in zip(lords, all_results):
         lord_name = lord["name"]
         val = gain = 0
         try:
-            snap, snap_prev = result if not isinstance(result, Exception) else (None, None)
+            snap, snap_prev, resolved_date = result if not isinstance(result, Exception) else (None, None, None)
             if snap:
                 lord_name = snap.get("lord_name", lord["name"]) or lord["name"]
                 val = parse_val(snap.get(field))
+                resolved_dates.append(resolved_date)
             if snap_prev:
                 prev = parse_val(snap_prev.get(field))
                 gain = val - prev if val > prev else 0
@@ -4290,14 +4292,19 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
 
     leaderboard.sort(key=lambda x: x["val"], reverse=True)
 
+    # Use the most recent resolved date across all lords as the "data as of" date shown in the header
+    data_as_of = max(resolved_dates) if resolved_dates else adv_candidates[0]
+    is_up_to_date = data_as_of == date.today().isoformat()
+    header_note = "up to date" if is_up_to_date else f"COS hasn't released today's yet"
+
     medals = ["🥇", "🥈", "🥉"]
-    output = f"```{emoji} Top {label} — {season_name_display} (data from {adv_yesterday}, +1 day delay)\n"
+    output = f"```{emoji} Top {label} — {season_name_display} (data from {data_as_of}, {header_note})\n"
     for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         total_str = f"+{lord['val']:,}"
         gain_str  = f" (+{lord['gain']:,} today)" if lord["gain"] > 0 else ""
         output += f"{medal} {lord['name']}: {total_str}{gain_str}\n"
-    output += f"📅 {start_date} → {adv_yesterday}```"
+    output += f"📅 {start_date} → {data_as_of}```"
     await ctx.send(output)
 
 
