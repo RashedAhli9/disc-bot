@@ -4491,7 +4491,7 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         for account_id in checked_accounts:
             # Get LATEST row for this account (most recent date = most recent cumulative data)
             # Build query safely - stat_key is validated above
-            query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date DESC LIMIT 1"
+            query = f"SELECT {stat_key} FROM season_progress WHERE season_id=? AND account_id=? AND {stat_key} IS NOT NULL ORDER BY data_date DESC LIMIT 1"
             try:
                 c.execute(query, (season_id, account_id))
                 
