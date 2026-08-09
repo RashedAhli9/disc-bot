@@ -3183,46 +3183,54 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if is_single_day:
             embed.description = "⚠️ Only 1 day of data available - showing absolute values"
 
-        # Highest Power
+        # Power + Merits + Merit Ratio combined into one compact field
+        power_line = ""
         if highest_power or power_gain:
             if highest_power and power_gain:
-                power_val = f"{highest_power:,} (+{power_gain:,}){power_rank_str}"
+                power_line = f"🟢 **Power:** {highest_power:,} (+{power_gain:,}){power_rank_str}"
             elif highest_power:
-                power_val = f"{highest_power:,}{power_rank_str}"
+                power_line = f"🟢 **Power:** {highest_power:,}{power_rank_str}"
             else:
-                power_val = f"+{power_gain:,}{power_rank_str}"
-            embed.add_field(name="🟢 Highest Power", value=power_val, inline=False)
+                power_line = f"🟢 **Power:** +{power_gain:,}{power_rank_str}"
 
-        # Total Merits / Merit Ratio side by side
+        merits_line = ""
         if stats.get("merits"):
-            embed.add_field(name="🔴 Total Merits", value=f"{stats['merits']}{merits_rank_str}", inline=True)
-        if stats.get("merits_pct"):
-            embed.add_field(name="📊 Merit Ratio", value=f"{stats['merits_pct']}", inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer to keep 3-column grid tidy
+            pct = f" ({stats['merits_pct']})" if stats.get("merits_pct") else ""
+            merits_line = f"🔴 **Merits:** {stats['merits']}{pct}{merits_rank_str}"
 
-        # Kills / Deaths / Healed side by side
+        if power_line or merits_line:
+            embed.add_field(name="\u200b", value="\n".join(l for l in [power_line, merits_line] if l), inline=False)
+
+        # Kills / Deads / Healed combined into one line
+        combat_parts = []
         if stats.get("kills_gain"):
-            embed.add_field(name="⚔️ Kills", value=f"{stats['kills_gain']}{kills_rank_str}", inline=True)
+            combat_parts.append(f"⚔️ {stats['kills_gain']}{kills_rank_str}")
         if stats.get("deads_gain"):
-            embed.add_field(name="💀 Deads", value=f"{stats['deads_gain']}{deads_rank_str}", inline=True)
+            combat_parts.append(f"💀 {stats['deads_gain']}{deads_rank_str}")
         if stats.get("healed_gain"):
             healed_display = stats['healed_gain']
             if stats.get("t45_healed"):
                 healed_display += f" (T4/T5: {stats['t45_healed']})"
-            embed.add_field(name="❤️ Healed", value=f"{healed_display}{healed_rank_str}", inline=True)
+            combat_parts.append(f"❤️ {healed_display}{healed_rank_str}")
+        if combat_parts:
+            embed.add_field(name="Kills / Deads / Healed", value="  ·  ".join(combat_parts), inline=False)
 
-        # RSS Gathered
-        rss_lines = []
+        # RSS Gathered — single compact line
+        rss_parts = []
         if stats.get("gold_gathered"):
-            rss_lines.append(f"🪙 Gold: {stats['gold_gathered'].lstrip('+')}")
+            rss_parts.append(f"🪙{stats['gold_gathered'].lstrip('+')}")
         if stats.get("wood_gathered"):
-            rss_lines.append(f"🪵 Wood: {stats['wood_gathered'].lstrip('+')}")
+            rss_parts.append(f"🪵{stats['wood_gathered'].lstrip('+')}")
         if stats.get("ore_gathered"):
-            rss_lines.append(f"⛏️ Ore: {stats['ore_gathered'].lstrip('+')}")
+            rss_parts.append(f"⛏️{stats['ore_gathered'].lstrip('+')}")
         if stats.get("mana_gathered"):
-            rss_lines.append(f"💧 Mana: {stats['mana_gathered'].lstrip('+')}")
-        rss_lines.append(f"**Total: {total_gathered:,}**")
-        embed.add_field(name="🧑‍🌾 RSS Gathered", value="\n".join(rss_lines), inline=False)
+            rss_parts.append(f"💧{stats['mana_gathered'].lstrip('+')}")
+        if rss_parts:
+            embed.add_field(
+                name="🧑‍🌾 RSS Gathered",
+                value=f"{'  '.join(rss_parts)}  ·  **Total: {total_gathered:,}**",
+                inline=False
+            )
 
         # Troop Merits (Server Rank) — two-column style
         def _fmt(n):
@@ -3250,40 +3258,31 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if stats.get("t45_dead"):
             other_lines.append(f"💀 T4/T5 Dead: {stats['t45_dead']}")
 
-        if troop_lines or other_lines:
-            if is_current_season and not adv_is_up_to_date:
-                adv_note = f"_(as of {adv_yesterday} — COS hasn't released today's yet)_"
-            elif not is_current_season:
-                adv_note = f"_(final data as of {adv_yesterday})_"
-            else:
-                adv_note = ""
-            if adv_note:
-                embed.add_field(name="\u200b", value=adv_note, inline=False)
-            if troop_lines:
-                embed.add_field(name="Troop Merits (Server Rank)", value="\n".join(troop_lines), inline=True)
-            if other_lines:
-                embed.add_field(name="Other (Server Rank)", value="\n".join(other_lines), inline=True)
-        elif is_current_season:
+        if troop_lines:
+            embed.add_field(name="Troop Merits (Server Rank)", value="\n".join(troop_lines), inline=True)
+        if other_lines:
+            embed.add_field(name="Other (Server Rank)", value="\n".join(other_lines), inline=True)
+        if not troop_lines and not other_lines and is_current_season:
             embed.add_field(name="Troop Merits (Server Rank)", value="_(not yet available from COS)_", inline=False)
 
-        # Achievements
-        coins_str = f"{exchange_coins_spent:,}" if exchange_coins_spent is not None else "not available"
-        pets_str = f"{max_pets:,}" if max_pets is not None else "not available"
+        # Achievements — single compact line
+        coins_str = f"{exchange_coins_spent:,}" if exchange_coins_spent is not None else "n/a"
+        pets_str = f"{max_pets:,}" if max_pets is not None else "n/a"
         embed.add_field(
             name="🏆 Achievements",
-            value=f"🪙 Exchange Coins Spent: {coins_str}\n🐾 Max Pets: {pets_str}",
+            value=f"🪙 Coins Spent: {coins_str}  ·  🐾 Max Pets: {pets_str}",
             inline=False
         )
 
-        embed.add_field(
-            name="\u200b",
-            value=(
-                f"📅 Timespan: {start_date} → {end_date_used}\n"
-                f"To view stats from a different season, add the season name or ID at the end of the command.\n"
-                f"Example: `!progress {account_id} sos2` or `!progress {account_id} 2`"
-            ),
-            inline=False
-        )
+        # Footer: timespan + advanced-stats freshness note + tip — all as small footer text, not a field
+        footer_parts = [f"📅 {start_date} → {end_date_used}"]
+        if troop_lines or other_lines:
+            if is_current_season and not adv_is_up_to_date:
+                footer_parts.append(f"Merit breakdown as of {adv_yesterday}")
+            elif not is_current_season:
+                footer_parts.append(f"Merit breakdown final as of {adv_yesterday}")
+        footer_parts.append(f"Tip: !progress {account_id} sos2 (or a season ID) for another season")
+        embed.set_footer(text="  •  ".join(footer_parts))
 
         await msg.edit(content=None, embed=embed)
         
