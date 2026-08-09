@@ -3125,6 +3125,11 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         kills_rank = await get_rankings_for_stat(ctx, "kills_gain", start_date, end_date_used)
         deads_rank = await get_rankings_for_stat(ctx, "deads_gain", start_date, end_date_used)
         healed_rank = await get_rankings_for_stat(ctx, "healed_gain", start_date, end_date_used)
+        infantry_rank = await get_rankings_for_stat(ctx, "infantry_merits", start_date, end_date_used)
+        cavalry_rank = await get_rankings_for_stat(ctx, "cavalry_merits", start_date, end_date_used)
+        mage_rank = await get_rankings_for_stat(ctx, "mage_merits", start_date, end_date_used)
+        marksman_rank = await get_rankings_for_stat(ctx, "marksman_merits", start_date, end_date_used)
+        other_rank = await get_rankings_for_stat(ctx, "other_merits", start_date, end_date_used)
         
         # Calculate power_gain
         power_gain = 0
@@ -3141,6 +3146,11 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         kills_rank_str = f" (#{kills_rank[account_id][0]})" if account_id in kills_rank else ""
         deads_rank_str = f" (#{deads_rank[account_id][0]})" if account_id in deads_rank else ""
         healed_rank_str = f" (#{healed_rank[account_id][0]})" if account_id in healed_rank else ""
+        infantry_rank_str = f" (#{infantry_rank[account_id][0]})" if account_id in infantry_rank else ""
+        cavalry_rank_str = f" (#{cavalry_rank[account_id][0]})" if account_id in cavalry_rank else ""
+        mage_rank_str = f" (#{mage_rank[account_id][0]})" if account_id in mage_rank else ""
+        marksman_rank_str = f" (#{marksman_rank[account_id][0]})" if account_id in marksman_rank else ""
+        other_rank_str = f" (#{other_rank[account_id][0]})" if account_id in other_rank else ""
         
         
         # Calculate totals for RSS
@@ -3161,140 +3171,121 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             except Exception as e:
                 pass
         
-        # Build text output - MATCH REFERENCE FORMAT
+        # Build Discord embed - matches the reference "card" layout
         lord_name = stats.get("lord_name", "Unknown")
-        output = f"```✅ Progress Report for {lord_name} {alliance_tag} for season {season_name}\n"
-        
+
+        embed = discord.Embed(
+            title=f"📈 Progress Report for {alliance_tag} {lord_name}",
+            color=0x2ecc71
+        )
+        embed.set_author(name=f"Season: {season_name}")
+
         if is_single_day:
-            output += f"⚠️  Only 1 day of data available - showing absolute values\n"
-        
-        output += f"\n"  # Line break before Power
-        
-        # Power - with highest power + season gain on ONE line
+            embed.description = "⚠️ Only 1 day of data available - showing absolute values"
+
+        # Highest Power
         if highest_power or power_gain:
-            output += f"⚡ Power "
             if highest_power and power_gain:
-                output += f"{highest_power:,} (+{power_gain:,}){power_rank_str}\n"
+                power_val = f"{highest_power:,} (+{power_gain:,}){power_rank_str}"
             elif highest_power:
-                output += f"{highest_power:,}{power_rank_str}\n"
-            elif power_gain:
-                output += f"+{power_gain:,}{power_rank_str}\n"
-        
-        # Merits - with ranking on ONE line
+                power_val = f"{highest_power:,}{power_rank_str}"
+            else:
+                power_val = f"+{power_gain:,}{power_rank_str}"
+            embed.add_field(name="🟢 Highest Power", value=power_val, inline=False)
+
+        # Total Merits / Merit Ratio side by side
         if stats.get("merits"):
-            merits_display = f"{stats['merits']}"
-            if stats.get("merits_pct"):
-                merits_display += f" ({stats['merits_pct']})"
-            output += f"🏅 Merits {merits_display}{merits_rank_str}\n"
-        
-        output += f"\n"
-        
-        # Kills - one line
+            embed.add_field(name="🔴 Total Merits", value=f"{stats['merits']}{merits_rank_str}", inline=True)
+        if stats.get("merits_pct"):
+            embed.add_field(name="📊 Merit Ratio", value=f"{stats['merits_pct']}", inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer to keep 3-column grid tidy
+
+        # Kills / Deaths / Healed side by side
         if stats.get("kills_gain"):
-            output += f"⚔️ Kills {stats['kills_gain']}{kills_rank_str}\n"
-        
-        # Deaths - one line
+            embed.add_field(name="⚔️ Kills", value=f"{stats['kills_gain']}{kills_rank_str}", inline=True)
         if stats.get("deads_gain"):
-            output += f"💀 Deaths {stats['deads_gain']}{deads_rank_str}\n"
-        
-        # Healed - combine healed_gain + t45_healed
+            embed.add_field(name="💀 Deads", value=f"{stats['deads_gain']}{deads_rank_str}", inline=True)
         if stats.get("healed_gain"):
             healed_display = stats['healed_gain']
             if stats.get("t45_healed"):
                 healed_display += f" (T4/T5: {stats['t45_healed']})"
-            output += f"❤️ Healed {healed_display}{healed_rank_str}\n"
-        
-        output += f"\n"
+            embed.add_field(name="❤️ Healed", value=f"{healed_display}{healed_rank_str}", inline=True)
 
-        # Advanced War Stats (Merit Breakdown) — may or may not be delayed by COS, handled dynamically above
+        # RSS Gathered
+        rss_lines = []
+        if stats.get("gold_gathered"):
+            rss_lines.append(f"🪙 Gold: {stats['gold_gathered'].lstrip('+')}")
+        if stats.get("wood_gathered"):
+            rss_lines.append(f"🪵 Wood: {stats['wood_gathered'].lstrip('+')}")
+        if stats.get("ore_gathered"):
+            rss_lines.append(f"⛏️ Ore: {stats['ore_gathered'].lstrip('+')}")
+        if stats.get("mana_gathered"):
+            rss_lines.append(f"💧 Mana: {stats['mana_gathered'].lstrip('+')}")
+        rss_lines.append(f"**Total: {total_gathered:,}**")
+        embed.add_field(name="🧑‍🌾 RSS Gathered", value="\n".join(rss_lines), inline=False)
+
+        # Troop Merits (Server Rank) — two-column style
         def _fmt(n):
             return f"{n:,}" if n else None
 
-        adv_fields = [
-            ("infantry_merits",  "⚔️ Infantry"),
-            ("cavalry_merits",   "🐴 Cavalry"),
-            ("mage_merits",      "🔮 Mage"),
-            ("marksman_merits",  "🏹 Marksman"),
-            ("other_merits",     "🌀 Other"),
-            ("t45_healed",       "💊 T4/T5 RSS Healed"),
-            ("t45_dead",         "💀 T4/T5 Dead"),
-        ]
+        troop_lines = []
+        infantry_total = _adv_total("infantry_merits")
+        cavalry_total = _adv_total("cavalry_merits")
+        marksman_total = _adv_total("marksman_merits")
+        mage_total = _adv_total("mage_merits")
+        other_total = _adv_total("other_merits")
 
-        adv_has_data = any(_adv_total(f) for f, _ in adv_fields)
+        if infantry_total:
+            troop_lines.append(f"⚔️ Infantry: {_fmt(infantry_total)}{infantry_rank_str}")
+        if cavalry_total:
+            troop_lines.append(f"🐴 Cavalry: {_fmt(cavalry_total)}{cavalry_rank_str}")
+        if marksman_total:
+            troop_lines.append(f"🏹 Archer: {_fmt(marksman_total)}{marksman_rank_str}")
+        if mage_total:
+            troop_lines.append(f"🔮 Magic: {_fmt(mage_total)}{mage_rank_str}")
 
-        if adv_has_data:
-            if is_current_season and adv_is_up_to_date:
-                output += f"🏅 Advanced War Stats _(data from {adv_yesterday}, up to date)_\n"
-            elif is_current_season:
-                output += f"🏅 Advanced War Stats _(data from {adv_yesterday} — COS hasn't released today's yet)_\n"
+        other_lines = []
+        if other_total:
+            other_lines.append(f"🌀 Other: {_fmt(other_total)}{other_rank_str}")
+        if stats.get("t45_dead"):
+            other_lines.append(f"💀 T4/T5 Dead: {stats['t45_dead']}")
+
+        if troop_lines or other_lines:
+            if is_current_season and not adv_is_up_to_date:
+                adv_note = f"_(as of {adv_yesterday} — COS hasn't released today's yet)_"
+            elif not is_current_season:
+                adv_note = f"_(final data as of {adv_yesterday})_"
             else:
-                output += f"🏅 Advanced War Stats _(final data as of {adv_yesterday})_\n"
-            for field, label in adv_fields:
-                total = _adv_total(field)
-                gain  = _adv_gain(field)
-                if total:
-                    if gain and is_current_season:
-                        gain_str = f" (+{_fmt(gain)} today)"
-                    elif gain:
-                        gain_str = f" (+{_fmt(gain)} on final day)"
-                    else:
-                        gain_str = ""
-                    output += f"{label}: {_fmt(total)}{gain_str}\n"
-        else:
-            output += f"🏅 Advanced War Stats\n"
-            if is_current_season:
-                output += f"_(not yet available from COS)_\n"
-            else:
-                output += f"_(no advanced stats recorded for this season)_\n"
+                adv_note = ""
+            if adv_note:
+                embed.add_field(name="\u200b", value=adv_note, inline=False)
+            if troop_lines:
+                embed.add_field(name="Troop Merits (Server Rank)", value="\n".join(troop_lines), inline=True)
+            if other_lines:
+                embed.add_field(name="Other (Server Rank)", value="\n".join(other_lines), inline=True)
+        elif is_current_season:
+            embed.add_field(name="Troop Merits (Server Rank)", value="_(not yet available from COS)_", inline=False)
 
-        output += f"\n"
-
-        # RSS Spent - each resource on own line with absolute values
-        output += f"💰 RSS Spent _(currently broken on COS)_\n"
-        if stats.get("gold_spent"):
-            gold_clean = stats['gold_spent'].replace(",", "").replace("+", "")
-            gold_val = abs(int(gold_clean)) if gold_clean.lstrip("-").isdigit() else 0
-            output += f"🪙 Gold: -{gold_val:,}\n"
-        if stats.get("wood_spent"):
-            wood_clean = stats['wood_spent'].replace(",", "").replace("+", "")
-            wood_val = abs(int(wood_clean)) if wood_clean.lstrip("-").isdigit() else 0
-            output += f"🪵 Wood: -{wood_val:,}\n"
-        if stats.get("ore_spent"):
-            ore_clean = stats['ore_spent'].replace(",", "").replace("+", "")
-            ore_val = abs(int(ore_clean)) if ore_clean.lstrip("-").isdigit() else 0
-            output += f"⛏️ Ore: -{ore_val:,}\n"
-        if stats.get("mana_spent"):
-            mana_clean = stats['mana_spent'].replace(",", "").replace("+", "")
-            mana_val = abs(int(mana_clean)) if mana_clean.lstrip("-").isdigit() else 0
-            output += f"💧 Mana: -{mana_val:,}\n"
-        output += f"Total: -{total_spent:,}\n"
-        output += f"\n"
-        
-        # RSS Gathered - each resource on own line
-        output += f"👨‍🌾 RSS Gathered\n"
-        if stats.get("gold_gathered"):
-            output += f"🪙 Gold: {stats['gold_gathered']}\n"
-        if stats.get("wood_gathered"):
-            output += f"🪵 Wood: {stats['wood_gathered']}\n"
-        if stats.get("ore_gathered"):
-            output += f"⛏️ Ore: {stats['ore_gathered']}\n"
-        if stats.get("mana_gathered"):
-            output += f"💧 Mana: {stats['mana_gathered']}\n"
-        output += f"Total: {total_gathered:,}\n"
-        output += f"\n"
-
-        # Achievements - shown directly in the report
-        output += f"🏆 Achievements\n"
+        # Achievements
         coins_str = f"{exchange_coins_spent:,}" if exchange_coins_spent is not None else "not available"
         pets_str = f"{max_pets:,}" if max_pets is not None else "not available"
-        output += f"🪙 Exchange Coins Spent: {coins_str}\n"
-        output += f"🐾 Max Pets: {pets_str}\n"
-        output += f"\n"
-        
-        # Timespan
-        output += f"📅 Timespan: {start_date} → {end_date_used}```"
+        embed.add_field(
+            name="🏆 Achievements",
+            value=f"🪙 Exchange Coins Spent: {coins_str}\n🐾 Max Pets: {pets_str}",
+            inline=False
+        )
 
-        await msg.edit(content=output)
+        embed.add_field(
+            name="\u200b",
+            value=(
+                f"📅 Timespan: {start_date} → {end_date_used}\n"
+                f"To view stats from a different season, add the season name or ID at the end of the command.\n"
+                f"Example: `!progress {account_id} sos2` or `!progress {account_id} 2`"
+            ),
+            inline=False
+        )
+
+        await msg.edit(content=None, embed=embed)
         
     except Exception as e:
         log_info(f"[PROGRESS ERROR] {e}")
@@ -4487,7 +4478,8 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         valid_stats = ["power_gain", "merits", "kills_gain", "deads_gain", "healed_gain",
                       "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
                       "gold_spent", "wood_spent", "ore_spent", "mana_spent",
-                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]
+                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered",
+                      "infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits", "other_merits"]
         
         if stat_key not in valid_stats:
             return {}
