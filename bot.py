@@ -3213,14 +3213,16 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             embed.add_field(name="\u200b", value="\n".join(l for l in [power_line, merits_line] if l), inline=False)
 
         # Kills / Deads / T4/T5 Units Rss Healed combined into one line
+        t45_healed_val = stats_adv_today.get("t45_healed") if stats_adv_today else None
+
         combat_parts = []
         if stats.get("kills_gain"):
             combat_parts.append(f"⚔️ {stats['kills_gain']}{kills_rank_str}")
         if stats.get("deads_gain"):
             combat_parts.append(f"💀 {stats['deads_gain']}{deads_rank_str}")
-        if stats.get("t45_healed") or stats.get("healed_gain"):
-            if stats.get("t45_healed"):
-                healed_display = stats["t45_healed"]
+        if t45_healed_val or stats.get("healed_gain"):
+            if t45_healed_val:
+                healed_display = t45_healed_val
                 if stats.get("healed_gain"):
                     healed_display += f" (Overall: {stats['healed_gain']})"
             else:
@@ -3230,7 +3232,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value="  ·  ".join(combat_parts), inline=False)
 
         # Mana Spent — estimated the same way as !stopmana (Healing × 72), assuming it's all T5
-        mana_source = _parse_stat_num(stats.get("t45_healed")) or _parse_stat_num(stats.get("healed_gain"))
+        mana_source = _parse_stat_num(t45_healed_val) or _parse_stat_num(stats.get("healed_gain"))
         if mana_source:
             mana_spent_est = mana_source * MANA_PER_T5_HEAL
             embed.add_field(
