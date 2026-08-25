@@ -3220,19 +3220,13 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             combat_parts.append(f"⚔️ {stats['kills_gain']}{kills_rank_str}")
         if stats.get("deads_gain"):
             combat_parts.append(f"💀 {stats['deads_gain']}{deads_rank_str}")
-        if t45_healed_val or stats.get("healed_gain"):
-            if t45_healed_val:
-                healed_display = t45_healed_val
-                if stats.get("healed_gain"):
-                    healed_display += f" (Overall: {stats['healed_gain']})"
-            else:
-                healed_display = stats["healed_gain"]
-            combat_parts.append(f"❤️ {healed_display}{healed_rank_str}")
+        if t45_healed_val:
+            combat_parts.append(f"❤️ {t45_healed_val}{healed_rank_str}")
         if combat_parts:
             embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value="  ·  ".join(combat_parts), inline=False)
 
-        # Mana Spent — estimated the same way as !stopmana (Healing × 72), assuming it's all T5
-        mana_source = _parse_stat_num(t45_healed_val) or _parse_stat_num(stats.get("healed_gain"))
+        # Mana Spent — estimated the same way as !stopmana (T4/T5 Healed × 72), assuming it's all T5
+        mana_source = _parse_stat_num(t45_healed_val)
         if mana_source:
             mana_spent_est = mana_source * MANA_PER_T5_HEAL
             embed.add_field(
