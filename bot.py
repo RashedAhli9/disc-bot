@@ -1808,7 +1808,7 @@ def parse_stats(html):
         stats["mage_merits"] = find_stat_value("Mage Merits")
         stats["marksman_merits"] = find_stat_value("Marksman Merits")
         stats["other_merits"] = find_stat_value("Other Merits")
-        stats["t45_healed"] = find_stat_value("T4/T5 Units Healed")
+        stats["t45_healed"] = find_stat_value("T4/T5 Units Rss Healed")
         stats["t45_dead"] = find_stat_value("T4/T5 Units Dead")
         
         found_count = len([v for v in stats.values() if v])
