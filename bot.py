@@ -487,6 +487,81 @@ async def fetch_highest_power_at_date(account_id, selected_date):
     return None
 
 
+async def fetch_advanced_stats_at_date(account_id, selected_date):
+    """
+    Fetch the "Advanced War Stats" block (Infantry/Cavalry/Mage/Marksman/Other Merits,
+    T4/T5 Units Rss Healed, T4/T5 Units Dead) as it stood on a SPECIFIC date.
+    This section only renders on the single-date profile view (?selected_date=X) —
+    NOT on the ranged (?start_date=X&end_date=Y) view used for the main stats — so it
+    needs its own dedicated fetch, same pattern as fetch_highest_power_at_date.
+    Returns a dict of the 7 fields (values as raw strings like "+16,161,386"), or all-None on failure.
+    """
+    import re
+
+    url = f"https://callofstats.com/lord/{account_id}?selected_date={selected_date}"
+    field_labels = {
+        "infantry_merits": "Infantry Merits",
+        "cavalry_merits": "Cavalry Merits",
+        "mage_merits": "Mage Merits",
+        "marksman_merits": "Marksman Merits",
+        "other_merits": "Other Merits",
+        "t45_healed": "T4/T5 Units Rss Healed",
+        "t45_dead": "T4/T5 Units Dead",
+    }
+    result = {k: None for k in field_labels}
+
+    for attempt in range(3):
+        try:
+            session = await get_callofstats_session()
+            if not session:
+                log_info(f"[ADV AT DATE] No session available, attempt {attempt+1}")
+                await asyncio.sleep(2)
+                continue
+
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status != 200:
+                    log_info(f"[ADV AT DATE] HTTP {response.status} attempt {attempt+1} for {account_id} @ {selected_date}")
+                    await asyncio.sleep(1)
+                    continue
+
+                html = await response.text()
+
+                if "<title>Login" in html or "Sign in to Call of Stats" in html:
+                    log_info(f"[ADV AT DATE] Got login page on attempt {attempt+1}, forcing session refresh")
+                    global _callofstats_session, _session_login_time
+                    if _callofstats_session:
+                        await _callofstats_session.close()
+                        _callofstats_session = None
+                        _session_login_time = None
+                    await asyncio.sleep(2)
+                    continue
+
+                for key, label in field_labels.items():
+                    pattern = f'<span class="subtle">{re.escape(label)}</span>\\s*<div class="value">([^<]+)</div>'
+                    match = re.search(pattern, html)
+                    if match:
+                        result[key] = match.group(1).strip()
+
+                if any(v for v in result.values()):
+                    log_info(f"[ADV AT DATE] {account_id} @ {selected_date}: t45_healed={result['t45_healed']}")
+                    return result
+
+                if attempt == 2:
+                    log_info(f"[ADV AT DATE] Not found for {account_id} @ {selected_date}")
+                else:
+                    log_info(f"[ADV AT DATE] No match attempt {attempt+1} for {account_id}, retrying...")
+                    await asyncio.sleep(1)
+
+        except asyncio.TimeoutError:
+            log_info(f"[ADV AT DATE] Timeout attempt {attempt+1} for {account_id}")
+            await asyncio.sleep(1)
+        except Exception as e:
+            log_info(f"[ADV AT DATE ERROR] attempt {attempt+1} for {account_id}: {e}")
+            await asyncio.sleep(1)
+
+    return result
+
+
 async def fetch_achievement_stats(account_id, selected_date=None):
     """
     Fetch EXCHANGE COINS SPENT and MAX PETS achievement values from the profile page.
@@ -3023,28 +3098,26 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         stats_adv_today = None
         resolved_adv_date = None
         for candidate in adv_candidates:
-            snap = db_get_season_progress(season_id, account_id, candidate)
-            if not _adv_has_data(snap):
-                try:
-                    snap, _ = await fetch_stats_with_fallback(account_id, start_date, candidate)
-                except Exception as e:
-                    log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
-                    snap = None
+            # This section only renders on the single-date profile view (?selected_date=X),
+            # not the ranged view — so it needs its own dedicated fetch, always live.
+            try:
+                snap = await fetch_advanced_stats_at_date(account_id, candidate)
+            except Exception as e:
+                log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
+                snap = None
             if _adv_has_data(snap):
                 stats_adv_today = snap
                 resolved_adv_date = candidate
-                log_info(f"[ADV STATS] Got adv data from {candidate}: infantry={snap.get('infantry_merits')}")
+                log_info(f"[ADV STATS] Got adv data from {candidate}: t45_healed={snap.get('t45_healed')}")
                 break
 
         if resolved_adv_date:
             prev_date = (datetime.strptime(resolved_adv_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-            stats_adv_prev = db_get_season_progress(season_id, account_id, prev_date)
-            if not _adv_has_data(stats_adv_prev):
-                try:
-                    stats_adv_prev, _ = await fetch_stats_with_fallback(account_id, start_date, prev_date)
-                except Exception as e:
-                    log_info(f"[ADV STATS] Live fetch prev failed: {e}")
-                    stats_adv_prev = None
+            try:
+                stats_adv_prev = await fetch_advanced_stats_at_date(account_id, prev_date)
+            except Exception as e:
+                log_info(f"[ADV STATS] Live fetch prev failed: {e}")
+                stats_adv_prev = None
         else:
             stats_adv_prev = None
             log_info(f"[ADV STATS] No adv data found in any candidate date for {account_id}")
