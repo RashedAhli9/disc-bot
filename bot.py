@@ -487,15 +487,18 @@ async def fetch_highest_power_at_date(account_id, selected_date):
     return None
 
 
-async def fetch_achievement_stats(account_id):
+async def fetch_achievement_stats(account_id, selected_date=None):
     """
-    Fetch EXCHANGE COINS SPENT and MAX PETS achievement values from the normal
-    profile page (no date range), in a single request. Both are lifetime totals.
+    Fetch EXCHANGE COINS SPENT and MAX PETS achievement values from the profile page.
+    If selected_date is given, fetches the value AS OF that date (for computing an increase
+    over a range, same as Highest Power). Otherwise fetches the current/live value.
     Returns dict {"exchange_coins_spent": int|None, "max_pets": int|None}.
     """
     import re
 
     url = f"https://callofstats.com/lord/{account_id}"
+    if selected_date:
+        url += f"?selected_date={selected_date}"
     result = {"exchange_coins_spent": None, "max_pets": None}
 
     achievement_patterns = {
@@ -3091,10 +3094,18 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         # Get current T-kills from normal profile (only if not in database)
         current_t_kills = await fetch_current_t_kills(account_id)
 
-        # Get Exchange Coins Spent + Max Pets (achievement stats, shown via "Show More" button)
-        achievement_stats = await fetch_achievement_stats(account_id)
+        # Get Exchange Coins Spent + Max Pets (achievement stats)
+        achievement_stats = await fetch_achievement_stats(account_id, end_date_used)
         exchange_coins_spent = achievement_stats["exchange_coins_spent"]
         max_pets = achievement_stats["max_pets"]
+
+        # Also fetch coins spent AT the season's start date, to show the increase like Power does
+        exchange_coins_gain = None
+        if exchange_coins_spent is not None:
+            baseline_achievement_stats = await fetch_achievement_stats(account_id, start_date)
+            baseline_coins = baseline_achievement_stats["exchange_coins_spent"]
+            if baseline_coins is not None and exchange_coins_spent >= baseline_coins:
+                exchange_coins_gain = exchange_coins_spent - baseline_coins
         
         # Calculate merit to power ratio using highest power and merits
         if stats.get("merits") and highest_power:
@@ -3201,19 +3212,32 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if power_line or merits_line:
             embed.add_field(name="\u200b", value="\n".join(l for l in [power_line, merits_line] if l), inline=False)
 
-        # Kills / Deads / Healed combined into one line
+        # Kills / Deads / T4/T5 Units Rss Healed combined into one line
         combat_parts = []
         if stats.get("kills_gain"):
             combat_parts.append(f"⚔️ {stats['kills_gain']}{kills_rank_str}")
         if stats.get("deads_gain"):
             combat_parts.append(f"💀 {stats['deads_gain']}{deads_rank_str}")
-        if stats.get("healed_gain"):
-            healed_display = stats['healed_gain']
+        if stats.get("t45_healed") or stats.get("healed_gain"):
             if stats.get("t45_healed"):
-                healed_display += f" (T4/T5: {stats['t45_healed']})"
+                healed_display = stats["t45_healed"]
+                if stats.get("healed_gain"):
+                    healed_display += f" (Overall: {stats['healed_gain']})"
+            else:
+                healed_display = stats["healed_gain"]
             combat_parts.append(f"❤️ {healed_display}{healed_rank_str}")
         if combat_parts:
-            embed.add_field(name="Kills / Deads / Healed", value="  ·  ".join(combat_parts), inline=False)
+            embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value="  ·  ".join(combat_parts), inline=False)
+
+        # Mana Spent — estimated the same way as !stopmana (Healing × 72), assuming it's all T5
+        mana_source = _parse_stat_num(stats.get("t45_healed")) or _parse_stat_num(stats.get("healed_gain"))
+        if mana_source:
+            mana_spent_est = mana_source * MANA_PER_T5_HEAL
+            embed.add_field(
+                name="💧 Mana Spent (est.)",
+                value=f"+{mana_spent_est:,} _(assuming its T5)_",
+                inline=False
+            )
 
         # RSS Gathered — single compact line
         rss_parts = []
@@ -3266,7 +3290,12 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             embed.add_field(name="Troop Merits (Server Rank)", value="_(not yet available from COS)_", inline=False)
 
         # Achievements — single compact line
-        coins_str = f"{exchange_coins_spent:,}" if exchange_coins_spent is not None else "n/a"
+        if exchange_coins_spent is not None and exchange_coins_gain is not None:
+            coins_str = f"{exchange_coins_spent:,} (+{exchange_coins_gain:,})"
+        elif exchange_coins_spent is not None:
+            coins_str = f"{exchange_coins_spent:,}"
+        else:
+            coins_str = "n/a"
         pets_str = f"{max_pets:,}" if max_pets is not None else "n/a"
         embed.add_field(
             name="🏆 Achievements",
@@ -5802,7 +5831,7 @@ async def cmd_servertop(message, n):
     """Fetch and display top N servers by highest power from callofstats.com"""
     import re
 
-    url = "https://callofstats.com/server_alliance_rankings"
+    url = "https://callofstats.com/server_alliance_rankings?kvk_pool_selected=Gen-2+Pool"
 
     # Fresh independent session — base URL is public, no auth needed
     try:
@@ -5864,7 +5893,7 @@ async def cmd_servertop(message, n):
         power = power.strip()
         table_lines.append(make_row(f"#{rank}", server, alliance, lords, power))
 
-    title = f"🏆 Top {n} Servers by Highest Power"
+    title = f"🏆 Top {n} Servers by Highest Power (Gen-2 Pool)"
     table_body = "\n".join(table_lines)
 
     # Wrap in code block for monospace alignment
@@ -5894,7 +5923,7 @@ async def cmd_servercheck(message, server_num):
     """Find a specific server's rank in the rankings"""
     import re
 
-    url = "https://callofstats.com/server_alliance_rankings"
+    url = "https://callofstats.com/server_alliance_rankings?kvk_pool_selected=Gen-2+Pool"
 
     try:
         timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
