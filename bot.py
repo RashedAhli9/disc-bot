@@ -487,18 +487,17 @@ async def fetch_highest_power_at_date(account_id, selected_date):
     return None
 
 
-async def fetch_advanced_stats_at_date(account_id, selected_date):
+async def fetch_advanced_stats_ranged(account_id, start_date, end_date):
     """
     Fetch the "Advanced War Stats" block (Infantry/Cavalry/Mage/Marksman/Other Merits,
-    T4/T5 Units Rss Healed, T4/T5 Units Dead) as it stood on a SPECIFIC date.
-    This section only renders on the single-date profile view (?selected_date=X) —
-    NOT on the ranged (?start_date=X&end_date=Y) view used for the main stats — so it
-    needs its own dedicated fetch, same pattern as fetch_highest_power_at_date.
+    T4/T5 Units Rss Healed, T4/T5 Units Dead) for a date RANGE (start_date to end_date),
+    same as the main season stats. Confirmed via direct browser test that this section
+    IS present and correctly scoped on the ranged view (?start_date=X&end_date=Y).
     Returns a dict of the 7 fields (values as raw strings like "+16,161,386"), or all-None on failure.
     """
     import re
 
-    url = f"https://callofstats.com/lord/{account_id}?selected_date={selected_date}"
+    url = f"https://callofstats.com/lord/{account_id}?start_date={start_date}&end_date={end_date}"
     field_labels = {
         "infantry_merits": "Infantry Merits",
         "cavalry_merits": "Cavalry Merits",
@@ -514,20 +513,20 @@ async def fetch_advanced_stats_at_date(account_id, selected_date):
         try:
             session = await get_callofstats_session()
             if not session:
-                log_info(f"[ADV AT DATE] No session available, attempt {attempt+1}")
+                log_info(f"[ADV RANGED] No session available, attempt {attempt+1}")
                 await asyncio.sleep(2)
                 continue
 
             async with session.get(url, allow_redirects=True) as response:
                 if response.status != 200:
-                    log_info(f"[ADV AT DATE] HTTP {response.status} attempt {attempt+1} for {account_id} @ {selected_date}")
+                    log_info(f"[ADV RANGED] HTTP {response.status} attempt {attempt+1} for {account_id} @ {start_date}->{end_date}")
                     await asyncio.sleep(1)
                     continue
 
                 html = await response.text()
 
                 if "<title>Login" in html or "Sign in to Call of Stats" in html:
-                    log_info(f"[ADV AT DATE] Got login page on attempt {attempt+1}, forcing session refresh")
+                    log_info(f"[ADV RANGED] Got login page on attempt {attempt+1}, forcing session refresh")
                     global _callofstats_session, _session_login_time
                     if _callofstats_session:
                         await _callofstats_session.close()
@@ -543,20 +542,20 @@ async def fetch_advanced_stats_at_date(account_id, selected_date):
                         result[key] = match.group(1).strip()
 
                 if any(v for v in result.values()):
-                    log_info(f"[ADV AT DATE] {account_id} @ {selected_date}: t45_healed={result['t45_healed']}")
+                    log_info(f"[ADV RANGED] {account_id} @ {start_date}->{end_date}: t45_healed={result['t45_healed']}")
                     return result
 
                 if attempt == 2:
-                    log_info(f"[ADV AT DATE] Not found for {account_id} @ {selected_date}")
+                    log_info(f"[ADV RANGED] Not found for {account_id} @ {start_date}->{end_date}")
                 else:
-                    log_info(f"[ADV AT DATE] No match attempt {attempt+1} for {account_id}, retrying...")
+                    log_info(f"[ADV RANGED] No match attempt {attempt+1} for {account_id}, retrying...")
                     await asyncio.sleep(1)
 
         except asyncio.TimeoutError:
-            log_info(f"[ADV AT DATE] Timeout attempt {attempt+1} for {account_id}")
+            log_info(f"[ADV RANGED] Timeout attempt {attempt+1} for {account_id}")
             await asyncio.sleep(1)
         except Exception as e:
-            log_info(f"[ADV AT DATE ERROR] attempt {attempt+1} for {account_id}: {e}")
+            log_info(f"[ADV RANGED ERROR] attempt {attempt+1} for {account_id}: {e}")
             await asyncio.sleep(1)
 
     return result
@@ -3098,10 +3097,10 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         stats_adv_today = None
         resolved_adv_date = None
         for candidate in adv_candidates:
-            # This section only renders on the single-date profile view (?selected_date=X),
-            # not the ranged view — so it needs its own dedicated fetch, always live.
+            # Confirmed via direct browser test: this section IS present and correctly
+            # scoped on the ranged view (start_date=season_start, end_date=candidate).
             try:
-                snap = await fetch_advanced_stats_at_date(account_id, candidate)
+                snap = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
             except Exception as e:
                 log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
                 snap = None
@@ -3114,7 +3113,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if resolved_adv_date:
             prev_date = (datetime.strptime(resolved_adv_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
             try:
-                stats_adv_prev = await fetch_advanced_stats_at_date(account_id, prev_date)
+                stats_adv_prev = await fetch_advanced_stats_ranged(account_id, start_date, prev_date)
             except Exception as e:
                 log_info(f"[ADV STATS] Live fetch prev failed: {e}")
                 stats_adv_prev = None
