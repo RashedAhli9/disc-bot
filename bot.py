@@ -2535,7 +2535,8 @@ def build_help_embed(is_owner: bool):
         value=(
             "`!topmana [season]` — Top mana gathered\n"
             "`!topinf / !topcav / !topmage / !toparcher [season]` — Merit breakdowns (total + daily gain)\n"
-            "`!topheal` — Top T4/T5 RSS healed\n"
+            "`!topheal [season]` — Top T4/T5 RSS healed\n"
+            "`!topspent [season]` — Top estimated mana spent (T4/T5 Healed × 72, assuming T5)\n"
             "`!topdeaths [season]` — Most deaths\n"
             "`!topmerits [season]` — Highest merits\n"
             "`!rss [season]` — Top resource spenders\n\n"
@@ -4650,9 +4651,45 @@ async def toparcher(ctx, season_name: str = None):
     await _top_adv_merit(ctx, season_name, "marksman_merits", "🏹", "Marksman Merits", "TOPARCHER")
 
 
+def _parse_stat_num_global(s):
+    if not s:
+        return 0
+    try:
+        return int(str(s).replace("+", "").replace(",", "").replace("-", "").strip())
+    except:
+        return 0
+
+
+async def _resolve_t45_healed_for_lord(season_id, account_id, start_date, today):
+    """
+    Resolve T4/T5 Units Rss Healed for one lord, trying today/yesterday/day-before —
+    same delay-handling approach used in !progress. Checks DB first, live-fetches only
+    if needed. Returns (lord_name_or_None, int_value).
+    """
+    candidates = [
+        today,
+        (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d"),
+        (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d"),
+    ]
+    for candidate in candidates:
+        db_snap = db_get_season_progress(season_id, account_id, candidate)
+        if db_snap and db_snap.get("t45_healed") and db_snap["t45_healed"] not in ("+0", "-0", "0"):
+            return db_snap.get("lord_name"), _parse_stat_num_global(db_snap["t45_healed"])
+
+        try:
+            live_snap = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
+        except Exception:
+            live_snap = None
+        if live_snap and live_snap.get("t45_healed") and live_snap["t45_healed"] not in ("+0", "-0", "0"):
+            db_save_advanced_stats(season_id, account_id, candidate, live_snap)
+            return None, _parse_stat_num_global(live_snap["t45_healed"])
+
+    return None, 0
+
+
 @bot.command(name="topheal")
 async def topheal(ctx, season_name: str = None):
-    """Leaderboard for overall healed. Usage: !topheal (current) or !topheal sos1"""
+    """Leaderboard for T4/T5 Units Rss Healed. Usage: !topheal (current) or !topheal sos1"""
 
     if season_name:
         season = resolve_season_input(season_name)
@@ -4675,40 +4712,84 @@ async def topheal(ctx, season_name: str = None):
     await ctx.send(f"⏳ Fetching heal leaderboard for {len(lords)} lords...")
 
     fetch_tasks = [
-        fetch_stats_with_fallback(lord["account_id"], start_date, today)
+        _resolve_t45_healed_for_lord(season_id, lord["account_id"], start_date, today)
         for lord in lords
     ]
     results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     leaderboard = []
-    actual_end_date = today
-
     for lord, result in zip(lords, results):
         lord_name = lord["name"]
         healed_num = 0
         try:
             if result and not isinstance(result, Exception):
-                stats, end_date_used = result
-                actual_end_date = end_date_used
-                if stats:
-                    lord_name = stats.get("lord_name", lord["name"]) or lord["name"]
-                    raw = stats.get("healed_gain")
-                    if raw:
-                        clean = str(raw).replace(",", "").replace("+", "").strip()
-                        healed_num = abs(int(clean)) if clean.lstrip("-").isdigit() else 0
+                resolved_name, healed_num = result
+                lord_name = resolved_name or lord["name"]
         except Exception as e:
             log_info(f"[TOPHEAL ERROR] {lord['account_id']}: {e}")
-
         leaderboard.append({"name": lord_name, "val": healed_num})
 
     leaderboard.sort(key=lambda x: x["val"], reverse=True)
 
     medals = ["🥇", "🥈", "🥉"]
-    output = f"```💊 Top Healed — {season_name_display}\n"
+    output = f"```💊 Top T4/T5 Units Rss Healed — {season_name_display}\n"
     for i, lord in enumerate(leaderboard):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: +{lord['val']:,}\n"
-    output += f"📅 {start_date} → {actual_end_date}```"
+    output += f"📅 {start_date} → {today}```"
+    await ctx.send(output)
+
+
+@bot.command(name="topspent")
+async def topspent(ctx, season_name: str = None):
+    """Leaderboard for estimated mana spent (T4/T5 Healed × 72, assuming it's all T5). Usage: !topspent (current) or !topspent sos1"""
+
+    if season_name:
+        season = resolve_season_input(season_name)
+        if not season:
+            all_seasons = db_get_all_seasons()
+            season_list = ", ".join([s[1] for s in all_seasons]) if all_seasons else "None"
+            return await ctx.send(f"❌ Season '{season_name}' not found.\n\nAvailable seasons: {season_list}")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+
+    season_id, season_name_display, start_date, created_at = season
+    today = date.today().isoformat()
+
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+
+    await ctx.send(f"⏳ Fetching mana spent leaderboard for {len(lords)} lords...")
+
+    fetch_tasks = [
+        _resolve_t45_healed_for_lord(season_id, lord["account_id"], start_date, today)
+        for lord in lords
+    ]
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+    leaderboard = []
+    for lord, result in zip(lords, results):
+        lord_name = lord["name"]
+        healed_num = 0
+        try:
+            if result and not isinstance(result, Exception):
+                resolved_name, healed_num = result
+                lord_name = resolved_name or lord["name"]
+        except Exception as e:
+            log_info(f"[TOPMANASPENT ERROR] {lord['account_id']}: {e}")
+        leaderboard.append({"name": lord_name, "val": healed_num * MANA_PER_T5_HEAL})
+
+    leaderboard.sort(key=lambda x: x["val"], reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    output = f"```💧 Top Mana Spent (est.) — {season_name_display}\n(Assuming its all T5)\n\n"
+    for i, lord in enumerate(leaderboard):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        output += f"{medal} {lord['name']}: +{lord['val']:,}\n"
+    output += f"\n📅 {start_date} → {today}```"
     await ctx.send(output)
 
 
