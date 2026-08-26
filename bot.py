@@ -3160,13 +3160,12 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if not stats:
             return await msg.edit(content="❌ Failed to fetch stats. Call of Stats may not have released data yet.")
 
-        # --- Fix negative/zero merits & power_gain by shifting the range's start date forward ---
-        # COS's own range-computed delta (season_start -> today) can occasionally be wrong/negative
-        # for a specific account (e.g. after a server/alliance transfer). When that happens, we
-        # re-run the SAME query with the start date shifted forward one day at a time (04/06, 05/06,
-        # 06/06, ...) until COS itself returns a positive, non-zero number for that field. Only
-        # merits and power_gain are affected by this glitch — gathering/kills/deaths/healed are not
-        # range-diffed the same way and don't need this.
+        # --- Fix missing/negative/zero stats by shifting the range's start date forward ---
+        # COS's own range-computed delta (season_start -> today) can occasionally be wrong
+        # for a specific account (e.g. after a server/alliance transfer, or when the stored
+        # season start_date is off by even one day). When that happens, we re-run the SAME
+        # query with the start date shifted forward one day at a time until COS itself
+        # returns a valid number for that field.
         def _parse_stat_num(s):
             if not s:
                 return 0
@@ -3220,6 +3219,22 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 log_info(f"[PROGRESS] Corrected merits for {account_id}: raw={raw_merits} -> {corrected}")
             else:
                 log_info(f"[PROGRESS] Could not find valid merits in range, keeping raw value {raw_merits}")
+
+        # kills/deads/healed/gathered CAN'T legitimately be negative from real game data, but
+        # they CAN come back completely missing (None) for the exact same underlying cause as
+        # merits/power_gain — a season start_date that's 1 day off breaking COS's range
+        # computation for that account. When that happens these fields end up None rather than
+        # negative, so the fix here is the same shift-the-start-date search, triggered on
+        # "missing" instead of "negative".
+        for field in ["kills_gain", "deads_gain", "healed_gain",
+                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
+            if stats.get(field) is None:
+                corrected = await _find_valid_range_value(field)
+                if corrected is not None:
+                    stats[field] = f"+{corrected:,}"
+                    log_info(f"[PROGRESS] Recovered missing {field} for {account_id}: -> {corrected}")
+                else:
+                    log_info(f"[PROGRESS] Could not recover missing {field}, leaving as None")
 
         # Fetch advanced war stats. COS has historically delayed these by 1 day, but that
         # delay may be removed (per an 8/11 site update). To handle either case gracefully,
