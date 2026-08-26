@@ -1559,6 +1559,74 @@ def db_save_advanced_stats(season_id, account_id, data_date, adv_stats, lord_nam
         log_error(f"[DB SAVE ADV] Error: {e}")
         return False
 
+def db_get_latest_advanced_snapshot(season_id, account_id):
+    """
+    Find the most recent date (any date, not limited to a fixed window) within this
+    season that has real (nonzero) advanced war stats data archived for this account.
+    Used as a last-resort fallback when the usual today/yesterday/day-before window
+    comes up empty (e.g. COS fell further behind than expected, or deleted a date).
+    Returns a dict with the 7 advanced fields + data_date, or None.
+    """
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute("""
+            SELECT data_date, infantry_merits, cavalry_merits, mage_merits, marksman_merits,
+                   other_merits, t45_healed, t45_dead
+            FROM season_progress
+            WHERE season_id=? AND account_id=?
+              AND (
+                (infantry_merits IS NOT NULL AND infantry_merits != '+0') OR
+                (cavalry_merits IS NOT NULL AND cavalry_merits != '+0') OR
+                (mage_merits IS NOT NULL AND mage_merits != '+0') OR
+                (marksman_merits IS NOT NULL AND marksman_merits != '+0') OR
+                (other_merits IS NOT NULL AND other_merits != '+0') OR
+                (t45_healed IS NOT NULL AND t45_healed != '+0') OR
+                (t45_dead IS NOT NULL AND t45_dead != '+0')
+              )
+            ORDER BY data_date DESC LIMIT 1
+        """, (season_id, account_id))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "data_date": row[0],
+            "infantry_merits": row[1], "cavalry_merits": row[2], "mage_merits": row[3],
+            "marksman_merits": row[4], "other_merits": row[5],
+            "t45_healed": row[6], "t45_dead": row[7],
+        }
+    except Exception as e:
+        log_error(f"[DB GET LATEST ADV] Error: {e}")
+        return None
+
+def db_get_latest_field_value(season_id, account_id, field_name):
+    """
+    Find the most recent date (and value) where this ONE specific field is populated
+    and nonzero, independent of whether other advanced fields are present on that same
+    row. A row can have some fields filled and others still None (e.g. one field failed
+    to parse on a given day while the rest succeeded) — this looks past that gap for
+    just the field that's actually needed.
+    Returns the raw value string (e.g. "+16,161,386"), or None.
+    """
+    if field_name not in ("infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
+                           "other_merits", "t45_healed", "t45_dead"):
+        return None
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute(f"""
+            SELECT {field_name} FROM season_progress
+            WHERE season_id=? AND account_id=? AND {field_name} IS NOT NULL AND {field_name} != '+0'
+            ORDER BY data_date DESC LIMIT 1
+        """, (season_id, account_id))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        log_error(f"[DB GET FIELD] Error: {e}")
+        return None
+
 def db_get_season_progress(season_id, account_id, data_date=None):
     """Get a member's progress for a specific date in a season (defaults to today)"""
     try:
@@ -3185,6 +3253,17 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 log_info(f"[ADV STATS] Got adv data from {candidate}: t45_healed={snap.get('t45_healed')}")
                 break
 
+        if not resolved_adv_date:
+            # The fixed today/yesterday/day-before window came up empty — fall back to
+            # whatever the most recent date IS in our own archive with real advanced data,
+            # regardless of how far back that is. Protects against COS falling further
+            # behind than 2 days, or deleting a date that fell just outside the window.
+            fallback_snap = db_get_latest_advanced_snapshot(season_id, account_id)
+            if fallback_snap:
+                stats_adv_today = fallback_snap
+                resolved_adv_date = fallback_snap.get("data_date")
+                log_info(f"[ADV STATS] Fallback to archived data from {resolved_adv_date}")
+
         if resolved_adv_date:
             prev_date = (datetime.strptime(resolved_adv_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
             stats_adv_prev = await _resolve_adv_for_date(prev_date)
@@ -3210,7 +3289,13 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             return t - p if t and t > p else None
 
         def _adv_total(field):
-            return _adv_int(stats_adv_today.get(field) if stats_adv_today else None) or None
+            val = _adv_int(stats_adv_today.get(field) if stats_adv_today else None)
+            if val:
+                return val
+            # This field might be missing from the resolved row even though other fields
+            # on it are fine — look past it for the most recent date that has it.
+            fallback = db_get_latest_field_value(season_id, account_id, field)
+            return _adv_int(fallback) or None
 
         # Check how many days of data exist for this season
         data_date_count = count_season_data_dates(season_id, account_id)
@@ -3362,6 +3447,12 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
 
         # Kills / Deads / T4/T5 Units Rss Healed combined into one line
         t45_healed_val = stats_adv_today.get("t45_healed") if stats_adv_today else None
+        if not t45_healed_val:
+            # The resolved row might be missing this one specific field even though other
+            # fields on it are fine — look past it for the most recent date that has it.
+            t45_healed_val = db_get_latest_field_value(season_id, account_id, "t45_healed")
+            if t45_healed_val:
+                log_info(f"[PROGRESS] t45_healed fallback found: {t45_healed_val}")
 
         combat_parts = []
         if stats.get("kills_gain"):
