@@ -1,5 +1,5 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
@@ -3144,8 +3144,18 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         adv_fields_list = ["infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
                            "other_merits", "t45_healed", "t45_dead"]
 
+        def _adv_int_early(s):
+            if not s:
+                return 0
+            try:
+                return int(str(s).replace(",", "").replace("+", "").replace("-", "").strip())
+            except:
+                return 0
+
         def _adv_has_data(snap):
-            return snap and any(snap.get(f) for f in adv_fields_list)
+            # A string like "+0" is truthy in Python even though the actual value is zero —
+            # so check the parsed numeric value is nonzero, not just that the string exists.
+            return snap and any(_adv_int_early(snap.get(f)) for f in adv_fields_list)
 
         async def _resolve_adv_for_date(candidate):
             """Check DB first (protects against COS deleting old dates), live-fetch as fallback."""
@@ -3229,6 +3239,11 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
 
         # Get Exchange Coins Spent + Max Pets (achievement stats)
         achievement_stats = await fetch_achievement_stats(account_id, end_date_used)
+        if achievement_stats["exchange_coins_spent"] is None and achievement_stats["max_pets"] is None:
+            # COS may not have a page for a date it hasn't scanned yet (e.g. today) — try yesterday
+            fallback_date = (datetime.strptime(end_date_used, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            log_info(f"[ACHIEVEMENTS] No data for {end_date_used}, trying {fallback_date}")
+            achievement_stats = await fetch_achievement_stats(account_id, fallback_date)
         exchange_coins_spent = achievement_stats["exchange_coins_spent"]
         max_pets = achievement_stats["max_pets"]
 
@@ -3302,14 +3317,14 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         total_gathered = 0
         
         for key in ["gold_spent", "wood_spent", "ore_spent", "mana_spent"]:
-            val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
+            val_str = (stats.get(key) or "+0").replace(",", "").replace("+", "")
             try:
                 total_spent += abs(int(val_str)) if val_str.lstrip("-").isdigit() else 0
             except Exception as e:
                 pass
         
         for key in ["gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
-            val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
+            val_str = (stats.get(key) or "+0").replace(",", "").replace("+", "")
             try:
                 total_gathered += abs(int(val_str)) if val_str.lstrip("-").isdigit() else 0
             except Exception as e:
@@ -3408,8 +3423,9 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         other_lines = []
         if other_total:
             other_lines.append(f"🌀 Other: {_fmt(other_total)}{other_rank_str}")
-        if stats.get("t45_dead"):
-            other_lines.append(f"💀 T4/T5 Dead: {stats['t45_dead']}")
+        t45_dead_total = _adv_total("t45_dead")
+        if t45_dead_total:
+            other_lines.append(f"💀 T4/T5 Dead: {_fmt(t45_dead_total)}")
 
         if troop_lines:
             embed.add_field(name="Troop Merits (Server Rank)", value="\n".join(troop_lines), inline=True)
@@ -4586,7 +4602,7 @@ async def rss_leaderboard(ctx, season_name: str = None):
                     
                     # Sum all resources spent (use abs() to handle negative values from API)
                     for key in ["gold_spent", "wood_spent", "ore_spent", "mana_spent"]:
-                        val_str = stats.get(key, "+0").replace(",", "").replace("+", "")
+                        val_str = (stats.get(key) or "+0").replace(",", "").replace("+", "")
                         try:
                             val = int(val_str) if val_str.lstrip("-").isdigit() else 0
                             total_rss += abs(val)  # Use absolute value
@@ -4813,14 +4829,14 @@ async def compare(ctx, user1: str = None, user2: str = None):
             
             if stats1.get("power_gain"):
                 try:
-                    pg1_str = stats1.get("power_gain", "+0").replace("+", "").replace(",", "")
+                    pg1_str = (stats1.get("power_gain") or "+0").replace("+", "").replace(",", "")
                     power_gain1 = int(pg1_str)
                 except Exception as e:
                     power_gain1 = 0
             
             if stats2.get("power_gain"):
                 try:
-                    pg2_str = stats2.get("power_gain", "+0").replace("+", "").replace(",", "")
+                    pg2_str = (stats2.get("power_gain") or "+0").replace("+", "").replace(",", "")
                     power_gain2 = int(pg2_str)
                 except Exception as e:
                     power_gain2 = 0
