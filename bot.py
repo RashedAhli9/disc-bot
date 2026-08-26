@@ -1470,38 +1470,59 @@ def is_stats_empty(stats):
     return True
 
 def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=None):
-    """Save a member's progress for a specific date in a season"""
+    """
+    Save a member's progress for a specific date in a season.
+    MERGES with any existing row for this (season_id, account_id, data_date) instead of
+    blindly overwriting — a field only gets updated if the new value is real (not None
+    and not "+0"/"-0"). This protects previously-archived good data (e.g. advanced war
+    stats) from being silently wiped out by a later fetch that happens to come back
+    worse or incomplete (COS delay, partial parse, temporary glitch, etc).
+    """
     try:
         if not data_date:
             data_date = date.today().isoformat()
-        
+
+        field_names = [
+            "power_gain", "merits", "kills_gain", "deads_gain", "healed_gain",
+            "t5_gain", "t4_gain", "t3_gain", "t2_gain", "t1_gain",
+            "gold_spent", "wood_spent", "ore_spent", "mana_spent",
+            "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered",
+            "infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits", "other_merits",
+            "t45_healed", "t45_dead",
+        ]
+
+        def _is_real(v):
+            if v is None:
+                return False
+            s = str(v).strip()
+            return s not in ("", "+0", "-0", "0")
+
         conn = sqlite3.connect(DB_PROGRESS)
         try:
             c = conn.cursor()
             now = datetime.utcnow().isoformat()
-            
-            c.execute("""
+
+            # Read existing row (if any) to merge against
+            c.execute(
+                f"SELECT {', '.join(field_names)} FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
+                (season_id, account_id, data_date)
+            )
+            existing_row = c.fetchone()
+            existing = dict(zip(field_names, existing_row)) if existing_row else {}
+
+            merged = {}
+            for f in field_names:
+                new_val = stats.get(f)
+                merged[f] = new_val if _is_real(new_val) else existing.get(f, new_val)
+
+            c.execute(f"""
                 INSERT OR REPLACE INTO season_progress 
-                (season_id, account_id, data_date, lord_name, power_gain, merits, kills_gain, deads_gain, healed_gain,
-                 t5_gain, t4_gain, t3_gain, t2_gain, t1_gain,
-                 gold_spent, wood_spent, ore_spent, mana_spent,
-                 gold_gathered, wood_gathered, ore_gathered, mana_gathered,
-                 infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
-                 t45_healed, t45_dead, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (season_id, account_id, data_date, lord_name, {', '.join(field_names)}, created_at)
+                VALUES (?, ?, ?, ?, {', '.join('?' for _ in field_names)}, ?)
             """, (
                 season_id, account_id, data_date, lord_name,
-                stats.get("power_gain"), stats.get("merits"), stats.get("kills_gain"), 
-                stats.get("deads_gain"), stats.get("healed_gain"),
-                stats.get("t5_gain"), stats.get("t4_gain"), stats.get("t3_gain"), 
-                stats.get("t2_gain"), stats.get("t1_gain"),
-                stats.get("gold_spent"), stats.get("wood_spent"), stats.get("ore_spent"), 
-                stats.get("mana_spent"),
-                stats.get("gold_gathered"), stats.get("wood_gathered"), stats.get("ore_gathered"), 
-                stats.get("mana_gathered"),
-                stats.get("infantry_merits"), stats.get("cavalry_merits"), stats.get("mage_merits"),
-                stats.get("marksman_merits"), stats.get("other_merits"),
-                stats.get("t45_healed"), stats.get("t45_dead"), now
+                *[merged[f] for f in field_names],
+                now
             ))
             conn.commit()
             log_info(f"[DB SAVE] {lord_name} ({account_id}) for {data_date}")
@@ -1518,38 +1539,44 @@ def db_save_advanced_stats(season_id, account_id, data_date, adv_stats, lord_nam
     WITHOUT touching any other fields (power_gain, merits, kills_gain, etc). Safe to call
     even when we only have the advanced stats and not the full core stats for that date.
     This permanently archives data locally so it survives COS deleting old dates later.
+    A field only gets updated if the new value is real (not None/"+0") — never lets a
+    worse/incomplete fetch overwrite a previously-good archived value.
     """
+    adv_fields = ["infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
+                  "other_merits", "t45_healed", "t45_dead"]
+
+    def _is_real(v):
+        if v is None:
+            return False
+        s = str(v).strip()
+        return s not in ("", "+0", "-0", "0")
+
     try:
         conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
-        c.execute("SELECT 1 FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
+        c.execute(f"SELECT {', '.join(adv_fields)} FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
                    (season_id, account_id, data_date))
-        exists = c.fetchone()
+        existing_row = c.fetchone()
+        exists = existing_row is not None
+        existing = dict(zip(adv_fields, existing_row)) if existing_row else {}
         now = datetime.utcnow().isoformat()
 
+        merged = {f: (adv_stats.get(f) if _is_real(adv_stats.get(f)) else existing.get(f)) for f in adv_fields}
+
         if exists:
-            c.execute("""
+            c.execute(f"""
                 UPDATE season_progress SET
-                    infantry_merits=?, cavalry_merits=?, mage_merits=?, marksman_merits=?, other_merits=?,
-                    t45_healed=?, t45_dead=?
+                    {', '.join(f'{f}=?' for f in adv_fields)}
                 WHERE season_id=? AND account_id=? AND data_date=?
-            """, (
-                adv_stats.get("infantry_merits"), adv_stats.get("cavalry_merits"), adv_stats.get("mage_merits"),
-                adv_stats.get("marksman_merits"), adv_stats.get("other_merits"),
-                adv_stats.get("t45_healed"), adv_stats.get("t45_dead"),
-                season_id, account_id, data_date
-            ))
+            """, (*[merged[f] for f in adv_fields], season_id, account_id, data_date))
         else:
-            c.execute("""
+            c.execute(f"""
                 INSERT INTO season_progress (season_id, account_id, data_date, lord_name,
-                    infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
-                    t45_healed, t45_dead, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    {', '.join(adv_fields)}, created_at)
+                VALUES (?, ?, ?, ?, {', '.join('?' for _ in adv_fields)}, ?)
             """, (
                 season_id, account_id, data_date, lord_name or str(account_id),
-                adv_stats.get("infantry_merits"), adv_stats.get("cavalry_merits"), adv_stats.get("mage_merits"),
-                adv_stats.get("marksman_merits"), adv_stats.get("other_merits"),
-                adv_stats.get("t45_healed"), adv_stats.get("t45_dead"), now
+                *[merged[f] for f in adv_fields], now
             ))
         conn.commit()
         conn.close()
