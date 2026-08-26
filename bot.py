@@ -3479,7 +3479,24 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             # fields on it are fine — look past it for the most recent date that has it.
             t45_healed_val = db_get_latest_field_value(season_id, account_id, "t45_healed")
             if t45_healed_val:
-                log_info(f"[PROGRESS] t45_healed fallback found: {t45_healed_val}")
+                log_info(f"[PROGRESS] t45_healed fallback found in DB: {t45_healed_val}")
+
+        if not t45_healed_val:
+            # DB genuinely has no good copy anywhere (e.g. every archived row was wiped by
+            # an old bug before this fix existed) — make one final LIVE attempt for this
+            # field specifically, across the same candidate dates, since a DB lookup alone
+            # can't recover from data that was never actually saved correctly.
+            for candidate in adv_candidates:
+                try:
+                    live_retry = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
+                except Exception as e:
+                    log_info(f"[PROGRESS] t45_healed live retry failed for {candidate}: {e}")
+                    live_retry = None
+                if live_retry and live_retry.get("t45_healed") and live_retry["t45_healed"] not in ("+0", "-0", "0"):
+                    t45_healed_val = live_retry["t45_healed"]
+                    log_info(f"[PROGRESS] t45_healed live retry found for {candidate}: {t45_healed_val}")
+                    db_save_advanced_stats(season_id, account_id, candidate, live_retry, stats.get("lord_name"))
+                    break
 
         combat_parts = []
         if stats.get("kills_gain"):
