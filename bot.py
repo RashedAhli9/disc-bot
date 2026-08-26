@@ -3174,16 +3174,34 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             except:
                 return 0
 
-        async def _find_valid_range_value(field_name, max_days=20):
-            """Shift the range's start date forward day by day until the field comes back positive."""
+        raw_power_gain = _parse_stat_num(stats.get("power_gain"))
+        raw_merits = _parse_stat_num(stats.get("merits"))
+
+        # Figure out which fields actually need fixing before doing any extra fetching
+        needs_fix = {}
+        if raw_power_gain <= 0:
+            needs_fix["power_gain"] = "num"   # accept when value > 0
+        if raw_merits <= 0:
+            needs_fix["merits"] = "num"
+        for field in ["kills_gain", "deads_gain", "healed_gain",
+                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
+            if stats.get(field) is None:
+                needs_fix[field] = "missing"  # accept as soon as it's populated at all
+
+        if needs_fix:
+            # One shared day-by-day search — a single fetch per candidate day resolves
+            # ALL still-missing fields at once, instead of each field re-fetching the
+            # same URL independently (which was the main reason !progress got slow).
             try:
                 cursor_date = datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=1)
                 end_dt = datetime.strptime(end_date_used, "%Y-%m-%d")
             except Exception:
-                return None
+                cursor_date = None
+                end_dt = None
 
             days_tried = 0
-            while cursor_date < end_dt and days_tried < max_days:
+            max_days = 7
+            while cursor_date and cursor_date < end_dt and needs_fix and days_tried < max_days:
                 candidate_start = cursor_date.strftime("%Y-%m-%d")
                 try:
                     snap, _ = await fetch_stats_with_fallback(account_id, candidate_start, end_date_used)
@@ -3191,50 +3209,28 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                     snap = None
 
                 if snap:
-                    val = _parse_stat_num(snap.get(field_name))
-                    if val > 0:
-                        log_info(f"[PROGRESS] Found valid {field_name} using start_date={candidate_start}: {val}")
-                        return val
+                    resolved_now = []
+                    for field, mode in needs_fix.items():
+                        val_raw = snap.get(field)
+                        if mode == "num":
+                            val = _parse_stat_num(val_raw)
+                            if val > 0:
+                                stats[field] = f"+{val:,}"
+                                log_info(f"[PROGRESS] Corrected {field} for {account_id} using start_date={candidate_start}: {val}")
+                                resolved_now.append(field)
+                        else:  # "missing"
+                            if val_raw is not None:
+                                stats[field] = val_raw
+                                log_info(f"[PROGRESS] Recovered missing {field} for {account_id} using start_date={candidate_start}")
+                                resolved_now.append(field)
+                    for f in resolved_now:
+                        del needs_fix[f]
 
                 cursor_date += timedelta(days=1)
                 days_tried += 1
 
-            return None  # exhausted search, no valid value found
-
-        raw_power_gain = _parse_stat_num(stats.get("power_gain"))
-        raw_merits = _parse_stat_num(stats.get("merits"))
-
-        if raw_power_gain <= 0:
-            corrected = await _find_valid_range_value("power_gain")
-            if corrected is not None:
-                stats["power_gain"] = f"+{corrected:,}"
-                log_info(f"[PROGRESS] Corrected power_gain for {account_id}: raw={raw_power_gain} -> {corrected}")
-            else:
-                log_info(f"[PROGRESS] Could not find valid power_gain in range, keeping raw value {raw_power_gain}")
-
-        if raw_merits <= 0:
-            corrected = await _find_valid_range_value("merits")
-            if corrected is not None:
-                stats["merits"] = f"+{corrected:,}"
-                log_info(f"[PROGRESS] Corrected merits for {account_id}: raw={raw_merits} -> {corrected}")
-            else:
-                log_info(f"[PROGRESS] Could not find valid merits in range, keeping raw value {raw_merits}")
-
-        # kills/deads/healed/gathered CAN'T legitimately be negative from real game data, but
-        # they CAN come back completely missing (None) for the exact same underlying cause as
-        # merits/power_gain — a season start_date that's 1 day off breaking COS's range
-        # computation for that account. When that happens these fields end up None rather than
-        # negative, so the fix here is the same shift-the-start-date search, triggered on
-        # "missing" instead of "negative".
-        for field in ["kills_gain", "deads_gain", "healed_gain",
-                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
-            if stats.get(field) is None:
-                corrected = await _find_valid_range_value(field)
-                if corrected is not None:
-                    stats[field] = f"+{corrected:,}"
-                    log_info(f"[PROGRESS] Recovered missing {field} for {account_id}: -> {corrected}")
-                else:
-                    log_info(f"[PROGRESS] Could not recover missing {field}, leaving as None")
+            for field in needs_fix:
+                log_info(f"[PROGRESS] Could not resolve {field} for {account_id}, leaving as-is")
 
         # Fetch advanced war stats. COS has historically delayed these by 1 day, but that
         # delay may be removed (per an 8/11 site update). To handle either case gracefully,
@@ -3352,20 +3348,23 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         is_current_season = current_season and current_season[0] == season_id
 
         if is_current_season:
-            highest_power = await fetch_highest_power(account_id)
+            power_task = fetch_highest_power(account_id)
         else:
             season_end_date = db_get_season_end_date(season_id) or end_date_used
-            highest_power = await fetch_highest_power_at_date(account_id, season_end_date)
-            log_info(f"[PROGRESS] Old season #{season_id} — using highest power @ {season_end_date}: {highest_power}")
-        
-        # Get alliance tag fresh from Call of Stats
-        alliance_tag = await fetch_alliance_tag(account_id)
-        
-        # Get current T-kills from normal profile (only if not in database)
-        current_t_kills = await fetch_current_t_kills(account_id)
+            power_task = fetch_highest_power_at_date(account_id, season_end_date)
 
-        # Get Exchange Coins Spent + Max Pets (achievement stats)
-        achievement_stats = await fetch_achievement_stats(account_id, end_date_used)
+        # These four are all independent of each other — run them concurrently instead
+        # of one after another, since that was a meaningful chunk of !progress's runtime.
+        highest_power, alliance_tag, current_t_kills, achievement_stats = await asyncio.gather(
+            power_task,
+            fetch_alliance_tag(account_id),
+            fetch_current_t_kills(account_id),
+            fetch_achievement_stats(account_id, end_date_used),
+        )
+
+        if not is_current_season:
+            log_info(f"[PROGRESS] Old season #{season_id} — using highest power @ {season_end_date}: {highest_power}")
+
         if achievement_stats["exchange_coins_spent"] is None and achievement_stats["max_pets"] is None:
             # COS may not have a page for a date it hasn't scanned yet (e.g. today) — try yesterday
             fallback_date = (datetime.strptime(end_date_used, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
