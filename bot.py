@@ -2206,8 +2206,14 @@ async def check_callofstats_update():
                     return
                 season_id, season_name, start_date, created_at = season
                 
-                # Try to fetch stats for the new date
-                test_stats = await fetch_stats_for_account(account_id, start_date, new_date_iso, skip_cache=True)
+                # Use a short, always-recent window for this verification query instead of
+                # the season's actual start_date — COS has been deleting old dates, and if
+                # the season's start_date gets deleted, a range anchored there returns empty/
+                # broken data, silently blocking notifications until someone manually edits
+                # the season's start date forward. A short recent window sidesteps that
+                # entirely since it never touches old dates that might be gone.
+                verify_start = (date_obj - timedelta(days=3)).strftime("%Y-%m-%d")
+                test_stats = await fetch_stats_for_account(account_id, verify_start, new_date_iso, skip_cache=True)
                 
                 # Verify we got valid data (not empty/unknown)
                 if not test_stats or test_stats.get("lord_name") == "Unknown":
