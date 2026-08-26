@@ -1512,6 +1512,53 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
         log_error(f"[DB SAVE PROGRESS] Error: {e}")
         return False
 
+def db_save_advanced_stats(season_id, account_id, data_date, adv_stats, lord_name=None):
+    """
+    Merge advanced war stats fields into an existing (or new) season_progress row,
+    WITHOUT touching any other fields (power_gain, merits, kills_gain, etc). Safe to call
+    even when we only have the advanced stats and not the full core stats for that date.
+    This permanently archives data locally so it survives COS deleting old dates later.
+    """
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
+                   (season_id, account_id, data_date))
+        exists = c.fetchone()
+        now = datetime.utcnow().isoformat()
+
+        if exists:
+            c.execute("""
+                UPDATE season_progress SET
+                    infantry_merits=?, cavalry_merits=?, mage_merits=?, marksman_merits=?, other_merits=?,
+                    t45_healed=?, t45_dead=?
+                WHERE season_id=? AND account_id=? AND data_date=?
+            """, (
+                adv_stats.get("infantry_merits"), adv_stats.get("cavalry_merits"), adv_stats.get("mage_merits"),
+                adv_stats.get("marksman_merits"), adv_stats.get("other_merits"),
+                adv_stats.get("t45_healed"), adv_stats.get("t45_dead"),
+                season_id, account_id, data_date
+            ))
+        else:
+            c.execute("""
+                INSERT INTO season_progress (season_id, account_id, data_date, lord_name,
+                    infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
+                    t45_healed, t45_dead, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                season_id, account_id, data_date, lord_name or str(account_id),
+                adv_stats.get("infantry_merits"), adv_stats.get("cavalry_merits"), adv_stats.get("mage_merits"),
+                adv_stats.get("marksman_merits"), adv_stats.get("other_merits"),
+                adv_stats.get("t45_healed"), adv_stats.get("t45_dead"), now
+            ))
+        conn.commit()
+        conn.close()
+        log_info(f"[DB SAVE ADV] {account_id} for {data_date} archived")
+        return True
+    except Exception as e:
+        log_error(f"[DB SAVE ADV] Error: {e}")
+        return False
+
 def db_get_season_progress(season_id, account_id, data_date=None):
     """Get a member's progress for a specific date in a season (defaults to today)"""
     try:
@@ -3094,17 +3141,29 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         def _adv_has_data(snap):
             return snap and any(snap.get(f) for f in adv_fields_list)
 
+        async def _resolve_adv_for_date(candidate):
+            """Check DB first (protects against COS deleting old dates), live-fetch as fallback."""
+            db_snap = db_get_season_progress(season_id, account_id, candidate)
+            if _adv_has_data(db_snap):
+                log_info(f"[ADV STATS] Using cached DB data for {candidate}")
+                return db_snap
+            try:
+                live_snap = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
+            except Exception as e:
+                log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
+                live_snap = None
+            if _adv_has_data(live_snap):
+                # Permanently archive locally — COS has been deleting old dates, so once we
+                # successfully fetch a date's data we save it so it survives that deletion.
+                db_save_advanced_stats(season_id, account_id, candidate, live_snap, stats.get("lord_name"))
+                return live_snap
+            return None
+
         stats_adv_today = None
         resolved_adv_date = None
         for candidate in adv_candidates:
-            # Confirmed via direct browser test: this section IS present and correctly
-            # scoped on the ranged view (start_date=season_start, end_date=candidate).
-            try:
-                snap = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
-            except Exception as e:
-                log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
-                snap = None
-            if _adv_has_data(snap):
+            snap = await _resolve_adv_for_date(candidate)
+            if snap:
                 stats_adv_today = snap
                 resolved_adv_date = candidate
                 log_info(f"[ADV STATS] Got adv data from {candidate}: t45_healed={snap.get('t45_healed')}")
@@ -3112,11 +3171,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
 
         if resolved_adv_date:
             prev_date = (datetime.strptime(resolved_adv_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-            try:
-                stats_adv_prev = await fetch_advanced_stats_ranged(account_id, start_date, prev_date)
-            except Exception as e:
-                log_info(f"[ADV STATS] Live fetch prev failed: {e}")
-                stats_adv_prev = None
+            stats_adv_prev = await _resolve_adv_for_date(prev_date)
         else:
             stats_adv_prev = None
             log_info(f"[ADV STATS] No adv data found in any candidate date for {account_id}")
