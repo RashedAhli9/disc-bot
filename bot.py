@@ -3681,6 +3681,11 @@ async def forcefetch(ctx):
     
     await ctx.send(embed=embed)
 
+    # Also check whether the bot's status/presence date needs updating, since forcefetch
+    # is often run specifically because someone noticed new data is out but the status
+    # is still showing the old date.
+    await check_callofstats_update()
+
 
 @bot.command(name="loadhistory")
 async def loadhistory(ctx, mode: str = None):
