@@ -39,6 +39,7 @@ from discord.ui import View, Select, Button, Modal, TextInput
 import io
 import zipfile
 import asyncio
+import anthropic
 import aiohttp
 import openpyxl
 import io
@@ -75,6 +76,11 @@ DB_PROGRESS = "/data/season_progress.db"  # Separate database for seasonal data
 # Ensure the data directory exists so sqlite3.connect() doesn't crash-loop
 # if the persistent volume was momentarily unmounted or missing.
 os.makedirs(os.path.dirname(DB), exist_ok=True)
+
+# Anthropic API — powers !ask's natural-language understanding when set.
+# Falls back to keyword-only routing if this env var isn't configured on Railway.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+_anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 # ============================================================
 # CALL OF STATS ACCOUNT IDS & CONSTANTS
@@ -1038,6 +1044,9 @@ def migrate_db_progress():
         ("other_merits", "TEXT"),
         ("t45_healed", "TEXT"),
         ("t45_dead", "TEXT"),
+        ("highest_power", "TEXT"),
+        ("exchange_coins_spent", "TEXT"),
+        ("max_pets", "TEXT"),
     ]
     try:
         conn = sqlite3.connect(DB_PROGRESS)
@@ -1488,7 +1497,7 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
             "gold_spent", "wood_spent", "ore_spent", "mana_spent",
             "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered",
             "infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits", "other_merits",
-            "t45_healed", "t45_dead",
+            "t45_healed", "t45_dead", "highest_power", "exchange_coins_spent", "max_pets",
         ]
 
         def _is_real(v):
@@ -1627,6 +1636,58 @@ def db_get_latest_advanced_snapshot(season_id, account_id):
         log_error(f"[DB GET LATEST ADV] Error: {e}")
         return None
 
+def db_save_extra_stats(season_id, account_id, data_date, highest_power=None, exchange_coins_spent=None, max_pets=None, lord_name=None):
+    """
+    Merge-save highest_power / exchange_coins_spent / max_pets for a date, without
+    touching any other columns. Same protection as db_save_advanced_stats — a field
+    only gets updated if the new value is real, never overwritten with worse data.
+    Permanently archives these so they survive COS deleting old dates.
+    """
+    updates = {}
+    if highest_power is not None:
+        updates["highest_power"] = str(highest_power)
+    if exchange_coins_spent is not None:
+        updates["exchange_coins_spent"] = str(exchange_coins_spent)
+    if max_pets is not None:
+        updates["max_pets"] = str(max_pets)
+    if not updates:
+        return False
+
+    def _is_real(v):
+        if v is None:
+            return False
+        s = str(v).strip()
+        return s not in ("", "+0", "-0", "0")
+
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        c = conn.cursor()
+        fields = list(updates.keys())
+        c.execute(f"SELECT {', '.join(fields)} FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
+                   (season_id, account_id, data_date))
+        existing_row = c.fetchone()
+        exists = existing_row is not None
+        existing = dict(zip(fields, existing_row)) if existing_row else {}
+        now = datetime.utcnow().isoformat()
+
+        merged = {f: (updates[f] if _is_real(updates[f]) else existing.get(f)) for f in fields}
+
+        if exists:
+            c.execute(f"UPDATE season_progress SET {', '.join(f'{f}=?' for f in fields)} WHERE season_id=? AND account_id=? AND data_date=?",
+                       (*[merged[f] for f in fields], season_id, account_id, data_date))
+        else:
+            c.execute(f"""
+                INSERT INTO season_progress (season_id, account_id, data_date, lord_name, {', '.join(fields)}, created_at)
+                VALUES (?, ?, ?, ?, {', '.join('?' for _ in fields)}, ?)
+            """, (season_id, account_id, data_date, lord_name or str(account_id), *[merged[f] for f in fields], now))
+        conn.commit()
+        conn.close()
+        log_info(f"[DB SAVE EXTRA] {account_id} for {data_date} archived: {list(updates.keys())}")
+        return True
+    except Exception as e:
+        log_error(f"[DB SAVE EXTRA] Error: {e}")
+        return False
+
 def db_get_latest_field_value(season_id, account_id, field_name):
     """
     Find the most recent date (and value) where this ONE specific field is populated
@@ -1637,14 +1698,16 @@ def db_get_latest_field_value(season_id, account_id, field_name):
     Returns the raw value string (e.g. "+16,161,386"), or None.
     """
     if field_name not in ("infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
-                           "other_merits", "t45_healed", "t45_dead"):
+                           "other_merits", "t45_healed", "t45_dead",
+                           "highest_power", "exchange_coins_spent", "max_pets"):
         return None
     try:
         conn = sqlite3.connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute(f"""
             SELECT {field_name} FROM season_progress
-            WHERE season_id=? AND account_id=? AND {field_name} IS NOT NULL AND {field_name} != '+0'
+            WHERE season_id=? AND account_id=? AND {field_name} IS NOT NULL
+              AND {field_name} != '+0' AND {field_name} != '0'
             ORDER BY data_date DESC LIMIT 1
         """, (season_id, account_id))
         row = c.fetchone()
@@ -2531,6 +2594,21 @@ def build_help_embed(is_owner: bool):
     )
 
     embed.add_field(
+        name="🧠 Ask (Natural Language)",
+        value=(
+            "`!ask <question>` — leaderboards, progress, comparisons, seasons, events, growth questions\n"
+            "e.g. `!ask top 10 mana leaderboard`\n"
+            "e.g. `!ask how is rekz doing this week`\n"
+            "e.g. `!ask compare rekz and truvix`\n"
+            "e.g. `!ask when does the season end`\n"
+            "e.g. `!ask what's the next event`\n"
+            "e.g. `!ask add events : August\\n* Aug 28 (Fri): — KvK Start\\n...` (admin only)\n"
+            "*Remembers recent conversation per channel for follow-ups*"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
         name="🏆 Leaderboards",
         value=(
             "`!topmana [season]` — Top mana gathered\n"
@@ -3344,27 +3422,49 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             log_info(f"[PROGRESS] Only 1 day of data for {account_id} in season {season_id}")
         
         # Get highest power — for the CURRENT season use the live/today value,
-        # but for an OLD/ended season use the power as it stood at that season's end date
+        # but for an OLD/ended season use the power as it stood at that season's end date.
+        # Check our own archive first (protects against COS deleting old dates), only
+        # live-fetch if we don't have it yet, and save whatever we fetch permanently.
         current_season = db_get_current_season()
         is_current_season = current_season and current_season[0] == season_id
+        season_end_date = db_get_season_end_date(season_id) or end_date_used
+        power_date_key = end_date_used if is_current_season else season_end_date
 
-        if is_current_season:
-            power_task = fetch_highest_power(account_id)
-        else:
-            season_end_date = db_get_season_end_date(season_id) or end_date_used
-            power_task = fetch_highest_power_at_date(account_id, season_end_date)
+        def _has_real_value(v):
+            return v is not None and str(v).strip() not in ("", "0", "+0", "-0")
+
+        async def _resolve_highest_power():
+            db_row = db_get_season_progress(season_id, account_id, power_date_key)
+            cached = db_row.get("highest_power") if db_row else None
+            if _has_real_value(cached):
+                return int(cached)
+            val = await (fetch_highest_power(account_id) if is_current_season
+                         else fetch_highest_power_at_date(account_id, season_end_date))
+            return val
+
+        async def _resolve_achievements():
+            db_row = db_get_season_progress(season_id, account_id, end_date_used)
+            cached_coins = db_row.get("exchange_coins_spent") if db_row else None
+            if _has_real_value(cached_coins):
+                cached_pets = db_row.get("max_pets") if db_row else None
+                return {"exchange_coins_spent": int(cached_coins),
+                        "max_pets": int(cached_pets) if _has_real_value(cached_pets) else None}
+            return await fetch_achievement_stats(account_id, end_date_used)
 
         # These four are all independent of each other — run them concurrently instead
         # of one after another, since that was a meaningful chunk of !progress's runtime.
         highest_power, alliance_tag, current_t_kills, achievement_stats = await asyncio.gather(
-            power_task,
+            _resolve_highest_power(),
             fetch_alliance_tag(account_id),
             fetch_current_t_kills(account_id),
-            fetch_achievement_stats(account_id, end_date_used),
+            _resolve_achievements(),
         )
 
         if not is_current_season:
             log_info(f"[PROGRESS] Old season #{season_id} — using highest power @ {season_end_date}: {highest_power}")
+
+        if _has_real_value(highest_power):
+            db_save_extra_stats(season_id, account_id, power_date_key, highest_power=highest_power)
 
         if achievement_stats["exchange_coins_spent"] is None and achievement_stats["max_pets"] is None:
             # COS may not have a page for a date it hasn't scanned yet (e.g. today) — try yesterday
@@ -3374,11 +3474,22 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         exchange_coins_spent = achievement_stats["exchange_coins_spent"]
         max_pets = achievement_stats["max_pets"]
 
+        if exchange_coins_spent is not None or max_pets is not None:
+            db_save_extra_stats(season_id, account_id, end_date_used,
+                                 exchange_coins_spent=exchange_coins_spent, max_pets=max_pets)
+
         # Also fetch coins spent AT the season's start date, to show the increase like Power does
         exchange_coins_gain = None
         if exchange_coins_spent is not None:
-            baseline_achievement_stats = await fetch_achievement_stats(account_id, start_date)
-            baseline_coins = baseline_achievement_stats["exchange_coins_spent"]
+            db_row_start = db_get_season_progress(season_id, account_id, start_date)
+            cached_baseline = db_row_start.get("exchange_coins_spent") if db_row_start else None
+            if _has_real_value(cached_baseline):
+                baseline_coins = int(cached_baseline)
+            else:
+                baseline_achievement_stats = await fetch_achievement_stats(account_id, start_date)
+                baseline_coins = baseline_achievement_stats["exchange_coins_spent"]
+                if baseline_coins is not None:
+                    db_save_extra_stats(season_id, account_id, start_date, exchange_coins_spent=baseline_coins)
             if baseline_coins is not None and exchange_coins_spent >= baseline_coins:
                 exchange_coins_gain = exchange_coins_spent - baseline_coins
         
@@ -4791,6 +4902,490 @@ async def topspent(ctx, season_name: str = None):
         output += f"{medal} {lord['name']}: +{lord['val']:,}\n"
     output += f"\n📅 {start_date} → {today}```"
     await ctx.send(output)
+
+
+# Per-channel short-term conversation memory for !ask follow-ups.
+# In-memory only (not persisted) — resets on bot restart, capped per channel.
+_ask_conversations = {}
+_ASK_MEMORY_TURNS = 6  # user+assistant pairs kept per channel
+
+
+def _ask_get_history(channel_id):
+    return _ask_conversations.get(channel_id, [])
+
+
+def _ask_save_turn(channel_id, user_msg, assistant_msg):
+    history = _ask_conversations.setdefault(channel_id, [])
+    history.append({"role": "user", "content": user_msg})
+    history.append({"role": "assistant", "content": assistant_msg})
+    # Keep only the last N turns (2 entries per turn)
+    if len(history) > _ASK_MEMORY_TURNS * 2:
+        del history[:len(history) - _ASK_MEMORY_TURNS * 2]
+
+
+def _ask_resolve_account_id(ctx, player_input):
+    """
+    Resolve a player name/mention/account_id to an account_id, mirroring the
+    resolution logic in !progress. Returns (account_id, error_message_or_None).
+    """
+    if not player_input:
+        for role in ctx.author.roles:
+            if role.name.isdigit():
+                return role.name, None
+        return None, "You don't have a numeric role with your account ID."
+
+    if player_input.isdigit():
+        return player_input, None
+
+    username_lower = player_input.lower()
+    found_discord_id = None
+    for username, discord_id in USERNAME_TO_DISCORD_ID.items():
+        if username.lower() == username_lower:
+            found_discord_id = discord_id
+            break
+
+    if not found_discord_id:
+        return None, f"Couldn't find a player named '{player_input}'."
+
+    member = ctx.guild.get_member(found_discord_id)
+    if not member:
+        return None, f"'{player_input}' is not in this server."
+
+    for role in member.roles:
+        if role.name.isdigit():
+            return role.name, None
+
+    return None, f"'{player_input}' doesn't have a numeric account ID role."
+
+
+ASK_TOOLS = [
+    {
+        "name": "run_leaderboard",
+        "description": "Show a guild leaderboard for tracked members. Renders its own message directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stat": {
+                    "type": "string",
+                    "enum": ["topmana", "topinf", "topcav", "topmage", "toparcher", "topheal",
+                              "topspent", "topdeaths", "topmerits", "rss"],
+                    "description": ("topmana=mana gathered, topinf/topcav/topmage/toparcher=merit "
+                                     "breakdowns, topheal=T4/T5 healed, topspent=estimated mana spent "
+                                     "(healing x72), topdeaths=most deaths, topmerits=highest merits, "
+                                     "rss=top resource spenders")
+                },
+                "season": {"type": "string", "description": "Season name or ID, omit for current season"}
+            },
+            "required": ["stat"]
+        }
+    },
+    {
+        "name": "run_server_leaderboard",
+        "description": "Show a server-wide leaderboard from the last uploaded server Excel data (not limited to guild members).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stat": {
+                    "type": "string",
+                    "enum": ["stopmerits", "stopdeaths", "stopheal", "stopmana", "stopinf", "stopcav",
+                              "stopmage", "stoparcher", "stopother", "stoppower", "stophighest"],
+                },
+                "top": {"type": "integer", "description": "How many to show, default 25"}
+            },
+            "required": ["stat"]
+        }
+    },
+    {
+        "name": "show_player_progress",
+        "description": "Show the full progress report card for one player. Renders its own embed directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player": {"type": "string", "description": "Player name, or omit for the asker's own progress"},
+                "season": {"type": "string", "description": "Season name or ID, omit for current season"}
+            }
+        }
+    },
+    {
+        "name": "compare_players",
+        "description": "Compare two players side by side. Renders its own embed directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player1": {"type": "string"},
+                "player2": {"type": "string"}
+            },
+            "required": ["player1", "player2"]
+        }
+    },
+    {
+        "name": "show_season_history",
+        "description": "Show all seasons with their dates. Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "get_upcoming_events",
+        "description": "Get the list of upcoming scheduled events with their dates. Returns data for you to summarize in your own words.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "get_player_growth",
+        "description": ("Get a player's stat growth over a recent period (e.g. 'how much did rekz "
+                         "grow this week'). Returns raw numbers for you to summarize conversationally."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player": {"type": "string", "description": "Player name, or omit for the asker"},
+                "days_back": {"type": "integer", "description": "How many days back to compare against, default 7"}
+            }
+        }
+    },
+]
+
+
+async def _ask_execute_tool(ctx, tool_name, tool_input):
+    """
+    Execute a tool call. Returns (rendered_directly: bool, result_for_claude: str|None).
+    rendered_directly=True means the tool already sent its own Discord message/embed
+    and Claude doesn't need to see a result. rendered_directly=False means the result
+    text should be handed back to Claude to compose a natural-language reply.
+    """
+    try:
+        if tool_name == "run_leaderboard":
+            action_map = {
+                "topmana": topmana, "topinf": topinf, "topcav": topcav, "topmage": topmage,
+                "toparcher": toparcher, "topheal": topheal, "topspent": topspent,
+                "topdeaths": topdeaths, "topmerits": topmerits, "rss": rss_leaderboard,
+            }
+            cmd = action_map.get(tool_input.get("stat"))
+            if not cmd:
+                return False, f"Unknown leaderboard: {tool_input.get('stat')}"
+            await cmd.callback(ctx, tool_input.get("season"))
+            return True, None
+
+        if tool_name == "run_server_leaderboard":
+            action_map = {
+                "stopmerits": stopmerits, "stopdeaths": stopdeaths, "stopheal": stopheal,
+                "stopmana": stopmana, "stopinf": stopinf, "stopcav": stopcav, "stopmage": stopmage,
+                "stoparcher": stoparcher, "stopother": stopother, "stoppower": stoppower,
+                "stophighest": stophighest,
+            }
+            cmd = action_map.get(tool_input.get("stat"))
+            if not cmd:
+                return False, f"Unknown server leaderboard: {tool_input.get('stat')}"
+            top = tool_input.get("top", 25)
+            if tool_input.get("stat") in ("stopheal", "stophighest", "stopmana"):
+                await cmd.callback(ctx, top)
+            else:
+                await cmd.callback(ctx, None, top)
+            return True, None
+
+        if tool_name == "show_player_progress":
+            await progress.callback(ctx, tool_input.get("player"), tool_input.get("season"))
+            return True, None
+
+        if tool_name == "compare_players":
+            await compare.callback(ctx, tool_input.get("player1"), tool_input.get("player2"))
+            return True, None
+
+        if tool_name == "show_season_history":
+            await seasonhistory.callback(ctx)
+            return True, None
+
+        if tool_name == "get_upcoming_events":
+            events = db_get_events()
+            if not events:
+                return False, "No upcoming events scheduled."
+            now = datetime.utcnow()
+            upcoming = []
+            for eid, name, dt_str, reminder in events:
+                try:
+                    dt = datetime.fromisoformat(dt_str)
+                    if dt > now:
+                        upcoming.append(f"{name}: {dt.strftime('%Y-%m-%d %H:%M UTC')}")
+                except Exception:
+                    continue
+            if not upcoming:
+                return False, "No upcoming events scheduled."
+            return False, "Upcoming events:\n" + "\n".join(upcoming)
+
+        if tool_name == "get_player_growth":
+            account_id, err = _ask_resolve_account_id(ctx, tool_input.get("player"))
+            if err:
+                return False, f"Error: {err}"
+            days_back = tool_input.get("days_back", 7)
+            season = db_get_current_season()
+            if not season:
+                return False, "No active season."
+            season_id, season_name, start_date, _ = season
+            today_str = date.today().isoformat()
+            past_str = (date.today() - timedelta(days=days_back)).isoformat()
+
+            today_stats, _ = await fetch_stats_with_fallback(account_id, start_date, today_str)
+            past_stats, _ = await fetch_stats_with_fallback(account_id, start_date, past_str)
+
+            if not today_stats or not past_stats:
+                return False, "Couldn't fetch enough data for that comparison."
+
+            def _num(s):
+                if not s:
+                    return 0
+                try:
+                    return int(str(s).replace("+", "").replace(",", "").strip())
+                except:
+                    return 0
+
+            result_lines = [f"Player: {today_stats.get('lord_name', account_id)}, season: {season_name}, comparing {past_str} to {today_str} ({days_back} days):"]
+            for field, label in [("power_gain", "power"), ("merits", "merits"), ("kills_gain", "kills"),
+                                   ("deads_gain", "deaths"), ("healed_gain", "healed")]:
+                delta = _num(today_stats.get(field)) - _num(past_stats.get(field))
+                result_lines.append(f"{label} grew by {delta:,} in this period")
+            return False, "\n".join(result_lines)
+
+        return False, f"Unknown tool: {tool_name}"
+
+    except Exception as e:
+        log_info(f"[ASK TOOL ERROR] {tool_name}: {e}")
+        return False, f"Error running {tool_name}: {e}"
+
+
+@bot.command(name="ask")
+async def ask(ctx, *, query: str = None):
+    """
+    Natural-language command interface. Handles leaderboards (guild and server),
+    player progress, comparisons, season info, events, and growth questions
+    (e.g. "how much did rekz grow this week"). Remembers recent conversation
+    per channel so follow-ups work. Requires ANTHROPIC_API_KEY on Railway;
+    falls back to basic keyword-only leaderboard matching if not configured.
+    """
+    if not query:
+        return await ctx.send(
+            "❓ Ask me things like:\n"
+            "`!ask top 10 mana leaderboard`\n"
+            "`!ask how is rekz doing this week`\n"
+            "`!ask compare rekz and truvix`\n"
+            "`!ask when does the season end`\n"
+            "`!ask what's the next event`\n"
+            "`!ask add events : August\\n* Aug 28 (Fri): — KvK Start\\n...`"
+        )
+
+    q = query.strip()
+    q_lower = q.lower()
+
+    # ---- Bulk event import (deterministic, kept separate — exact format matters) ----
+    if "add event" in q_lower:
+        return await _ask_bulk_add_events(ctx, q)
+
+    # ---- No AI configured: fall back to the original keyword-only leaderboard router ----
+    if not _anthropic_client:
+        handled = await _ask_route_leaderboard(ctx, q_lower)
+        if handled:
+            return
+        return await ctx.send(
+            "🤔 I couldn't match that. I can route leaderboard requests "
+            "(e.g. `!ask top 10 mana leaderboard`) and bulk event imports. "
+            "For anything else, try the specific command — see `/help`. "
+            "(Ask the owner about setting up `ANTHROPIC_API_KEY` for smarter understanding.)"
+        )
+
+    # ---- Full AI tool-use path ----
+    channel_id = ctx.channel.id
+    history = _ask_get_history(channel_id)
+
+    system_prompt = (
+        "You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
+        "stats. Use the tools available to answer the user's question. Some tools render "
+        "their own Discord message directly (leaderboards, progress cards, comparisons, "
+        "season history) — for those, just call the tool, you don't need to say anything "
+        "else. Other tools (events, player growth) return raw data for you to explain "
+        "conversationally in 1-3 sentences. If a question doesn't need a tool (general "
+        "chat, or something you can't help with), just reply directly and briefly. Keep "
+        "all replies short and to the point — this is a Discord chat, not an essay."
+    )
+
+    messages = history + [{"role": "user", "content": q}]
+
+    try:
+        rendered_directly = False
+        final_text = None
+
+        for _ in range(3):  # allow a couple tool round-trips at most
+            response = await asyncio.to_thread(
+                _anthropic_client.messages.create,
+                model="claude-sonnet-5",
+                max_tokens=400,
+                system=system_prompt,
+                tools=ASK_TOOLS,
+                messages=messages,
+            )
+
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+
+            if not tool_use_blocks:
+                final_text = " ".join(text_blocks).strip()
+                break
+
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for block in tool_use_blocks:
+                rendered, result_text = await _ask_execute_tool(ctx, block.name, block.input)
+                if rendered:
+                    rendered_directly = True
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_text or "Done.",
+                })
+            messages.append({"role": "user", "content": tool_results})
+
+            if rendered_directly:
+                # A tool already rendered its own output — no need to keep looping
+                # unless there's more text to extract from this same response.
+                if text_blocks:
+                    final_text = " ".join(text_blocks).strip()
+                break
+
+        if final_text:
+            await ctx.send(f"🧠 {final_text}")
+
+        _ask_save_turn(channel_id, q, final_text or "(showed results above)")
+
+    except Exception as e:
+        log_info(f"[ASK ERROR] {e}")
+        await ctx.send(f"❌ Something went wrong: {e}")
+
+
+async def _ask_route_leaderboard(ctx, q_lower):
+    """Try to match a leaderboard-style natural language query to an existing top* command."""
+    import re as _re_ask
+
+    # Extract a "top N" number if present, default 25 (or whatever the target command defaults to)
+    n_match = _re_ask.search(r'\btop\s*(\d+)\b', q_lower)
+    top_n = int(n_match.group(1)) if n_match else None
+
+    # Extract a season reference if mentioned, e.g. "sos1", "season 2"
+    season_match = _re_ask.search(r'\b(sos\d+|season\s*\d+|season\s+[a-z0-9]+)\b', q_lower)
+    season_arg = None
+    if season_match:
+        season_arg = season_match.group(1).replace("season", "").strip()
+
+    # Keyword -> (command_callback, takes_top_n)
+    keyword_map = [
+        (["mana spent"], topspent, False),
+        (["mana", "gathering", "gathered"], topmana, False),
+        (["infantry"], topinf, False),
+        (["cavalry"], topcav, False),
+        (["mage", "magic"], topmage, False),
+        (["marksman", "archer"], toparcher, False),
+        (["heal", "healed", "healing"], topheal, False),
+        (["death", "deaths", "died"], topdeaths, False),
+        (["merit"], topmerits, False),
+        (["rss", "resource spend", "resources spent"], rss_leaderboard, False),
+    ]
+
+    if not any(w in q_lower for w in ["top", "leaderboard", "who has the most", "highest", "best"]):
+        return False
+
+    for keywords, command_obj, _ in keyword_map:
+        if any(kw in q_lower for kw in keywords):
+            await ctx.send(f"🔎 Routing to `!{command_obj.name}`...")
+            try:
+                await command_obj.callback(ctx, season_arg)
+            except Exception as e:
+                await ctx.send(f"❌ Error running `!{command_obj.name}`: {e}")
+            return True
+
+    return False
+
+
+async def _ask_bulk_add_events(ctx, raw_text):
+    """
+    Parse a bulk event list like:
+      August
+      * Aug 28 (Fri): — KvK Start
+      * Aug 29 (Sat): —Direbear
+    and add each as an event via db_add_event. Assumes the current year (or next
+    year if the date has already passed this year). Defaults to 12:00 UTC and no
+    reminder since only dates are given, not times.
+    """
+    if ctx.author.id != OWNER_ID and not (ctx.guild and ctx.author.guild_permissions.administrator):
+        return await ctx.send("❌ Only admins can bulk-add events.")
+
+    import re as _re_ev
+
+    month_names = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+    }
+
+    line_pattern = _re_ev.compile(
+        r'([A-Za-z]{3,9})\s+(\d{1,2})\s*\([A-Za-z]{3}\):?\s*[—\-]*\s*(.+)'
+    )
+
+    now = datetime.utcnow()
+    added = []
+    failed = []
+
+    for line in raw_text.split("\n"):
+        line = line.strip().lstrip("*").strip()
+        match = line_pattern.match(line)
+        if not match:
+            continue
+
+        month_str, day_str, event_name = match.groups()
+        month_key = month_str.strip().lower()[:3]
+        if month_key not in month_names:
+            continue
+
+        month = month_names[month_key]
+        day = int(day_str)
+        event_name = event_name.strip().strip("`").strip()
+        if not event_name:
+            continue
+
+        # Assume current year, roll to next year if that date has already passed
+        year = now.year
+        try:
+            dt = datetime(year, month, day, 12, 0)
+        except ValueError:
+            failed.append(f"{month_str} {day} (invalid date)")
+            continue
+        if dt <= now:
+            dt = datetime(year + 1, month, day, 12, 0)
+
+        try:
+            db_add_event(event_name, dt.isoformat(), 0)
+            added.append((dt, event_name))
+        except Exception as e:
+            failed.append(f"{event_name}: {e}")
+
+    if not added:
+        return await ctx.send(
+            "❌ Couldn't parse any events from that. Expected lines like:\n"
+            "`* Aug 28 (Fri): — KvK Start`"
+        )
+
+    lines = [f"✅ Added **{len(added)}** events (12:00 UTC, no reminder set):"]
+    for dt, name in added:
+        lines.append(f"<t:{int(dt.timestamp())}:D> — {name}")
+    if failed:
+        lines.append(f"\n⚠️ Skipped {len(failed)}: {', '.join(failed)}")
+    lines.append("\nUse `/editevent` if you want to add reminders or adjust times.")
+
+    # Send in chunks if long
+    msg = "\n".join(lines)
+    if len(msg) <= 2000:
+        await ctx.send(msg)
+    else:
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await ctx.send(chunk)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await ctx.send(chunk)
 
 
 @bot.command(name="rss")
