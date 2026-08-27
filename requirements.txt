@@ -3,3 +3,4 @@ pytz
 flask
 aiohttp
 openpyxl
+anthropic
