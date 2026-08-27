@@ -5163,6 +5163,43 @@ ASK_TOOLS = [
         "description": "Force-refresh all tracked members' stats right now instead of waiting for the daily update. Admin only. Renders its own message directly.",
         "input_schema": {"type": "object", "properties": {}}
     },
+    {
+        "name": "view_kvk_matchup",
+        "description": "View full details of one specific saved KvK matchup by its ID. Renders its own message directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"matchup_id": {"type": "integer"}},
+            "required": ["matchup_id"]
+        }
+    },
+    {
+        "name": "delete_kvk_matchup",
+        "description": "Delete one saved KvK matchup by its ID. Owner only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"matchup_id": {"type": "integer"}},
+            "required": ["matchup_id"]
+        }
+    },
+    {
+        "name": "show_weekly_events",
+        "description": "Show the rotating weekly Abyss events (Melee/Range Wheel/Forge schedule). Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "edit_season",
+        "description": "Edit a season's name, start date, and/or end date. Match the season by name or ID. Admin only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "season": {"type": "string", "description": "Season name or ID to edit"},
+                "new_name": {"type": "string"},
+                "new_start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "new_end_date": {"type": "string", "description": "YYYY-MM-DD, or 'ongoing' to clear the end date"}
+            },
+            "required": ["season"]
+        }
+    },
 ]
 
 
@@ -5399,6 +5436,67 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
                 return False, "Only admins can force a data refresh."
             await forcefetch.callback(ctx)
             return True, None
+
+        if tool_name == "view_kvk_matchup":
+            await cmd_matchup_view(ctx, tool_input["matchup_id"])
+            return True, None
+
+        if tool_name == "delete_kvk_matchup":
+            if ctx.author.id != OWNER_ID:
+                return False, "Only the owner can delete matchups."
+            await cmd_matchup_delete(ctx, tool_input["matchup_id"])
+            return True, None
+
+        if tool_name == "show_weekly_events":
+            today = date.today()
+            sunday = start_date - timedelta(days=start_date.weekday() + 1)
+            weeks = (today - sunday).days // 7
+            this_tue = sunday + timedelta(weeks=weeks, days=2)
+            now = datetime.utcnow()
+            event_start = datetime.combine(this_tue, time(0, 0))
+            event_end = event_start + timedelta(days=3)
+            if now >= event_end:
+                weeks += 1
+
+            msg = "📅 **Weekly Abyss Events**\n\n"
+            nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+            for i in range(4):
+                idx = (weeks + i) % 4
+                nm = weekly_events[idx]
+                emoji = event_emojis.get(nm, "📌")
+                ev_date = sunday + timedelta(weeks=weeks + i, days=2)
+                base_dt = datetime.combine(ev_date, time(0, 0))
+                msg += f"{nums[i]} {emoji} **{nm}** — <t:{int(base_dt.timestamp())}:F>\n\n"
+            await ctx.send(msg)
+            return True, None
+
+        if tool_name == "edit_season":
+            if not _ask_is_admin(ctx):
+                return False, "Only admins can edit seasons."
+            season = resolve_season_input(tool_input["season"])
+            if not season:
+                return False, f"No season found matching '{tool_input['season']}'."
+            season_id, old_name, old_start, _ = season
+
+            new_name = tool_input.get("new_name")
+            new_start = tool_input.get("new_start_date")
+            new_end_raw = tool_input.get("new_end_date")
+            new_end = None
+            if new_end_raw:
+                new_end = "" if new_end_raw.lower() == "ongoing" else new_end_raw
+
+            if not any([new_name, new_start, new_end_raw]):
+                return False, "Nothing to change was specified."
+
+            db_update_season(season_id, season_name=new_name, start_date=new_start, end_date=new_end)
+            changes = []
+            if new_name:
+                changes.append(f"name to '{new_name}'")
+            if new_start:
+                changes.append(f"start date to {new_start}")
+            if new_end_raw:
+                changes.append("end date cleared (ongoing)" if new_end == "" else f"end date to {new_end}")
+            return False, f"Updated season '{old_name}' (#{season_id}): {', '.join(changes)}."
 
         return False, f"Unknown tool: {tool_name}"
 
