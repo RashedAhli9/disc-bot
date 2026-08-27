@@ -861,7 +861,28 @@ async def fetch_stats_with_fallback(account_id, start_date, end_date):
             return stats, current_end
         else:
             log_info(f"[FALLBACK] All zeros for {current_end}, trying earlier")
-    
+
+    # Still nothing — the START date itself might be broken/deleted by COS, which shifting
+    # the end date backward can't fix. Try shifting the START date forward a few days
+    # against the original end_date before giving up entirely.
+    for days_forward in range(1, 6):
+        shifted_start = (start_dt + timedelta(days=days_forward)).isoformat()
+        if datetime.strptime(shifted_start, "%Y-%m-%d").date() >= end_dt:
+            break
+        log_info(f"[FALLBACK] Trying shifted start_date={shifted_start} -> end_date={end_date}")
+        stats = await fetch_stats_for_account(account_id, shifted_start, end_date, skip_cache=True)
+        if not stats:
+            continue
+        has_data = any(
+            stats.get(key) and stats.get(key) not in ("+0", "0", "")
+            for key in ["merits", "kills_gain", "deads_gain", "healed_gain",
+                        "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]
+        )
+        if has_data:
+            log_info(f"[FALLBACK] Found data with shifted start_date={shifted_start}")
+            return stats, end_date
+        last_stats = stats
+
     # Return last fetched stats even if empty (last resort)
     return last_stats, end_date
 
@@ -2605,6 +2626,8 @@ def build_help_embed(is_owner: bool):
             "e.g. `!ask when does the season end`\n"
             "e.g. `!ask what's the next event`\n"
             "e.g. `!ask add events : August\\n* Aug 28 (Fri): — KvK Start\\n...` (admin only)\n"
+            "e.g. `!ask change all the august events from 12 to 13 UTC` (admin only)\n"
+            "e.g. `!ask delete the direbear event` (admin only)\n"
             "*Remembers recent conversation per channel for follow-ups*"
         ),
         inline=False
@@ -5042,7 +5065,109 @@ ASK_TOOLS = [
             }
         }
     },
+    {
+        "name": "add_event",
+        "description": "Add a single scheduled event. Admin only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                "time_utc": {"type": "string", "description": "HH:MM in 24h UTC, default 12:00 if not given"},
+                "reminder_minutes": {"type": "integer", "description": "Minutes before the event to remind, default 0 (no reminder)"}
+            },
+            "required": ["name", "date"]
+        }
+    },
+    {
+        "name": "edit_event",
+        "description": "Edit one existing event by matching its name (partial match ok). Change its name, date, time, and/or reminder. Admin only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "match": {"type": "string", "description": "Text to match against existing event names"},
+                "new_name": {"type": "string"},
+                "new_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "new_time_utc": {"type": "string", "description": "HH:MM in 24h UTC"},
+                "new_reminder_minutes": {"type": "integer"}
+            },
+            "required": ["match"]
+        }
+    },
+    {
+        "name": "bulk_edit_event_times",
+        "description": ("Change the time-of-day for MULTIPLE events at once, keeping their dates and "
+                         "names the same. Useful for 'change all the events I just added from 12 UTC "
+                         "to 13 UTC'. Filters by the events' CURRENT time and optionally by a month or "
+                         "name substring. Admin only. ALWAYS report exactly how many events were changed."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "current_time_utc": {"type": "string", "description": "Only change events currently at this HH:MM UTC, e.g. '12:00'"},
+                "new_time_utc": {"type": "string", "description": "New HH:MM UTC to set"},
+                "month": {"type": "string", "description": "Optional: only affect events in this month, e.g. 'August'"},
+                "name_contains": {"type": "string", "description": "Optional: only affect events whose name contains this text"}
+            },
+            "required": ["new_time_utc"]
+        }
+    },
+    {
+        "name": "delete_event",
+        "description": "Delete one event by matching its name (partial match ok). Admin only — always confirm what was deleted.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "match": {"type": "string", "description": "Text to match against existing event names"}
+            },
+            "required": ["match"]
+        }
+    },
+    {
+        "name": "run_server_rankings",
+        "description": "Show the top N servers by highest power, Gen-2 Pool. Renders its own message directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "How many servers to show, 1-100, default 10"}
+            }
+        }
+    },
+    {
+        "name": "check_server_rank",
+        "description": "Look up a specific server's rank in the server rankings. Renders its own message directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "server_number": {"type": "integer", "description": "The server number, e.g. 698"}
+            },
+            "required": ["server_number"]
+        }
+    },
+    {
+        "name": "show_saved_kvk_matchups",
+        "description": "List all saved KvK matchups. Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "show_active_members",
+        "description": "Show which guild members are active vs inactive based on recent stat changes. Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "show_data_history",
+        "description": "Show the oldest and newest data dates saved in the database. Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "force_fetch_all",
+        "description": "Force-refresh all tracked members' stats right now instead of waiting for the daily update. Admin only. Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
 ]
+
+
+def _ask_is_admin(ctx):
+    return ctx.author.id == OWNER_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
 
 
 async def _ask_execute_tool(ctx, tool_name, tool_input):
@@ -5144,6 +5269,137 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
                 result_lines.append(f"{label} grew by {delta:,} in this period")
             return False, "\n".join(result_lines)
 
+        if tool_name == "add_event":
+            if not _ask_is_admin(ctx):
+                return False, "Only admins can add events."
+            try:
+                date_str = tool_input["date"]
+                time_str = tool_input.get("time_utc", "12:00")
+                reminder = tool_input.get("reminder_minutes", 0)
+                dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            except Exception as e:
+                return False, f"Couldn't parse that date/time: {e}"
+            db_add_event(tool_input["name"], dt.isoformat(), reminder)
+            return False, f"Added event '{tool_input['name']}' on {dt.strftime('%Y-%m-%d %H:%M UTC')}."
+
+        if tool_name == "edit_event":
+            if not _ask_is_admin(ctx):
+                return False, "Only admins can edit events."
+            events = db_get_events()
+            match_text = tool_input["match"].lower()
+            matches = [e for e in events if match_text in e[1].lower()]
+            if not matches:
+                return False, f"No event found matching '{tool_input['match']}'."
+            if len(matches) > 1:
+                names = ", ".join(f"'{m[1]}'" for m in matches[:5])
+                return False, f"Multiple events match '{tool_input['match']}': {names}. Be more specific."
+
+            event_id, old_name, old_dt_str, old_reminder = matches[0]
+            try:
+                old_dt = datetime.fromisoformat(old_dt_str)
+            except Exception:
+                old_dt = datetime.utcnow()
+
+            new_name = tool_input.get("new_name")
+            new_date = tool_input.get("new_date")
+            new_time = tool_input.get("new_time_utc")
+            new_reminder = tool_input.get("new_reminder_minutes")
+
+            new_dt = None
+            if new_date or new_time:
+                date_part = new_date or old_dt.strftime("%Y-%m-%d")
+                time_part = new_time or old_dt.strftime("%H:%M")
+                try:
+                    new_dt = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M")
+                except Exception as e:
+                    return False, f"Couldn't parse that date/time: {e}"
+
+            db_update_event(
+                event_id,
+                name=new_name,
+                dt=new_dt.isoformat() if new_dt else None,
+                reminder=new_reminder,
+            )
+            final_name = new_name or old_name
+            final_dt = new_dt or old_dt
+            return False, f"Updated event: '{final_name}' now at {final_dt.strftime('%Y-%m-%d %H:%M UTC')}."
+
+        if tool_name == "bulk_edit_event_times":
+            if not _ask_is_admin(ctx):
+                return False, "Only admins can bulk-edit events."
+            events = db_get_events()
+            current_time = tool_input.get("current_time_utc")
+            new_time = tool_input["new_time_utc"]
+            month_filter = tool_input.get("month", "").lower()
+            name_filter = tool_input.get("name_contains", "").lower()
+
+            changed = []
+            for event_id, name, dt_str, reminder in events:
+                try:
+                    dt = datetime.fromisoformat(dt_str)
+                except Exception:
+                    continue
+                if current_time and dt.strftime("%H:%M") != current_time:
+                    continue
+                if month_filter and month_filter not in dt.strftime("%B").lower():
+                    continue
+                if name_filter and name_filter not in name.lower():
+                    continue
+                try:
+                    new_hour, new_min = map(int, new_time.split(":"))
+                    new_dt = dt.replace(hour=new_hour, minute=new_min)
+                except Exception:
+                    continue
+                db_update_event(event_id, dt=new_dt.isoformat())
+                changed.append(f"{name} ({dt.strftime('%Y-%m-%d')})")
+
+            if not changed:
+                return False, "No events matched those filters — nothing was changed."
+            return False, f"Changed the time to {new_time} UTC for {len(changed)} events: " + ", ".join(changed)
+
+        if tool_name == "delete_event":
+            if not _ask_is_admin(ctx):
+                return False, "Only admins can delete events."
+            events = db_get_events()
+            match_text = tool_input["match"].lower()
+            matches = [e for e in events if match_text in e[1].lower()]
+            if not matches:
+                return False, f"No event found matching '{tool_input['match']}'."
+            if len(matches) > 1:
+                names = ", ".join(f"'{m[1]}'" for m in matches[:5])
+                return False, f"Multiple events match '{tool_input['match']}': {names}. Be more specific."
+            event_id, name, dt_str, reminder = matches[0]
+            db_delete_event(event_id)
+            return False, f"Deleted event '{name}'."
+
+        if tool_name == "run_server_rankings":
+            n = tool_input.get("n", 10)
+            n = max(1, min(100, n))
+            await cmd_servertop(ctx, n)
+            return True, None
+
+        if tool_name == "check_server_rank":
+            await cmd_servercheck(ctx, str(tool_input["server_number"]))
+            return True, None
+
+        if tool_name == "show_saved_kvk_matchups":
+            await cmd_matchups_list(ctx)
+            return True, None
+
+        if tool_name == "show_active_members":
+            await active_members.callback(ctx)
+            return True, None
+
+        if tool_name == "show_data_history":
+            await datahistory.callback(ctx)
+            return True, None
+
+        if tool_name == "force_fetch_all":
+            if not _ask_is_admin(ctx):
+                return False, "Only admins can force a data refresh."
+            await forcefetch.callback(ctx)
+            return True, None
+
         return False, f"Unknown tool: {tool_name}"
 
     except Exception as e:
@@ -5168,7 +5424,9 @@ async def ask(ctx, *, query: str = None):
             "`!ask compare rekz and truvix`\n"
             "`!ask when does the season end`\n"
             "`!ask what's the next event`\n"
-            "`!ask add events : August\\n* Aug 28 (Fri): — KvK Start\\n...`"
+            "`!ask add events : August\\n* Aug 28 (Fri): — KvK Start\\n...`\n"
+            "`!ask change all the august events from 12 to 13 UTC` (admin only)\n"
+            "`!ask delete the direbear event` (admin only)"
         )
 
     q = query.strip()
@@ -5196,13 +5454,23 @@ async def ask(ctx, *, query: str = None):
 
     system_prompt = (
         "You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
-        "stats. Use the tools available to answer the user's question. Some tools render "
-        "their own Discord message directly (leaderboards, progress cards, comparisons, "
-        "season history) — for those, just call the tool, you don't need to say anything "
-        "else. Other tools (events, player growth) return raw data for you to explain "
-        "conversationally in 1-3 sentences. If a question doesn't need a tool (general "
-        "chat, or something you can't help with), just reply directly and briefly. Keep "
-        "all replies short and to the point — this is a Discord chat, not an essay."
+        "stats and schedule. You have broad access: guild and server-wide leaderboards, "
+        "player progress/comparison/growth, season info, event management, server rank "
+        "lookups (Gen-2 Pool), saved KvK matchups, active/inactive member status, data "
+        "history, and forcing a data refresh. Use the tools available to answer the "
+        "user's request. Some tools render their own Discord message directly — for "
+        "those, just call the tool, you don't need to say anything else. Other tools "
+        "(events, player growth, event add/edit/delete) return raw text for you to relay "
+        "conversationally in 1-3 sentences — always state clearly and specifically what "
+        "changed (exact new time/date/name, or how many events were affected). Write/admin "
+        "tools (event add/edit/delete, force fetch) are admin-only; if a non-admin asks, "
+        "still call the tool — it will tell you permission was denied, then relay that "
+        "plainly. For bulk_edit_event_times, if the user doesn't specify which current time "
+        "to match, ask them to clarify rather than guessing — changing the wrong events is "
+        "worse than asking one follow-up question. If a question doesn't need a tool "
+        "(general chat, or something outside what's listed above), reply directly and "
+        "briefly. Keep all replies short and to the point — this is a Discord chat, not an "
+        "essay."
     )
 
     messages = history + [{"role": "user", "content": q}]
