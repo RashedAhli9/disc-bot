@@ -954,6 +954,20 @@ def init_db():
         );
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS queued_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_name TEXT NOT NULL,
+            tool_input TEXT NOT NULL,
+            description TEXT NOT NULL,
+            scheduled_time TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_by TEXT,
+            channel_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            result TEXT
+        );
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS server_config (
             id INTEGER PRIMARY KEY,
             server_num INTEGER NOT NULL,
@@ -1247,6 +1261,63 @@ migrate_db_progress()
 # ============================================================
 # SEASON TRACKER DATABASE FUNCTIONS
 # ============================================================
+
+def db_queue_task(tool_name, tool_input, description, scheduled_time_iso, created_by, channel_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO queued_tasks (tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, created_at) "
+        "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+        (tool_name, json.dumps(tool_input), description, scheduled_time_iso, str(created_by), str(channel_id), datetime.utcnow().isoformat())
+    )
+    task_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return task_id
+
+def db_get_queued_tasks(status="pending"):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    if status:
+        c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, result FROM queued_tasks WHERE status=? ORDER BY scheduled_time ASC", (status,))
+    else:
+        c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, result FROM queued_tasks ORDER BY scheduled_time ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_due_tasks():
+    now = datetime.utcnow().isoformat()
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, channel_id FROM queued_tasks WHERE status='pending' AND scheduled_time<=?", (now,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_queued_task(task_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, result FROM queued_tasks WHERE id=?", (task_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_set_task_status(task_id, status, result=None):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE queued_tasks SET status=?, result=? WHERE id=?", (status, result, task_id))
+    conn.commit()
+    conn.close()
+
+def db_update_task_time(task_id, new_scheduled_time_iso):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE queued_tasks SET scheduled_time=? WHERE id=? AND status='pending'", (new_scheduled_time_iso, task_id))
+    changed = c.rowcount
+    conn.commit()
+    conn.close()
+    return changed > 0
 
 def db_add_season(season_name, start_date):
     conn = sqlite3.connect(DB)
@@ -2573,6 +2644,10 @@ async def on_ready():
     if not check_callofstats_update.is_running():
         check_callofstats_update.start()
 
+    # ✅ QUEUED TASK RUNNER (!ask scheduled actions)
+    if not check_queued_tasks.is_running():
+        check_queued_tasks.start()
+
     # ✅ SAFE LOOP STARTS
     if not abyss_reminder_loop.is_running():
         abyss_reminder_loop.start()
@@ -2619,15 +2694,17 @@ def build_help_embed(is_owner: bool):
     embed.add_field(
         name="🧠 Ask (Natural Language)",
         value=(
-            "`!ask <question>` — leaderboards, progress, comparisons, seasons, events, growth questions\n"
+            "`!ask <question>` — leaderboards, progress, comparisons, seasons, events, pace, math & general help\n"
             "e.g. `!ask top 10 mana leaderboard`\n"
-            "e.g. `!ask how is rekz doing this week`\n"
+            "e.g. `!ask who is slacking this season`\n"
+            "e.g. `!ask at my pace, how long until I hit 1B mana gathered`\n"
             "e.g. `!ask compare rekz and truvix`\n"
             "e.g. `!ask when does the season end`\n"
             "e.g. `!ask what's the next event`\n"
             "e.g. `!ask add events : August\\n* Aug 28 (Fri): — KvK Start\\n...` (admin only)\n"
-            "e.g. `!ask change all the august events from 12 to 13 UTC` (admin only)\n"
-            "e.g. `!ask delete the direbear event` (admin only)\n"
+            "e.g. `!ask at 0 UTC create a new season called \"Nvr vs Yss\"` (admin only, queues it)\n"
+            "e.g. `!ask what tasks are queued` / `!ask cancel task 3`\n"
+            "e.g. `!ask what's 15% of 480` or `!ask help me solve 2x+5=17`\n"
             "*Remembers recent conversation per channel for follow-ups*"
         ),
         inline=False
@@ -5074,7 +5151,8 @@ ASK_TOOLS = [
                 "name": {"type": "string"},
                 "date": {"type": "string", "description": "YYYY-MM-DD"},
                 "time_utc": {"type": "string", "description": "HH:MM in 24h UTC, default 12:00 if not given"},
-                "reminder_minutes": {"type": "integer", "description": "Minutes before the event to remind, default 0 (no reminder)"}
+                "reminder_minutes": {"type": "integer", "description": "Minutes before the event to remind, default 0 (no reminder)"},
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["name", "date"]
         }
@@ -5089,7 +5167,8 @@ ASK_TOOLS = [
                 "new_name": {"type": "string"},
                 "new_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "new_time_utc": {"type": "string", "description": "HH:MM in 24h UTC"},
-                "new_reminder_minutes": {"type": "integer"}
+                "new_reminder_minutes": {"type": "integer"},
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["match"]
         }
@@ -5106,7 +5185,8 @@ ASK_TOOLS = [
                 "current_time_utc": {"type": "string", "description": "Only change events currently at this HH:MM UTC, e.g. '12:00'"},
                 "new_time_utc": {"type": "string", "description": "New HH:MM UTC to set"},
                 "month": {"type": "string", "description": "Optional: only affect events in this month, e.g. 'August'"},
-                "name_contains": {"type": "string", "description": "Optional: only affect events whose name contains this text"}
+                "name_contains": {"type": "string", "description": "Optional: only affect events whose name contains this text"},
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["new_time_utc"]
         }
@@ -5117,7 +5197,8 @@ ASK_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "match": {"type": "string", "description": "Text to match against existing event names"}
+                "match": {"type": "string", "description": "Text to match against existing event names"},
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["match"]
         }
@@ -5161,7 +5242,12 @@ ASK_TOOLS = [
     {
         "name": "force_fetch_all",
         "description": "Force-refresh all tracked members' stats right now instead of waiting for the daily update. Admin only. Renders its own message directly.",
-        "input_schema": {"type": "object", "properties": {}}
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
+            }
+        }
     },
     {
         "name": "view_kvk_matchup",
@@ -5195,26 +5281,201 @@ ASK_TOOLS = [
                 "season": {"type": "string", "description": "Season name or ID to edit"},
                 "new_name": {"type": "string"},
                 "new_start_date": {"type": "string", "description": "YYYY-MM-DD"},
-                "new_end_date": {"type": "string", "description": "YYYY-MM-DD, or 'ongoing' to clear the end date"}
+                "new_end_date": {"type": "string", "description": "YYYY-MM-DD, or 'ongoing' to clear the end date"},
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["season"]
         }
     },
+    {
+        "name": "get_activity_rankings",
+        "description": ("Get a composite performance snapshot for EVERY tracked guild member at once "
+                         "(merits, power gain, merit-to-power ratio, kills, deaths, resources gathered). "
+                         "Use this for open-ended questions like 'who is slacking', 'who is the best "
+                         "player', 'who's carrying the guild', 'rank everyone' — anything that needs "
+                         "comparing members across multiple stats rather than one single leaderboard. "
+                         "Returns raw per-member data for you to analyze and explain, not a rendered "
+                         "leaderboard."),
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "calculate",
+        "description": ("Evaluate an exact math expression — arithmetic, powers, roots, trig, logs, "
+                         "etc. Use this whenever a question needs a precise numeric result (not just "
+                         "an estimate), including as a step while working through a larger math "
+                         "problem. Supports +, -, *, /, //, %, **, parentheses, and functions: sqrt, "
+                         "sin, cos, tan, asin, acos, atan, log, log10, log2, exp, factorial, abs, "
+                         "round, floor, ceil, and the constants pi and e."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "e.g. 'sqrt(144) + 7 ** 2' or '(15/4) * log(100, 10)'"}
+            },
+            "required": ["expression"]
+        }
+    },
+    {
+        "name": "get_pace_projection",
+        "description": ("Project how long it will take a player to reach a target value for a stat, "
+                         "based on their pace so far this season (e.g. 'at my current pace, how long "
+                         "until I hit 1B mana gathered'). Returns raw numbers (current value, daily "
+                         "rate, days elapsed, days needed, projected date) for you to explain."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player": {"type": "string", "description": "Player name, or omit for the asker"},
+                "metric": {
+                    "type": "string",
+                    "enum": ["merits", "power_gain", "kills_gain", "deads_gain", "healed_gain",
+                              "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"],
+                },
+                "target": {"type": "number", "description": "The target value to reach, e.g. 1000000000 for 1B"}
+            },
+            "required": ["metric", "target"]
+        }
+    },
+    {
+        "name": "create_season",
+        "description": ("Start a new season. This ends the currently active season automatically "
+                         "(its end_date is set to the day before this new season starts). Admin only. "
+                         "Can be scheduled for later with scheduled_time."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Season name, e.g. 'Nvr vs Yss'"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD the season starts"},
+                "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately, e.g. '2026-08-28T00:00:00'. Omit to run immediately."}
+            },
+            "required": ["name", "start_date"]
+        }
+    },
+    {
+        "name": "list_queued_tasks",
+        "description": "List all pending scheduled/queued tasks (things set to run later). Renders its own message directly.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "cancel_queued_task",
+        "description": "Cancel a pending queued task by its ID. Admin only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "integer"}},
+            "required": ["task_id"]
+        }
+    },
+    {
+        "name": "edit_queued_task_time",
+        "description": "Change the scheduled time of a pending queued task. Admin only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "new_scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime, e.g. '2026-08-28T00:00:00'"}
+            },
+            "required": ["task_id", "new_scheduled_time"]
+        }
+    },
 ]
+
+
+def _ask_safe_calculate(expression):
+    """
+    Safely evaluate a math expression using Python's ast module — whitelists only
+    numeric literals, arithmetic operators, and a fixed set of math functions.
+    Never uses eval() directly on untrusted input. Returns (result, error).
+    """
+    import ast as _ast_calc
+    import math as _math_calc
+
+    allowed_names = {
+        "sqrt": _math_calc.sqrt, "sin": _math_calc.sin, "cos": _math_calc.cos, "tan": _math_calc.tan,
+        "asin": _math_calc.asin, "acos": _math_calc.acos, "atan": _math_calc.atan,
+        "log": _math_calc.log, "log10": _math_calc.log10, "log2": _math_calc.log2,
+        "exp": _math_calc.exp, "factorial": _math_calc.factorial, "abs": abs,
+        "round": round, "floor": _math_calc.floor, "ceil": _math_calc.ceil,
+        "pi": _math_calc.pi, "e": _math_calc.e,
+    }
+    allowed_binops = (_ast_calc.Add, _ast_calc.Sub, _ast_calc.Mult, _ast_calc.Div,
+                       _ast_calc.FloorDiv, _ast_calc.Mod, _ast_calc.Pow, _ast_calc.USub, _ast_calc.UAdd)
+
+    def _eval_node(node):
+        if isinstance(node, _ast_calc.Constant):
+            if isinstance(node.value, (int, float)):
+                return node.value
+            raise ValueError("Only numbers are allowed")
+        if isinstance(node, _ast_calc.BinOp):
+            if not isinstance(node.op, allowed_binops):
+                raise ValueError("Operator not allowed")
+            left = _eval_node(node.left)
+            right = _eval_node(node.right)
+            if isinstance(node.op, _ast_calc.Add): return left + right
+            if isinstance(node.op, _ast_calc.Sub): return left - right
+            if isinstance(node.op, _ast_calc.Mult): return left * right
+            if isinstance(node.op, _ast_calc.Div): return left / right
+            if isinstance(node.op, _ast_calc.FloorDiv): return left // right
+            if isinstance(node.op, _ast_calc.Mod): return left % right
+            if isinstance(node.op, _ast_calc.Pow): return left ** right
+        if isinstance(node, _ast_calc.UnaryOp):
+            if not isinstance(node.op, allowed_binops):
+                raise ValueError("Operator not allowed")
+            operand = _eval_node(node.operand)
+            return -operand if isinstance(node.op, _ast_calc.USub) else +operand
+        if isinstance(node, _ast_calc.Name):
+            if node.id in allowed_names and not callable(allowed_names[node.id]):
+                return allowed_names[node.id]
+            raise ValueError(f"Unknown name: {node.id}")
+        if isinstance(node, _ast_calc.Call):
+            if not isinstance(node.func, _ast_calc.Name) or node.func.id not in allowed_names:
+                raise ValueError("Function not allowed")
+            fn = allowed_names[node.func.id]
+            if not callable(fn):
+                raise ValueError("Not a function")
+            args = [_eval_node(a) for a in node.args]
+            return fn(*args)
+        raise ValueError(f"Expression not allowed: {type(node).__name__}")
+
+    try:
+        tree = _ast_calc.parse(expression, mode="eval")
+        result = _eval_node(tree.body)
+        return result, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _ask_is_admin(ctx):
     return ctx.author.id == OWNER_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
 
 
-async def _ask_execute_tool(ctx, tool_name, tool_input):
+SCHEDULABLE_TOOLS = {"add_event", "edit_event", "bulk_edit_event_times", "delete_event",
+                     "edit_season", "create_season", "force_fetch_all"}
+
+
+async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False):
     """
     Execute a tool call. Returns (rendered_directly: bool, result_for_claude: str|None).
     rendered_directly=True means the tool already sent its own Discord message/embed
     and Claude doesn't need to see a result. rendered_directly=False means the result
     text should be handed back to Claude to compose a natural-language reply.
+    bypass_permission=True is used when re-running a queued task at its scheduled time —
+    permission was already verified when it was queued, so it isn't re-checked, and it
+    won't be re-queued even if scheduled_time is still present in the stored input.
     """
     try:
+        # If this call includes a future scheduled_time, queue it instead of running now.
+        if not bypass_permission and tool_name in SCHEDULABLE_TOOLS and tool_input.get("scheduled_time"):
+            try:
+                scheduled_dt = datetime.fromisoformat(tool_input["scheduled_time"])
+            except Exception:
+                return False, f"Couldn't parse scheduled_time '{tool_input['scheduled_time']}'. Use ISO format like 2026-08-28T00:00:00."
+            if scheduled_dt > datetime.utcnow():
+                if not _ask_is_admin(ctx):
+                    return False, "Only admins can schedule actions."
+                clean_input = {k: v for k, v in tool_input.items() if k != "scheduled_time"}
+                description = f"{tool_name}(" + ", ".join(f"{k}={v}" for k, v in clean_input.items()) + ")"
+                task_id = db_queue_task(tool_name, clean_input, description, scheduled_dt.isoformat(), ctx.author.id, ctx.channel.id)
+                return False, f"Queued task #{task_id}: {description} — scheduled for {scheduled_dt.strftime('%Y-%m-%d %H:%M UTC')}."
+            # scheduled_time is in the past/now — fall through and run immediately
+
         if tool_name == "run_leaderboard":
             action_map = {
                 "topmana": topmana, "topinf": topinf, "topcav": topcav, "topmage": topmage,
@@ -5307,7 +5568,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return False, "\n".join(result_lines)
 
         if tool_name == "add_event":
-            if not _ask_is_admin(ctx):
+            if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can add events."
             try:
                 date_str = tool_input["date"]
@@ -5320,7 +5581,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return False, f"Added event '{tool_input['name']}' on {dt.strftime('%Y-%m-%d %H:%M UTC')}."
 
         if tool_name == "edit_event":
-            if not _ask_is_admin(ctx):
+            if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can edit events."
             events = db_get_events()
             match_text = tool_input["match"].lower()
@@ -5362,7 +5623,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return False, f"Updated event: '{final_name}' now at {final_dt.strftime('%Y-%m-%d %H:%M UTC')}."
 
         if tool_name == "bulk_edit_event_times":
-            if not _ask_is_admin(ctx):
+            if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can bulk-edit events."
             events = db_get_events()
             current_time = tool_input.get("current_time_utc")
@@ -5395,7 +5656,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return False, f"Changed the time to {new_time} UTC for {len(changed)} events: " + ", ".join(changed)
 
         if tool_name == "delete_event":
-            if not _ask_is_admin(ctx):
+            if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can delete events."
             events = db_get_events()
             match_text = tool_input["match"].lower()
@@ -5432,7 +5693,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return True, None
 
         if tool_name == "force_fetch_all":
-            if not _ask_is_admin(ctx):
+            if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can force a data refresh."
             await forcefetch.callback(ctx)
             return True, None
@@ -5442,7 +5703,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return True, None
 
         if tool_name == "delete_kvk_matchup":
-            if ctx.author.id != OWNER_ID:
+            if not bypass_permission and ctx.author.id != OWNER_ID:
                 return False, "Only the owner can delete matchups."
             await cmd_matchup_delete(ctx, tool_input["matchup_id"])
             return True, None
@@ -5471,7 +5732,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
             return True, None
 
         if tool_name == "edit_season":
-            if not _ask_is_admin(ctx):
+            if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can edit seasons."
             season = resolve_season_input(tool_input["season"])
             if not season:
@@ -5498,11 +5759,204 @@ async def _ask_execute_tool(ctx, tool_name, tool_input):
                 changes.append("end date cleared (ongoing)" if new_end == "" else f"end date to {new_end}")
             return False, f"Updated season '{old_name}' (#{season_id}): {', '.join(changes)}."
 
+        if tool_name == "get_activity_rankings":
+            season = db_get_current_season()
+            if not season:
+                return False, "No active season."
+            season_id, season_name, start_date, _ = season
+
+            lords = get_all_lords_from_guild(ctx.guild)
+            if not lords:
+                return False, "No tracked members found."
+
+            def _num(s):
+                if not s:
+                    return 0
+                try:
+                    return int(str(s).replace("+", "").replace(",", "").strip())
+                except:
+                    return 0
+
+            rows = []
+            for lord in lords:
+                snap = db_get_latest_season_progress(season_id, lord["account_id"])
+                if not snap:
+                    continue
+                merits = _num(snap.get("merits"))
+                power = _num(snap.get("power_gain"))
+                kills = _num(snap.get("kills_gain"))
+                deaths = _num(snap.get("deads_gain"))
+                gathered = sum(_num(snap.get(k)) for k in
+                               ["gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"])
+                ratio = round((merits / power * 100), 1) if power > 0 else None
+                rows.append({
+                    "name": snap.get("lord_name") or lord["name"],
+                    "merits": merits, "power_gain": power, "merit_ratio_pct": ratio,
+                    "kills": kills, "deaths": deaths, "resources_gathered": gathered,
+                })
+
+            if not rows:
+                return False, "No members have data for this season yet."
+
+            rows.sort(key=lambda r: r["merit_ratio_pct"] if r["merit_ratio_pct"] is not None else -1, reverse=True)
+
+            lines = [f"Season: {season_name}. Per-member data (merit_ratio_pct = merits gained relative to power gained — higher means more active/efficient relative to their growth, lower can indicate low activity):"]
+            for r in rows:
+                ratio_str = f"{r['merit_ratio_pct']}%" if r["merit_ratio_pct"] is not None else "n/a"
+                lines.append(
+                    f"{r['name']}: merits={r['merits']:,}, power_gain={r['power_gain']:,}, "
+                    f"merit_ratio={ratio_str}, kills={r['kills']:,}, deaths={r['deaths']:,}, "
+                    f"resources_gathered={r['resources_gathered']:,}"
+                )
+            return False, "\n".join(lines)
+
+        if tool_name == "calculate":
+            result, error = _ask_safe_calculate(tool_input["expression"])
+            if error:
+                return False, f"Couldn't evaluate that: {error}"
+            return False, f"{tool_input['expression']} = {result}"
+
+        if tool_name == "get_pace_projection":
+            account_id, err = _ask_resolve_account_id(ctx, tool_input.get("player"))
+            if err:
+                return False, f"Error: {err}"
+            season = db_get_current_season()
+            if not season:
+                return False, "No active season."
+            season_id, season_name, start_date, _ = season
+            metric = tool_input["metric"]
+            target = tool_input["target"]
+            today_str = date.today().isoformat()
+
+            stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, today_str)
+            if not stats:
+                return False, "Couldn't fetch current stats for that player."
+
+            current_val = _parse_stat_num_global(stats.get(metric))
+            try:
+                days_elapsed = (datetime.strptime(actual_end, "%Y-%m-%d").date() - datetime.strptime(start_date, "%Y-%m-%d").date()).days
+            except Exception:
+                days_elapsed = 0
+            days_elapsed = max(days_elapsed, 1)
+            daily_rate = current_val / days_elapsed
+
+            if current_val >= target:
+                return False, f"Player: {stats.get('lord_name', account_id)}. Current {metric}: {current_val:,}, which already meets or exceeds the target of {target:,}."
+            if daily_rate <= 0:
+                return False, f"Player: {stats.get('lord_name', account_id)}. Current {metric}: {current_val:,} over {days_elapsed} days — no positive pace detected yet, can't project."
+
+            remaining = target - current_val
+            days_needed = remaining / daily_rate
+            projected_date = date.today() + timedelta(days=days_needed)
+            return False, (
+                f"Player: {stats.get('lord_name', account_id)}. Season: {season_name}. Metric: {metric}. "
+                f"Current: {current_val:,}. Days elapsed this season: {days_elapsed}. "
+                f"Daily rate: {daily_rate:,.0f}/day. Target: {target:,}. Remaining needed: {remaining:,}. "
+                f"Days needed at current pace: {days_needed:.1f}. Projected date to reach target: {projected_date.isoformat()}."
+            )
+
+        if tool_name == "create_season":
+            if not bypass_permission and not _ask_is_admin(ctx):
+                return False, "Only admins can create seasons."
+            try:
+                datetime.strptime(tool_input["start_date"], "%Y-%m-%d")
+            except Exception:
+                return False, f"Invalid start_date '{tool_input['start_date']}' — use YYYY-MM-DD."
+            db_end_previous_active_season(tool_input["start_date"])
+            db_add_season(tool_input["name"], tool_input["start_date"])
+            return False, f"Created new season '{tool_input['name']}' starting {tool_input['start_date']}. The previous season was automatically ended the day before."
+
+        if tool_name == "list_queued_tasks":
+            tasks = db_get_queued_tasks(status="pending")
+            if not tasks:
+                await ctx.send("📭 No queued tasks.")
+                return True, None
+            lines = ["```📋 Queued Tasks\n"]
+            for t in tasks:
+                task_id, tname, tinput, desc, sched, status, created_by, channel_id, result = t
+                try:
+                    sched_display = datetime.fromisoformat(sched).strftime("%Y-%m-%d %H:%M UTC")
+                except Exception:
+                    sched_display = sched
+                lines.append(f"#{task_id} — {desc}")
+                lines.append(f"   Scheduled: {sched_display}\n")
+            lines.append("```")
+            await ctx.send("\n".join(lines))
+            return True, None
+
+        if tool_name == "cancel_queued_task":
+            if not bypass_permission and not _ask_is_admin(ctx):
+                return False, "Only admins can cancel queued tasks."
+            task = db_get_queued_task(tool_input["task_id"])
+            if not task:
+                return False, f"No queued task with ID #{tool_input['task_id']}."
+            if task[5] != "pending":
+                return False, f"Task #{tool_input['task_id']} is already {task[5]}, nothing to cancel."
+            db_set_task_status(tool_input["task_id"], "cancelled")
+            return False, f"Cancelled task #{tool_input['task_id']}: {task[3]}."
+
+        if tool_name == "edit_queued_task_time":
+            if not bypass_permission and not _ask_is_admin(ctx):
+                return False, "Only admins can edit queued tasks."
+            try:
+                new_dt = datetime.fromisoformat(tool_input["new_scheduled_time"])
+            except Exception:
+                return False, f"Couldn't parse '{tool_input['new_scheduled_time']}' — use ISO format like 2026-08-28T00:00:00."
+            ok = db_update_task_time(tool_input["task_id"], new_dt.isoformat())
+            if not ok:
+                return False, f"No pending task with ID #{tool_input['task_id']}."
+            return False, f"Task #{tool_input['task_id']} rescheduled to {new_dt.strftime('%Y-%m-%d %H:%M UTC')}."
+
         return False, f"Unknown tool: {tool_name}"
 
     except Exception as e:
         log_info(f"[ASK TOOL ERROR] {tool_name}: {e}")
         return False, f"Error running {tool_name}: {e}"
+
+
+class _QueuedTaskCtx:
+    """Minimal ctx-like stand-in used to execute a queued !ask task outside of a live command invocation."""
+    def __init__(self, channel, guild, author):
+        self.channel = channel
+        self.guild = guild
+        self.author = author
+
+    async def send(self, *args, **kwargs):
+        return await self.channel.send(*args, **kwargs)
+
+
+@tasks.loop(minutes=1)
+async def check_queued_tasks():
+    """Run any !ask-queued tasks whose scheduled time has arrived."""
+    due = db_get_due_tasks()
+    for task_id, tool_name, tool_input_json, description, scheduled_time, channel_id in due:
+        try:
+            channel = bot.get_channel(int(channel_id))
+            if not channel:
+                db_set_task_status(task_id, "failed", "Channel not found")
+                continue
+            guild = channel.guild
+
+            task_row = db_get_queued_task(task_id)
+            created_by = task_row[6] if task_row else None
+            author = guild.get_member(int(created_by)) if created_by and guild else None
+            if not author and guild:
+                author = guild.get_member(OWNER_ID)
+
+            fake_ctx = _QueuedTaskCtx(channel, guild, author)
+            tool_input = json.loads(tool_input_json)
+
+            rendered, result_text = await _ask_execute_tool(fake_ctx, tool_name, tool_input, bypass_permission=True)
+            db_set_task_status(task_id, "completed", result_text or "Done")
+
+            if rendered:
+                await channel.send(f"✅ Scheduled task completed: {description}")
+            else:
+                await channel.send(f"✅ Scheduled task completed: {description}\n{result_text or ''}")
+
+        except Exception as e:
+            log_info(f"[QUEUED TASK ERROR] #{task_id}: {e}")
+            db_set_task_status(task_id, "failed", str(e))
 
 
 @bot.command(name="ask")
@@ -5550,25 +6004,51 @@ async def ask(ctx, *, query: str = None):
     channel_id = ctx.channel.id
     history = _ask_get_history(channel_id)
 
+    now_utc = datetime.utcnow()
     system_prompt = (
-        "You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
-        "stats and schedule. You have broad access: guild and server-wide leaderboards, "
-        "player progress/comparison/growth, season info, event management, server rank "
-        "lookups (Gen-2 Pool), saved KvK matchups, active/inactive member status, data "
-        "history, and forcing a data refresh. Use the tools available to answer the "
-        "user's request. Some tools render their own Discord message directly — for "
-        "those, just call the tool, you don't need to say anything else. Other tools "
-        "(events, player growth, event add/edit/delete) return raw text for you to relay "
-        "conversationally in 1-3 sentences — always state clearly and specifically what "
-        "changed (exact new time/date/name, or how many events were affected). Write/admin "
-        "tools (event add/edit/delete, force fetch) are admin-only; if a non-admin asks, "
-        "still call the tool — it will tell you permission was denied, then relay that "
-        "plainly. For bulk_edit_event_times, if the user doesn't specify which current time "
-        "to match, ask them to clarify rather than guessing — changing the wrong events is "
-        "worse than asking one follow-up question. If a question doesn't need a tool "
-        "(general chat, or something outside what's listed above), reply directly and "
-        "briefly. Keep all replies short and to the point — this is a Discord chat, not an "
-        "essay."
+        f"You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
+        f"stats and schedule. The current date/time is {now_utc.strftime('%Y-%m-%d %H:%M')} UTC — "
+        f"use this to resolve relative time expressions (e.g. 'in 0 UTC' means the next "
+        f"00:00 UTC, today's if it hasn't passed yet, otherwise tomorrow's) into an exact "
+        f"ISO 8601 datetime for any scheduled_time parameter.\n\n"
+        "You have broad access: guild and server-wide leaderboards, player progress/"
+        "comparison/growth, pace projections (get_pace_projection — e.g. 'at my current "
+        "pace, how long until I hit 1B mana gathered'), season info/editing/creation, event "
+        "management, server rank lookups (Gen-2 Pool), saved KvK matchups (list/view/"
+        "delete), weekly Abyss event rotation, active/inactive member status, data history, "
+        "forcing a data refresh, a composite activity-ranking tool (get_activity_rankings) "
+        "for open-ended comparisons across the whole guild ('who is slacking', 'who's the "
+        "best player', 'rank everyone'), and a calculate tool for exact math.\n\n"
+        "SCHEDULING: add_event, edit_event, bulk_edit_event_times, delete_event, "
+        "edit_season, create_season, and force_fetch_all all accept an optional "
+        "scheduled_time parameter — if the user wants an action to happen later rather than "
+        "immediately (e.g. 'at 0 UTC create a new season called X'), include scheduled_time "
+        "as an exact ISO datetime instead of leaving it out, and the action will be queued "
+        "rather than run right away. Use list_queued_tasks to show what's queued, "
+        "cancel_queued_task to cancel one by ID, and edit_queued_task_time to reschedule one.\n\n"
+        "For open-ended member comparisons, use get_activity_rankings rather than a "
+        "single-stat leaderboard — it gives you merits, power, merit-to-power ratio, kills, "
+        "deaths, and resources gathered for every member so you can actually reason about "
+        "who's underperforming or excelling, and explain WHY in your answer (e.g. 'X has "
+        "high power but a low merit ratio, meaning little recent activity relative to their "
+        "size'). Don't just deflect a comparative question back to the user asking which "
+        "single stat to use — pull the real data and give a genuine answer, citing the "
+        "specific numbers that support it. You're also a general assistant beyond bot data "
+        "— people may ask you math questions, homework help, or anything else. Use the "
+        "calculate tool for any arithmetic that needs to be exact rather than estimating in "
+        "your head, and walk through multi-step problems clearly, calling calculate at each "
+        "step that needs a precise number. Some tools render their own Discord message "
+        "directly — for those, just call the tool, you don't need to say anything else. "
+        "Other tools return raw text for you to relay conversationally — always cite "
+        "specific numbers/names, and for edits or schedules always state exactly what "
+        "changed or was queued and when. Write/admin tools are admin- or owner-only; if "
+        "someone without permission asks, still call the tool — it will tell you permission "
+        "was denied, then relay that plainly. For bulk_edit_event_times, if the user doesn't "
+        "specify which current time to match, ask them to clarify rather than guessing — "
+        "changing the wrong events is worse than asking one follow-up question. Keep replies "
+        "to the point for simple lookups, but give full step-by-step explanations when "
+        "someone is working through a math problem or asks you to explain something — don't "
+        "sacrifice a real, complete answer for brevity when the question calls for it."
     )
 
     messages = history + [{"role": "user", "content": q}]
@@ -5581,7 +6061,7 @@ async def ask(ctx, *, query: str = None):
             response = await asyncio.to_thread(
                 _anthropic_client.messages.create,
                 model="claude-sonnet-5",
-                max_tokens=400,
+                max_tokens=900,
                 system=system_prompt,
                 tools=ASK_TOOLS,
                 messages=messages,
