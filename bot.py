@@ -2391,9 +2391,11 @@ async def check_callofstats_update():
                     except:
                         pass
                 
-                # Require AT LEAST 2 stats with real values (not just 1)
-                # This prevents false positives from cached/placeholder data
-                if real_stat_count < 2:
+                # Require at least 1 stat with a real value (not just an "Unknown" placeholder).
+                # Used to require 2+, but a legitimate new-data day can have some stats at
+                # genuinely zero (e.g. no kills that day) while others are real — requiring
+                # 2+ was rejecting valid updates and blocking notifications for extended periods.
+                if real_stat_count < 1:
                     log_info(f"[CALLOFSTATS UPDATE] ⚠️ Only {real_stat_count} stat(s) with data for {new_date_iso} - data not ready yet, skipping notification")
                     return
                 
