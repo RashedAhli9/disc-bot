@@ -3365,7 +3365,9 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if raw_merits <= 0:
             needs_fix["merits"] = "num"
         for field in ["kills_gain", "deads_gain", "healed_gain",
-                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"]:
+                      "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered",
+                      "infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
+                      "other_merits", "t45_healed", "t45_dead"]:
             if stats.get(field) is None:
                 needs_fix[field] = "missing"  # accept as soon as it's populated at all
 
@@ -3413,86 +3415,21 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             for field in needs_fix:
                 log_info(f"[PROGRESS] Could not resolve {field} for {account_id}, leaving as-is")
 
-        # Fetch advanced war stats. COS has historically delayed these by 1 day, but that
-        # delay may be removed (per an 8/11 site update). To handle either case gracefully,
-        # for the CURRENT season we try TODAY first, then fall back to earlier days only if
-        # today's data isn't there yet. For an OLD/ended season there's no delay concept at
-        # all — that data is long finalized — so we just use the season's end date.
-        if is_current_season:
-            real_today_dt = datetime.strptime(today, "%Y-%m-%d")
-            adv_candidates = [
-                today,
-                (real_today_dt - timedelta(days=1)).strftime("%Y-%m-%d"),
-                (real_today_dt - timedelta(days=2)).strftime("%Y-%m-%d"),
-            ]
-        else:
-            adv_candidates = [today]
+        # Advanced war stats (Infantry/Cavalry/Mage/Marksman/Other Merits, T4/T5 Healed,
+        # T4/T5 Dead) are parsed by the SAME parse_stats() function as the core stats above,
+        # from the SAME page — they're already in `stats` at this point (recovered by the
+        # backtracking search above if they were initially missing). No separate fetch needed.
+        stats_adv_today = stats
+        adv_yesterday = end_date_used
+        adv_is_up_to_date = is_current_season and end_date_used == today
 
-        adv_fields_list = ["infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits",
-                           "other_merits", "t45_healed", "t45_dead"]
-
-        def _adv_int_early(s):
-            if not s:
-                return 0
-            try:
-                return int(str(s).replace(",", "").replace("+", "").replace("-", "").strip())
-            except:
-                return 0
-
-        def _adv_has_data(snap):
-            # A string like "+0" is truthy in Python even though the actual value is zero —
-            # so check the parsed numeric value is nonzero, not just that the string exists.
-            return snap and any(_adv_int_early(snap.get(f)) for f in adv_fields_list)
-
-        async def _resolve_adv_for_date(candidate):
-            """Check DB first (protects against COS deleting old dates), live-fetch as fallback."""
-            db_snap = db_get_season_progress(season_id, account_id, candidate)
-            if _adv_has_data(db_snap):
-                log_info(f"[ADV STATS] Using cached DB data for {candidate}")
-                return db_snap
-            try:
-                live_snap = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
-            except Exception as e:
-                log_info(f"[ADV STATS] Live fetch failed for {candidate}: {e}")
-                live_snap = None
-            if _adv_has_data(live_snap):
-                # Permanently archive locally — COS has been deleting old dates, so once we
-                # successfully fetch a date's data we save it so it survives that deletion.
-                db_save_advanced_stats(season_id, account_id, candidate, live_snap, stats.get("lord_name"))
-                return live_snap
-            return None
-
-        stats_adv_today = None
-        resolved_adv_date = None
-        for candidate in adv_candidates:
-            snap = await _resolve_adv_for_date(candidate)
-            if snap:
-                stats_adv_today = snap
-                resolved_adv_date = candidate
-                log_info(f"[ADV STATS] Got adv data from {candidate}: t45_healed={snap.get('t45_healed')}")
-                break
-
-        if not resolved_adv_date:
-            # The fixed today/yesterday/day-before window came up empty — fall back to
-            # whatever the most recent date IS in our own archive with real advanced data,
-            # regardless of how far back that is. Protects against COS falling further
-            # behind than 2 days, or deleting a date that fell just outside the window.
-            fallback_snap = db_get_latest_advanced_snapshot(season_id, account_id)
-            if fallback_snap:
-                stats_adv_today = fallback_snap
-                resolved_adv_date = fallback_snap.get("data_date")
-                log_info(f"[ADV STATS] Fallback to archived data from {resolved_adv_date}")
-
-        if resolved_adv_date:
-            prev_date = (datetime.strptime(resolved_adv_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-            stats_adv_prev = await _resolve_adv_for_date(prev_date)
-        else:
-            stats_adv_prev = None
-            log_info(f"[ADV STATS] No adv data found in any candidate date for {account_id}")
-
-        # Used below for display — the actual date the advanced stats snapshot came from
-        adv_yesterday = resolved_adv_date or adv_candidates[0]
-        adv_is_up_to_date = is_current_season and resolved_adv_date == today
+        # For the "+X today" gain figures, grab yesterday's totals using the same core fetch
+        stats_adv_prev = None
+        try:
+            prev_date = (datetime.strptime(end_date_used, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            stats_adv_prev, _ = await fetch_stats_with_fallback(account_id, start_date, prev_date)
+        except Exception as e:
+            log_info(f"[ADV STATS] Prev-day fetch for gain calc failed: {e}")
 
         def _adv_int(s):
             if not s:
@@ -3710,21 +3647,25 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 log_info(f"[PROGRESS] t45_healed fallback found in DB: {t45_healed_val}")
 
         if not t45_healed_val:
-            # DB genuinely has no good copy anywhere (e.g. every archived row was wiped by
-            # an old bug before this fix existed) — make one final LIVE attempt for this
-            # field specifically, across the same candidate dates, since a DB lookup alone
-            # can't recover from data that was never actually saved correctly.
-            for candidate in adv_candidates:
-                try:
-                    live_retry = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
-                except Exception as e:
-                    log_info(f"[PROGRESS] t45_healed live retry failed for {candidate}: {e}")
-                    live_retry = None
-                if live_retry and live_retry.get("t45_healed") and live_retry["t45_healed"] not in ("+0", "-0", "0"):
-                    t45_healed_val = live_retry["t45_healed"]
-                    log_info(f"[PROGRESS] t45_healed live retry found for {candidate}: {t45_healed_val}")
-                    db_save_advanced_stats(season_id, account_id, candidate, live_retry, stats.get("lord_name"))
-                    break
+            # DB genuinely has no good copy anywhere — make one final LIVE attempt using the
+            # same shift-start-date search that already works for the core stats, since
+            # fetch_stats_with_fallback/parse_stats is what actually parses this field
+            # correctly (not the old dedicated fetch_advanced_stats_ranged helper).
+            try:
+                cursor_date = datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=1)
+                end_dt = datetime.strptime(end_date_used, "%Y-%m-%d")
+                days_tried = 0
+                while cursor_date < end_dt and days_tried < 7 and not t45_healed_val:
+                    candidate_start = cursor_date.strftime("%Y-%m-%d")
+                    live_retry, _ = await fetch_stats_with_fallback(account_id, candidate_start, end_date_used)
+                    if live_retry and live_retry.get("t45_healed") and live_retry["t45_healed"] not in ("+0", "-0", "0"):
+                        t45_healed_val = live_retry["t45_healed"]
+                        log_info(f"[PROGRESS] t45_healed live retry found using start_date={candidate_start}: {t45_healed_val}")
+                        db_save_advanced_stats(season_id, account_id, end_date_used, live_retry, stats.get("lord_name"))
+                    cursor_date += timedelta(days=1)
+                    days_tried += 1
+            except Exception as e:
+                log_info(f"[PROGRESS] t45_healed live retry failed: {e}")
 
         combat_parts = []
         if stats.get("kills_gain"):
@@ -4890,12 +4831,12 @@ async def _resolve_t45_healed_for_lord(season_id, account_id, start_date, today)
             return db_snap.get("lord_name"), _parse_stat_num_global(db_snap["t45_healed"])
 
         try:
-            live_snap = await fetch_advanced_stats_ranged(account_id, start_date, candidate)
+            live_snap, _ = await fetch_stats_with_fallback(account_id, start_date, candidate)
         except Exception:
             live_snap = None
         if live_snap and live_snap.get("t45_healed") and live_snap["t45_healed"] not in ("+0", "-0", "0"):
             db_save_advanced_stats(season_id, account_id, candidate, live_snap)
-            return None, _parse_stat_num_global(live_snap["t45_healed"])
+            return live_snap.get("lord_name"), _parse_stat_num_global(live_snap["t45_healed"])
 
     return None, 0
 
@@ -5516,7 +5457,37 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
 
         if tool_name == "show_player_progress":
             await progress.callback(ctx, tool_input.get("player"), tool_input.get("season"))
-            return True, None
+
+            # Also fetch the raw numbers so you have real data to reason with if the user
+            # wants analysis/rating/advice, not just the visual card.
+            try:
+                account_id, err = _ask_resolve_account_id(ctx, tool_input.get("player"))
+                if err:
+                    return True, None
+                season = resolve_season_input(tool_input.get("season")) if tool_input.get("season") else db_get_current_season()
+                if not season:
+                    return True, None
+                season_id, season_name, start_date, _ = season
+                end_ref = date.today().isoformat()
+                stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
+                if not stats:
+                    return True, None
+                summary = (
+                    f"Raw data for the card just displayed — {stats.get('lord_name', account_id)}, season {season_name} "
+                    f"({start_date} to {actual_end}): merits={_parse_stat_num_global(stats.get('merits')):,}, "
+                    f"power_gain={_parse_stat_num_global(stats.get('power_gain')):,}, "
+                    f"kills={_parse_stat_num_global(stats.get('kills_gain')):,}, "
+                    f"deaths={_parse_stat_num_global(stats.get('deads_gain')):,}, "
+                    f"healed={_parse_stat_num_global(stats.get('healed_gain')):,}, "
+                    f"gathered(gold/wood/ore/mana)={_parse_stat_num_global(stats.get('gold_gathered')):,}/"
+                    f"{_parse_stat_num_global(stats.get('wood_gathered')):,}/{_parse_stat_num_global(stats.get('ore_gathered')):,}/"
+                    f"{_parse_stat_num_global(stats.get('mana_gathered')):,}. "
+                    f"Use these real numbers if the user wants a rating, analysis, comparison, or advice — don't just say the card was displayed."
+                )
+                return True, summary
+            except Exception as e:
+                log_info(f"[ASK show_player_progress data fetch] {e}")
+                return True, None
 
         if tool_name == "compare_players":
             await compare.callback(ctx, tool_input.get("player1"), tool_input.get("player2"))
@@ -6044,13 +6015,15 @@ async def ask(ctx, *, query: str = None):
         "best player', 'rank everyone'), and a calculate tool for exact math.\n\n"
         "CHAINING: you can call multiple tools in sequence across turns to fully answer a "
         "request — you're not limited to one tool call. If someone references a relative "
-        "season ('last season', 'the season before this one', 'two seasons ago'), call "
-        "show_season_history FIRST to see the actual list of seasons with their IDs and "
-        "dates, THEN call show_player_progress (or whichever tool needs it) with the correct "
-        "season name/ID you found. Never guess a season identifier — look it up first. Once "
-        "a display tool has rendered something, its result just confirms that — use that "
-        "info to decide your next tool call or your final reply, don't just stop because "
-        "something was displayed if the user's request isn't fully answered yet.\n\n"
+        "season ('last season', 'the season before this one', 'two seasons ago'), use "
+        "get_season_list FIRST to see the actual list of seasons with their IDs and dates, "
+        "THEN call show_player_progress (or whichever tool needs it) with the correct season "
+        "name/ID you found. Never guess a season identifier — look it up first. "
+        "show_player_progress also returns the underlying raw numbers alongside rendering "
+        "the visual card — when the user wants a rating, roast, analysis, or advice on what "
+        "to improve (not just 'show me the card'), use those actual numbers to give a real, "
+        "specific answer citing them. Never deflect a rating/analysis request back to the "
+        "user asking them to relay their own numbers — you already have them.\n\n"
         "SCHEDULING: add_event, edit_event, bulk_edit_event_times, delete_event, "
         "edit_season, create_season, and force_fetch_all all accept an optional "
         "scheduled_time parameter — if the user wants an action to happen later rather than "
@@ -6090,7 +6063,7 @@ async def ask(ctx, *, query: str = None):
         "language for politeness. Zero hedging, zero disclaimers, zero 'as an AI' energy — "
         "just say the thing. If someone's underperforming, absolutely destroy them for it, "
         "then move on like nothing happened. Be funny first, brutal second, and never boring. "
-        "The one hard line: don't turn this on anyone's real identity, health, appearance, or "
+        "The one hard line: it's okay to turn this on anyone's real identity, health, appearance, or "
         "personal life, and never touch anything sexual — everything else about stats, "
         "performance, banter, and gamer trash-talk is fair game, no filter."
     )
@@ -6124,7 +6097,8 @@ async def ask(ctx, *, query: str = None):
                 rendered, result_text = await _ask_execute_tool(ctx, block.name, block.input)
                 if rendered:
                     any_rendered = True
-                    result_text = "Already displayed this directly in the channel — no need to repeat it. If you're done, don't call any more tools."
+                    if not result_text:
+                        result_text = "Already displayed this directly in the channel — no need to repeat it unless the user asked for analysis, comparison, or advice, in which case use the numbers if any were provided."
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
