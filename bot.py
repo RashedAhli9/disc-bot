@@ -3453,12 +3453,19 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             fallback = db_get_latest_field_value(season_id, account_id, field)
             return _adv_int(fallback) or None
 
-        # Check how many days of data exist for this season
-        data_date_count = count_season_data_dates(season_id, account_id)
-        is_single_day = data_date_count == 1
+        # "Only 1 day of data" should reflect the actual reported date RANGE (start_date to
+        # end_date_used) spanning less than a day — e.g. an account added today. The raw DB
+        # row count isn't a reliable signal for this: a missed daily save for one day doesn't
+        # mean the account has only been tracked for 1 day, and using row count caused false
+        # positives for long-tracked accounts that just had an incidental save gap somewhere.
+        try:
+            elapsed_days = (datetime.strptime(end_date_used, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days
+        except Exception:
+            elapsed_days = 1
+        is_single_day = elapsed_days < 1
         
         if is_single_day:
-            log_info(f"[PROGRESS] Only 1 day of data for {account_id} in season {season_id}")
+            log_info(f"[PROGRESS] Only 1 day in reported range for {account_id} in season {season_id} ({start_date} -> {end_date_used})")
         
         # Get highest power — for the CURRENT season use the live/today value,
         # but for an OLD/ended season use the power as it stood at that season's end date.
@@ -5473,7 +5480,8 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 if not stats:
                     return True, None
                 summary = (
-                    f"Raw data for the card just displayed — {stats.get('lord_name', account_id)}, season {season_name} "
+                    f"EXACT VERIFIED DATA (copy these numbers precisely, do not alter or round them) "
+                    f"for {stats.get('lord_name', account_id)}, season {season_name} "
                     f"({start_date} to {actual_end}): merits={_parse_stat_num_global(stats.get('merits')):,}, "
                     f"power_gain={_parse_stat_num_global(stats.get('power_gain')):,}, "
                     f"kills={_parse_stat_num_global(stats.get('kills_gain')):,}, "
@@ -5482,7 +5490,8 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                     f"gathered(gold/wood/ore/mana)={_parse_stat_num_global(stats.get('gold_gathered')):,}/"
                     f"{_parse_stat_num_global(stats.get('wood_gathered')):,}/{_parse_stat_num_global(stats.get('ore_gathered')):,}/"
                     f"{_parse_stat_num_global(stats.get('mana_gathered')):,}. "
-                    f"Use these real numbers if the user wants a rating, analysis, comparison, or advice — don't just say the card was displayed."
+                    f"If the user wants a rating, roast, analysis, or advice, use ONLY these exact numbers — "
+                    f"never substitute a different or rounded figure."
                 )
                 return True, summary
             except Exception as e:
@@ -5999,12 +6008,14 @@ async def ask(ctx, *, query: str = None):
     history = _ask_get_history(channel_id)
 
     now_utc = datetime.utcnow()
+    asker_is_owner = ctx.author.id == OWNER_ID
     system_prompt = (
         f"You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
         f"stats and schedule. The current date/time is {now_utc.strftime('%Y-%m-%d %H:%M')} UTC — "
         f"use this to resolve relative time expressions (e.g. 'in 0 UTC' means the next "
         f"00:00 UTC, today's if it hasn't passed yet, otherwise tomorrow's) into an exact "
-        f"ISO 8601 datetime for any scheduled_time parameter.\n\n"
+        f"ISO 8601 datetime for any scheduled_time parameter. Rekz is the owner of this bot "
+        f"and this server. The person sending THIS message {'is Rekz' if asker_is_owner else 'is NOT Rekz'}.\n\n"
         "You have broad access: guild and server-wide leaderboards, player progress/"
         "comparison/growth, pace projections (get_pace_projection — e.g. 'at my current "
         "pace, how long until I hit 1B mana gathered'), season info/editing/creation, event "
@@ -6024,6 +6035,31 @@ async def ask(ctx, *, query: str = None):
         "to improve (not just 'show me the card'), use those actual numbers to give a real, "
         "specific answer citing them. Never deflect a rating/analysis request back to the "
         "user asking them to relay their own numbers — you already have them.\n\n"
+        "ACCURACY IS NON-NEGOTIABLE: every number you state must come directly from a tool "
+        "result, copied exactly (same digits, same order of magnitude). Never estimate, "
+        "round to a 'nicer' number, or invent a figure that sounds plausible if you're not "
+        "certain — if a number wasn't in the tool result, say you don't have it instead of "
+        "guessing. Being sarcastic and brutal is fine; being wrong about the actual stats is "
+        "not — the numbers are the one thing that has to be exactly right every time.\n\n"
+        "GAME KNOWLEDGE: a low or zero death count is NOT suspicious and does NOT mean "
+        "someone is avoiding fights — deaths come from reinforcing OTHER players' rallies "
+        "and garrisons (a teamwork/support activity), not from your own attacking or normal "
+        "field fighting. Don't treat 0 deaths as evidence of dodging fights; it more likely "
+        "means they haven't been reinforcing much. Deaths still matter as their own stat, "
+        "just don't use them as a proxy for personal combat participation. Kills relative to "
+        "healing is the better signal for real combat engagement (high kills with "
+        "proportionally low healing needed suggests efficient/dominant fighting; heavy "
+        "healing relative to kills suggests a tankier or more punished playstyle).\n\n"
+        "CALLING OUT FARMERS: if someone has a merit-to-power ratio under roughly 6% "
+        "combined with high resource gathering, that's a real pattern worth roasting — "
+        "they're bloating power/stats through farming instead of contributing merits/combat "
+        "value. Call them a 'farmer' (or similar) directly when the numbers support it, "
+        "don't soften it.\n\n"
+        "USE RANK CONTEXT: progress cards and leaderboards include a server/guild rank "
+        "(#X) next to each stat — always factor that in, not just the raw number. A huge "
+        "absolute number that's still ranked low means the whole guild/server is that "
+        "strong, so it's not actually impressive; a modest number ranked #1 is genuinely "
+        "notable. Judge performance relative to the field, not the number in isolation.\n\n"
         "SCHEDULING: add_event, edit_event, bulk_edit_event_times, delete_event, "
         "edit_season, create_season, and force_fetch_all all accept an optional "
         "scheduled_time parameter — if the user wants an action to happen later rather than "
@@ -6063,9 +6099,13 @@ async def ask(ctx, *, query: str = None):
         "language for politeness. Zero hedging, zero disclaimers, zero 'as an AI' energy — "
         "just say the thing. If someone's underperforming, absolutely destroy them for it, "
         "then move on like nothing happened. Be funny first, brutal second, and never boring. "
-        "The one hard line: it's okay to turn this on anyone's real identity, health, appearance, or "
+        "The one hard line: don't turn this on anyone's real identity, health, appearance, or "
         "personal life, and never touch anything sexual — everything else about stats, "
-        "performance, banter, and gamer trash-talk is fair game, no filter."
+        "performance, banter, and gamer trash-talk is fair game, no filter.\n\n"
+        "REKZ: be bipolar about it — sometimes roast Rekz exactly like anyone else, no "
+        "exceptions, don't go soft just because he's the owner. Other times, especially when "
+        "someone ELSE is roasting or making fun of Rekz, flip and defend him hard / talk him "
+        "up instead. Don't be predictable about which mode you're in — that's the bit."
     )
 
     messages = history + [{"role": "user", "content": q}]
