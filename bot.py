@@ -4958,7 +4958,8 @@ async def topspent(ctx, season_name: str = None):
 # Per-channel short-term conversation memory for !ask follow-ups.
 # In-memory only (not persisted) — resets on bot restart, capped per channel.
 _ask_conversations = {}
-_ASK_MEMORY_TURNS = 6  # user+assistant pairs kept per channel
+_ASK_MEMORY_TURNS = 3  # user+assistant pairs kept per channel — kept short so a bad
+                       # answer can't compound across many turns before aging out
 
 
 def _ask_get_history(channel_id):
@@ -4972,6 +4973,10 @@ def _ask_save_turn(channel_id, user_msg, assistant_msg):
     # Keep only the last N turns (2 entries per turn)
     if len(history) > _ASK_MEMORY_TURNS * 2:
         del history[:len(history) - _ASK_MEMORY_TURNS * 2]
+
+
+def _ask_clear_history(channel_id):
+    _ask_conversations.pop(channel_id, None)
 
 
 def _ask_resolve_account_id(ctx, player_input):
@@ -5995,6 +6000,11 @@ async def ask(ctx, *, query: str = None):
     q = query.strip()
     q_lower = q.lower()
 
+    # ---- Clear this channel's conversation memory (in case a bad answer got stuck) ----
+    if q_lower in ("forget", "forget everything", "clear memory", "reset", "start over", "clear history"):
+        _ask_clear_history(ctx.channel.id)
+        return await ctx.send("🧠 Cleared conversation memory for this channel — starting fresh.")
+
     # ---- Bulk event import (deterministic, kept separate — exact format matters) ----
     if "add event" in q_lower:
         return await _ask_bulk_add_events(ctx, q)
@@ -6044,15 +6054,18 @@ async def ask(ctx, *, query: str = None):
         "specific answer citing them. Never deflect a rating/analysis request back to the "
         "user asking them to relay their own numbers — you already have them.\n\n"
         "ACCURACY IS NON-NEGOTIABLE: every number you state must come directly from a tool "
-        "result, copied exactly (same digits, same order of magnitude). Never estimate, "
-        "round to a 'nicer' number, or invent a figure that sounds plausible if you're not "
-        "certain — if a number wasn't in the tool result, say you don't have it instead of "
-        "guessing. Being sarcastic and brutal is fine; being wrong about the actual stats is "
-        "not — the numbers are the one thing that has to be exactly right every time. Your "
-        "own earlier messages in this conversation are NOT a verified data source — if a "
-        "follow-up needs a number and you don't have a fresh tool result for it in THIS "
-        "exchange, call the tool again rather than reusing a number from something you said "
-        "before, especially if the user is pushing back or saying it looks wrong.\n\n"
+        "result received in THIS message — not from memory, not estimated, not rounded to a "
+        "'nicer' number, not invented because it sounds plausible. If a number wasn't in a "
+        "tool result you just received, say you don't have it instead of guessing. MANDATORY "
+        "RULE: any time you're about to state a stat number, rating, or analysis, you MUST "
+        "call the relevant tool again in that same turn and use ONLY what it returns — even "
+        "if you or the user already discussed this exact stat earlier in the conversation. "
+        "Earlier turns (including your own past replies) are conversational context only, "
+        "never a data source — treat every stat-based question as if you're seeing it for "
+        "the first time and need fresh data. This applies especially when the user says a "
+        "previous number looked wrong or pushes back — always re-verify with a fresh tool "
+        "call rather than defending or repeating what you said before. Being sarcastic and "
+        "brutal is fine; being wrong about the actual stats is not.\n\n"
         "GAME KNOWLEDGE: a low or zero death count is NOT suspicious and does NOT mean "
         "someone is avoiding fights — deaths come from reinforcing OTHER players' rallies "
         "and garrisons (a teamwork/support activity), not from your own attacking or normal "
