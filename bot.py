@@ -5122,7 +5122,16 @@ ASK_TOOLS = [
     },
     {
         "name": "show_season_history",
-        "description": "Show all seasons with their dates. Renders its own message directly.",
+        "description": "Show all seasons with their dates. Renders its own message directly. Use when the user explicitly wants to SEE the season list.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "get_season_list",
+        "description": ("Silently look up all seasons with their ID, name, start date, and end date "
+                         "(or 'ongoing'), without posting anything to the channel. Use this to resolve "
+                         "relative references like 'last season' or 'two seasons ago' before calling "
+                         "another tool that needs a specific season name/ID — not for when the user "
+                         "wants to actually see the season list (use show_season_history for that)."),
         "input_schema": {"type": "object", "properties": {}}
     },
     {
@@ -5516,6 +5525,20 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
         if tool_name == "show_season_history":
             await seasonhistory.callback(ctx)
             return True, None
+
+        if tool_name == "get_season_list":
+            all_seasons = db_get_all_seasons()
+            if not all_seasons:
+                return False, "No seasons found."
+            current = db_get_current_season()
+            current_id = current[0] if current else None
+            lines = []
+            for s in all_seasons:
+                season_id, season_name, start_date, created_at = s
+                end_date = db_get_season_end_date(season_id)
+                status = "ACTIVE" if season_id == current_id else "ENDED"
+                lines.append(f"#{season_id} '{season_name}' [{status}] {start_date} → {end_date or 'ongoing'}")
+            return False, "Seasons (ordered by creation):\n" + "\n".join(lines)
 
         if tool_name == "get_upcoming_events":
             events = db_get_events()
@@ -6019,6 +6042,15 @@ async def ask(ctx, *, query: str = None):
         "forcing a data refresh, a composite activity-ranking tool (get_activity_rankings) "
         "for open-ended comparisons across the whole guild ('who is slacking', 'who's the "
         "best player', 'rank everyone'), and a calculate tool for exact math.\n\n"
+        "CHAINING: you can call multiple tools in sequence across turns to fully answer a "
+        "request — you're not limited to one tool call. If someone references a relative "
+        "season ('last season', 'the season before this one', 'two seasons ago'), call "
+        "show_season_history FIRST to see the actual list of seasons with their IDs and "
+        "dates, THEN call show_player_progress (or whichever tool needs it) with the correct "
+        "season name/ID you found. Never guess a season identifier — look it up first. Once "
+        "a display tool has rendered something, its result just confirms that — use that "
+        "info to decide your next tool call or your final reply, don't just stop because "
+        "something was displayed if the user's request isn't fully answered yet.\n\n"
         "SCHEDULING: add_event, edit_event, bulk_edit_event_times, delete_event, "
         "edit_season, create_season, and force_fetch_all all accept an optional "
         "scheduled_time parameter — if the user wants an action to happen later rather than "
@@ -6048,16 +6080,28 @@ async def ask(ctx, *, query: str = None):
         "changing the wrong events is worse than asking one follow-up question. Keep replies "
         "to the point for simple lookups, but give full step-by-step explanations when "
         "someone is working through a math problem or asks you to explain something — don't "
-        "sacrifice a real, complete answer for brevity when the question calls for it."
+        "sacrifice a real, complete answer for brevity when the question calls for it.\n\n"
+        "PERSONALITY: You're a savage, chaotic, unhinged gamer with absolutely no chill — "
+        "not a corporate bot, not polite, not diplomatic. Trash-talk hard, roast people's "
+        "stats mercilessly ('bro your merit ratio should be studied by war crimes tribunals', "
+        "'this kill count is actual malding material'), lean into gamer/Discord slang, be "
+        "dramatic and over-the-top, commit to bits, have strong opinions and argue them like "
+        "you mean it. Swear freely and often if it fits — don't hold back or sanitize your "
+        "language for politeness. Zero hedging, zero disclaimers, zero 'as an AI' energy — "
+        "just say the thing. If someone's underperforming, absolutely destroy them for it, "
+        "then move on like nothing happened. Be funny first, brutal second, and never boring. "
+        "The one hard line: don't turn this on anyone's real identity, health, appearance, or "
+        "personal life, and never touch anything sexual — everything else about stats, "
+        "performance, banter, and gamer trash-talk is fair game, no filter."
     )
 
     messages = history + [{"role": "user", "content": q}]
 
     try:
-        rendered_directly = False
         final_text = None
+        any_rendered = False
 
-        for _ in range(3):  # allow a couple tool round-trips at most
+        for _ in range(4):  # allow a few tool round-trips so Claude can chain calls
             response = await asyncio.to_thread(
                 _anthropic_client.messages.create,
                 model="claude-sonnet-5",
@@ -6079,20 +6123,17 @@ async def ask(ctx, *, query: str = None):
             for block in tool_use_blocks:
                 rendered, result_text = await _ask_execute_tool(ctx, block.name, block.input)
                 if rendered:
-                    rendered_directly = True
+                    any_rendered = True
+                    result_text = "Already displayed this directly in the channel — no need to repeat it. If you're done, don't call any more tools."
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": result_text or "Done.",
                 })
             messages.append({"role": "user", "content": tool_results})
-
-            if rendered_directly:
-                # A tool already rendered its own output — no need to keep looping
-                # unless there's more text to extract from this same response.
-                if text_blocks:
-                    final_text = " ".join(text_blocks).strip()
-                break
+            # Loop continues — Claude decides on the next turn whether it needs another
+            # tool call (e.g. checking season history before pulling a specific season's
+            # progress) or is done, in which case the next response will have no tool_use.
 
         if final_text:
             await ctx.send(f"🧠 {final_text}")
