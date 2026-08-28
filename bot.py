@@ -1884,7 +1884,7 @@ def db_get_latest_season_progress(season_id, account_id):
                        gold_spent, wood_spent, ore_spent, mana_spent,
                        gold_gathered, wood_gathered, ore_gathered, mana_gathered, lord_name, data_date,
                        infantry_merits, cavalry_merits, mage_merits, marksman_merits, other_merits,
-                       t45_healed, t45_dead
+                       t45_healed, t45_dead, highest_power
                 FROM season_progress
                 WHERE season_id=? AND account_id=?
                 ORDER BY data_date DESC
@@ -1923,7 +1923,8 @@ def db_get_latest_season_progress(season_id, account_id):
                 "marksman_merits": row[23],
                 "other_merits": row[24],
                 "t45_healed": row[25],
-                "t45_dead": row[26]
+                "t45_dead": row[26],
+                "highest_power": row[27]
             }
             return stats
         finally:
@@ -5786,16 +5787,22 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 if not snap:
                     continue
                 merits = _num(snap.get("merits"))
-                power = _num(snap.get("power_gain"))
+                power_gain = _num(snap.get("power_gain"))
+                total_power = _num(snap.get("highest_power"))
                 kills = _num(snap.get("kills_gain"))
                 deaths = _num(snap.get("deads_gain"))
                 gathered = sum(_num(snap.get(k)) for k in
                                ["gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"])
-                ratio = round((merits / power * 100), 1) if power > 0 else None
+                # Merit Ratio = merits / TOTAL power, not merits / power gained this season.
+                # Fall back to power_gain only if we don't have a cached highest_power for
+                # this member yet (e.g. they've never had !progress run for them).
+                ratio_base = total_power if total_power > 0 else power_gain
+                ratio = round((merits / ratio_base * 100), 1) if ratio_base > 0 else None
                 rows.append({
                     "name": snap.get("lord_name") or lord["name"],
-                    "merits": merits, "power_gain": power, "merit_ratio_pct": ratio,
-                    "kills": kills, "deaths": deaths, "resources_gathered": gathered,
+                    "merits": merits, "power_gain": power_gain, "total_power": total_power,
+                    "merit_ratio_pct": ratio, "kills": kills, "deaths": deaths,
+                    "resources_gathered": gathered,
                 })
 
             if not rows:
@@ -5803,11 +5810,12 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
 
             rows.sort(key=lambda r: r["merit_ratio_pct"] if r["merit_ratio_pct"] is not None else -1, reverse=True)
 
-            lines = [f"Season: {season_name}. Per-member data (merit_ratio_pct = merits gained relative to power gained — higher means more active/efficient relative to their growth, lower can indicate low activity):"]
+            lines = [f"Season: {season_name}. Per-member data (merit_ratio_pct = merits gained divided by TOTAL power — higher means more efficient/active relative to their overall size, lower can indicate farming/low activity):"]
             for r in rows:
                 ratio_str = f"{r['merit_ratio_pct']}%" if r["merit_ratio_pct"] is not None else "n/a"
+                power_display = f"{r['total_power']:,}" if r["total_power"] else f"{r['power_gain']:,} (season gain only, no total power cached)"
                 lines.append(
-                    f"{r['name']}: merits={r['merits']:,}, power_gain={r['power_gain']:,}, "
+                    f"{r['name']}: merits={r['merits']:,}, total_power={power_display}, "
                     f"merit_ratio={ratio_str}, kills={r['kills']:,}, deaths={r['deaths']:,}, "
                     f"resources_gathered={r['resources_gathered']:,}"
                 )
@@ -6040,7 +6048,11 @@ async def ask(ctx, *, query: str = None):
         "round to a 'nicer' number, or invent a figure that sounds plausible if you're not "
         "certain — if a number wasn't in the tool result, say you don't have it instead of "
         "guessing. Being sarcastic and brutal is fine; being wrong about the actual stats is "
-        "not — the numbers are the one thing that has to be exactly right every time.\n\n"
+        "not — the numbers are the one thing that has to be exactly right every time. Your "
+        "own earlier messages in this conversation are NOT a verified data source — if a "
+        "follow-up needs a number and you don't have a fresh tool result for it in THIS "
+        "exchange, call the tool again rather than reusing a number from something you said "
+        "before, especially if the user is pushing back or saying it looks wrong.\n\n"
         "GAME KNOWLEDGE: a low or zero death count is NOT suspicious and does NOT mean "
         "someone is avoiding fights — deaths come from reinforcing OTHER players' rallies "
         "and garrisons (a teamwork/support activity), not from your own attacking or normal "
@@ -6119,6 +6131,7 @@ async def ask(ctx, *, query: str = None):
                 _anthropic_client.messages.create,
                 model="claude-sonnet-5",
                 max_tokens=900,
+                temperature=0.2,  # low temperature — this bot cites real numbers, accuracy matters more than variety
                 system=system_prompt,
                 tools=ASK_TOOLS,
                 messages=messages,
