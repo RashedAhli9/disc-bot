@@ -6131,7 +6131,6 @@ async def ask(ctx, *, query: str = None):
                 _anthropic_client.messages.create,
                 model="claude-sonnet-5",
                 max_tokens=900,
-                temperature=0.2,  # low temperature — this bot cites real numbers, accuracy matters more than variety
                 system=system_prompt,
                 tools=ASK_TOOLS,
                 messages=messages,
