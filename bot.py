@@ -5481,7 +5481,15 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 if not season:
                     return True, None
                 season_id, season_name, start_date, _ = season
-                end_ref = date.today().isoformat()
+
+                # For the CURRENT active season, fetch up to today. For an OLD/ended season,
+                # cap at that season's actual end_date — using today() here (like the bug
+                # that used to exist) pushes the range past the season's real end and pulls
+                # real-but-wrong-range data from COS, since it bleeds into whatever came next.
+                current_season = db_get_current_season()
+                is_current = current_season and current_season[0] == season_id
+                end_ref = date.today().isoformat() if is_current else (db_get_season_end_date(season_id) or date.today().isoformat())
+
                 stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
                 if not stats:
                     return True, None
@@ -6006,7 +6014,12 @@ async def ask(ctx, *, query: str = None):
         return await ctx.send("🧠 Cleared conversation memory for this channel — starting fresh.")
 
     # ---- Bulk event import (deterministic, kept separate — exact format matters) ----
-    if "add event" in q_lower:
+    # Only trigger this for genuine multi-line bulleted lists — a single natural-language
+    # request like "add event called townhall for tomorrow 16 utc" should go through the
+    # normal AI tool-use path (add_event tool), not this strict bullet-format parser.
+    import re as _re_bulk_check
+    looks_like_bulk_list = "\n" in q and _re_bulk_check.search(r'[A-Za-z]{3,9}\s+\d{1,2}\s*\([A-Za-z]{3}\)', q)
+    if "add event" in q_lower and looks_like_bulk_list:
         return await _ask_bulk_add_events(ctx, q)
 
     # ---- No AI configured: fall back to the original keyword-only leaderboard router ----
@@ -6030,9 +6043,11 @@ async def ask(ctx, *, query: str = None):
     system_prompt = (
         f"You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
         f"stats and schedule. The current date/time is {now_utc.strftime('%Y-%m-%d %H:%M')} UTC — "
-        f"use this to resolve relative time expressions (e.g. 'in 0 UTC' means the next "
-        f"00:00 UTC, today's if it hasn't passed yet, otherwise tomorrow's) into an exact "
-        f"ISO 8601 datetime for any scheduled_time parameter. Rekz is the owner of this bot "
+        f"use this to resolve ANY relative time expression ('tomorrow', 'in 0 UTC' meaning "
+        f"the next 00:00 UTC, 'next Friday', etc.) into exact values for whichever date/time "
+        f"parameters a tool needs (date, time_utc, scheduled_time, new_date, new_time_utc, "
+        f"etc.) — never leave a relative expression unresolved or ask the user to restate it "
+        f"in a different format. Rekz is the owner of this bot "
         f"and this server. The person sending THIS message {'is Rekz' if asker_is_owner else 'is NOT Rekz'}.\n\n"
         "You have broad access: guild and server-wide leaderboards, player progress/"
         "comparison/growth, pace projections (get_pace_projection — e.g. 'at my current "
