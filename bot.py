@@ -1411,6 +1411,19 @@ def db_get_season_end_date(season_id):
     conn.close()
     return row[0] if row and row[0] else None
 
+def resolve_leaderboard_end_date(season_id):
+    """
+    For the CURRENT active season, query up to today. For an OLD/ended season, cap at
+    that season's actual end_date instead — querying an ended season up to today bleeds
+    the range into whatever season(s) came after it and produces wrong/zero results.
+    Used by every !top*/!rss leaderboard command.
+    """
+    current_season = db_get_current_season()
+    is_current = current_season and current_season[0] == season_id
+    if is_current:
+        return date.today().isoformat()
+    return db_get_season_end_date(season_id) or date.today().isoformat()
+
 def db_set_season_end_date(season_id, end_date):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -4460,7 +4473,7 @@ async def topmana(ctx, season_name: str = None):
             return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
     season_id, season_name_display, start_date, created_at = season
-    today = date.today().isoformat()
+    today = resolve_leaderboard_end_date(season_id)
     
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
@@ -4551,7 +4564,7 @@ async def topdeaths(ctx, season_name: str = None):
             return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
     season_id, season_name_display, start_date, created_at = season
-    today = date.today().isoformat()
+    today = resolve_leaderboard_end_date(season_id)
     
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
@@ -4642,7 +4655,7 @@ async def topmerits(ctx, season_name: str = None):
             return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
     season_id, season_name_display, start_date, created_at = season
-    today = date.today().isoformat()
+    today = resolve_leaderboard_end_date(season_id)
     
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
@@ -4710,10 +4723,21 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
     if not lords:
         return await ctx.send("❌ No members with numeric roles found.")
 
+    # For the CURRENT season, base candidates on today (data may still be delayed by COS).
+    # For an OLD/ended season, base them on that season's real end_date instead — using
+    # today() here would query dates past the season's actual end and pull nothing.
+    current_season_check = db_get_current_season()
+    is_current_season = current_season_check and current_season_check[0] == season_id
+    if is_current_season:
+        base_date = date.today()
+    else:
+        end_date_str = db_get_season_end_date(season_id) or date.today().isoformat()
+        base_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+
     adv_candidates = [
-        date.today().isoformat(),
-        (date.today() - timedelta(days=1)).isoformat(),
-        (date.today() - timedelta(days=2)).isoformat(),
+        base_date.isoformat(),
+        (base_date - timedelta(days=1)).isoformat(),
+        (base_date - timedelta(days=2)).isoformat(),
     ]
 
     def parse_val(raw):
@@ -4780,8 +4804,11 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
 
     # Use the most recent resolved date across all lords as the "data as of" date shown in the header
     data_as_of = max(resolved_dates) if resolved_dates else adv_candidates[0]
-    is_up_to_date = data_as_of == date.today().isoformat()
-    header_note = "up to date" if is_up_to_date else f"COS hasn't released today's yet"
+    if is_current_season:
+        is_up_to_date = data_as_of == date.today().isoformat()
+        header_note = "up to date" if is_up_to_date else "COS hasn't released today's yet"
+    else:
+        header_note = "final"
 
     medals = ["🥇", "🥈", "🥉"]
     output = f"```{emoji} Top {label} — {season_name_display} (data from {data_as_of}, {header_note})\n"
@@ -4870,7 +4897,7 @@ async def topheal(ctx, season_name: str = None):
             return await ctx.send("❌ No season active. Use `/newseason` to start one.")
 
     season_id, season_name_display, start_date, created_at = season
-    today = date.today().isoformat()
+    today = resolve_leaderboard_end_date(season_id)
 
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
@@ -4923,7 +4950,7 @@ async def topspent(ctx, season_name: str = None):
             return await ctx.send("❌ No season active. Use `/newseason` to start one.")
 
     season_id, season_name_display, start_date, created_at = season
-    today = date.today().isoformat()
+    today = resolve_leaderboard_end_date(season_id)
 
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
@@ -6440,7 +6467,7 @@ async def rss_leaderboard(ctx, season_name: str = None):
             return await ctx.send("❌ No season active. Use `/newseason` to start one.")
     
     season_id, season_name_display, start_date, created_at = season
-    today = date.today().isoformat()
+    today = resolve_leaderboard_end_date(season_id)
     
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
