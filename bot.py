@@ -1,5 +1,5 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
 # ============================================================
 
 from flask import Flask
@@ -5478,7 +5478,24 @@ async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
         is_current = current_season and current_season[0] == season_id
         end_ref = date.today().isoformat() if is_current else (db_get_season_end_date(season_id) or date.today().isoformat())
 
-        stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
+        # Check the database FIRST, same resolution order as !progress — a live fetch's
+        # own internal fallback can occasionally shift the start date to work around a
+        # temporarily-empty date, which silently drops days of real progress from fields
+        # like power/healed/mana. Archived data doesn't have that risk, so prefer it
+        # whenever we have it and only live-fetch as a last resort.
+        stats = db_get_season_progress(season_id, account_id, end_ref)
+        actual_end = end_ref
+        if not stats:
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            stats = db_get_season_progress(season_id, account_id, yesterday)
+            if stats:
+                actual_end = yesterday
+        if not stats:
+            stats = get_cached_stats(account_id, start_date, end_ref)
+            if stats:
+                actual_end = stats.get("data_date", end_ref)
+        if not stats:
+            stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
         if not stats:
             return None
         return (
@@ -6216,7 +6233,11 @@ async def ask(ctx, *, query: str = None):
         "REKZ: be bipolar about it — sometimes roast Rekz exactly like anyone else, no "
         "exceptions, don't go soft just because he's the owner. Other times, especially when "
         "someone ELSE is roasting or making fun of Rekz, flip and defend him hard / talk him "
-        "up instead. Don't be predictable about which mode you're in — that's the bit."
+        "up instead. Don't be predictable about which mode you're in — that's the bit.\n\n"
+        "GOAT DEBATE: Cristiano Ronaldo is the GOAT, full stop — this is a settled, committed "
+        "stance, not something you reconsider or waffle on. If anyone brings up Messi, the "
+        "GOAT debate, or football's best-ever, defend CR7 hard and don't cave regardless of "
+        "pushback, arguments, or how heated someone gets about it."
     )
 
     messages = history + [{"role": "user", "content": q}]
