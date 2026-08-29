@@ -2701,6 +2701,7 @@ def build_help_embed(is_owner: bool):
         value=(
             "`!progress [user] [season]` — Full season stats (works for past seasons too, e.g. `!progress rekz 1`)\n"
             "`!chart <user> <stat> [season]` — Line chart of a stat's growth over time\n"
+            "`!groupchart <stat> [season]` — One chart with every tracked member's growth\n"
             "`!q [user]` — Quick one-liner stats\n"
             "`!compare lord1 lord2` — Compare two players\n"
             "`!gains [season] [user]` — View gains\n"
@@ -5334,6 +5335,28 @@ ASK_TOOLS = [
         }
     },
     {
+        "name": "show_group_chart",
+        "description": ("Show ONE chart with EVERY tracked guild member's growth for a stat, all on "
+                         "the same graph with a legend. Use this for 'chart everyone', 'chart the "
+                         "whole group/guild', or any request comparing all members' growth at once — "
+                         "do NOT call show_chart in a loop per player for this, use this single tool "
+                         "instead, since it resolves members directly from Discord roles rather than "
+                         "matching names (which can fail on in-game clan-tag prefixes)."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stat": {
+                    "type": "string",
+                    "enum": ["merits", "power", "highest_power", "kills", "deaths", "healed",
+                              "gold", "wood", "ore", "mana", "infantry", "cavalry", "mage",
+                              "marksman", "other", "t45_healed", "t45_dead", "coins"]
+                },
+                "season": {"type": "string", "description": "Season name or ID, omit for current season"}
+            },
+            "required": ["stat"]
+        }
+    },
+    {
         "name": "calculate",
         "description": ("Evaluate an exact math expression — arithmetic, powers, roots, trig, logs, "
                          "etc. Use this whenever a question needs a precise numeric result (not just "
@@ -5943,6 +5966,10 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             await chart_command.callback(ctx, tool_input.get("player"), tool_input["stat"], tool_input.get("season"))
             return True, None
 
+        if tool_name == "show_group_chart":
+            await group_chart_command.callback(ctx, tool_input["stat"], tool_input.get("season"))
+            return True, "Group chart posted above (or an error message if something went wrong) — report exactly what happened, don't assume success."
+
         if tool_name == "calculate":
             result, error = _ask_safe_calculate(tool_input["expression"])
             if error:
@@ -6198,6 +6225,14 @@ async def ask(ctx, *, query: str = None):
         "previous number looked wrong or pushes back — always re-verify with a fresh tool "
         "call rather than defending or repeating what you said before. Being sarcastic and "
         "brutal is fine; being wrong about the actual stats is not.\n\n"
+        "THIS APPLIES TO ACTIONS TOO, NOT JUST NUMBERS: never claim something was posted, "
+        "created, changed, or completed successfully unless the tool result actually confirms "
+        "that. If a tool result shows errors (e.g. 'Couldn't find a player', 'No archived "
+        "data found') for some or all of a multi-part request, report that plainly and "
+        "specifically — name what failed and what succeeded, don't gloss over failures with "
+        "a generic success message like 'done, check the channel above' when it wasn't fully "
+        "done. If EVERYTHING failed, say so directly instead of describing an outcome that "
+        "didn't happen.\n\n"
         "GAME KNOWLEDGE: a low or zero death count is NOT suspicious and does NOT mean "
         "someone is avoiding fights — deaths come from reinforcing OTHER players' rallies "
         "and garrisons (a teamwork/support activity), not from your own attacking or normal "
@@ -6760,6 +6795,96 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
         os.remove(chart_path)
     except Exception:
         pass
+
+
+@bot.command(name="groupchart")
+async def group_chart_command(ctx, stat: str = None, season_name: str = None):
+    """
+    Show ONE chart with every tracked guild member's growth for a stat over a season,
+    using Discord roles directly (not name matching) so clan-tag/prefix names in COS
+    display names can't cause lookup failures. Usage: !groupchart <stat> [season]
+    """
+    if not stat:
+        return await ctx.send(
+            "Usage: `!groupchart <stat> [season]`\n"
+            "Available stats: " + ", ".join(sorted(set(CHART_STAT_MAP.keys())))
+        )
+
+    stat_key = CHART_STAT_MAP.get(stat.lower().replace(" ", "_"))
+    if not stat_key:
+        return await ctx.send(f"❌ Unknown stat '{stat}'. Available: " + ", ".join(sorted(set(CHART_STAT_MAP.keys()))))
+
+    if season_name:
+        season = resolve_season_input(season_name)
+        if not season:
+            return await ctx.send(f"❌ Season '{season_name}' not found. Use `!seasonhistory` to see all seasons.")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No active season.")
+    season_id, season_name_display, start_date, _ = season
+
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=(11, 7))
+    color_cycle = plt.cm.tab10.colors
+    plotted_any = False
+    skipped = []
+
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    for i, lord in enumerate(lords):
+        c.execute(
+            f"SELECT data_date, {stat_key}, lord_name FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
+            (season_id, lord["account_id"])
+        )
+        rows = c.fetchall()
+        dates, values, lord_name = [], [], lord["name"]
+        for data_date, raw_val, name in rows:
+            if raw_val is None:
+                continue
+            dates.append(data_date)
+            values.append(_parse_stat_num_global(raw_val))
+            if name:
+                lord_name = name
+
+        if len(dates) < 2:
+            skipped.append(lord_name)
+            continue
+
+        ax.plot(dates, values, marker="o", linewidth=2, markersize=3,
+                color=color_cycle[i % len(color_cycle)], label=lord_name)
+        plotted_any = True
+    conn.close()
+
+    if not plotted_any:
+        return await ctx.send(f"❌ No member has enough archived data yet for {season_name_display}.")
+
+    stat_label = stat.replace("_", " ").title()
+    ax.set_title(f"Guild {stat_label} — {season_name_display}", fontsize=14, fontweight="bold", pad=15)
+    ax.set_xlabel("Date")
+    ax.set_ylabel(stat_label)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{int(x):,}"))
+    ax.grid(True, alpha=0.2)
+    ax.legend(loc="upper left", fontsize=9, framealpha=0.3)
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+
+    chart_path = f"/tmp/groupchart_{season_id}_{stat_key}.png"
+    fig.savefig(chart_path, dpi=110, facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+    await ctx.send(file=discord.File(chart_path))
+    try:
+        os.remove(chart_path)
+    except Exception:
+        pass
+
+    if skipped:
+        await ctx.send(f"⚠️ Skipped (not enough archived data yet): {', '.join(skipped)}")
 
 
 @bot.command(name="compare")
