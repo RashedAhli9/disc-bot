@@ -4,3 +4,4 @@ flask
 aiohttp
 openpyxl
 anthropic>=0.34
+matplotlib
