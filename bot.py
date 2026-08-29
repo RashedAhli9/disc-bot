@@ -40,6 +40,10 @@ import io
 import zipfile
 import asyncio
 import anthropic
+import matplotlib
+matplotlib.use("Agg")  # headless backend — no display needed on a server
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import aiohttp
 import openpyxl
 import io
@@ -2683,6 +2687,7 @@ def build_help_embed(is_owner: bool):
         name="📊 Progress & Stats",
         value=(
             "`!progress [user] [season]` — Full season stats (works for past seasons too, e.g. `!progress rekz 1`)\n"
+            "`!chart <user> <stat> [season]` — Line chart of a stat's growth over time\n"
             "`!q [user]` — Quick one-liner stats\n"
             "`!compare lord1 lord2` — Compare two players\n"
             "`!gains [season] [user]` — View gains\n"
@@ -5053,7 +5058,27 @@ ASK_TOOLS = [
     },
     {
         "name": "show_player_progress",
-        "description": "Show the full progress report card for one player. Renders its own embed directly.",
+        "description": ("Show the full progress report card for one player, as a visual embed "
+                         "posted to the channel. Use this ONLY when the user explicitly wants to "
+                         "SEE the card (e.g. 'show me', 'pull up', first mention of a player). "
+                         "Do NOT call this again for follow-up questions about a player/season "
+                         "already shown earlier in this conversation — use get_player_stats "
+                         "instead so the channel doesn't get spammed with a repeated card."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player": {"type": "string", "description": "Player name, or omit for the asker's own progress"},
+                "season": {"type": "string", "description": "Season name or ID, omit for current season"}
+            }
+        }
+    },
+    {
+        "name": "get_player_stats",
+        "description": ("Get a player's exact real stats as data, WITHOUT posting the visual card "
+                         "to the channel. Use this for follow-up questions, ratings, analysis, or "
+                         "'why' after a card has already been shown (or the user just wants an "
+                         "answer, not the card) — anywhere you need real numbers without re-spamming "
+                         "the channel with another copy of the progress card."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -5262,6 +5287,26 @@ ASK_TOOLS = [
         "input_schema": {"type": "object", "properties": {}}
     },
     {
+        "name": "show_chart",
+        "description": ("Show a line chart image of how a stat grew over a season for one player, "
+                         "using the daily archived history. Renders its own image directly in the "
+                         "channel — use when someone wants to SEE growth over time, not just a number."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "player": {"type": "string", "description": "Player name, or omit for the asker"},
+                "stat": {
+                    "type": "string",
+                    "enum": ["merits", "power", "highest_power", "kills", "deaths", "healed",
+                              "gold", "wood", "ore", "mana", "infantry", "cavalry", "mage",
+                              "marksman", "other", "t45_healed", "t45_dead", "coins"]
+                },
+                "season": {"type": "string", "description": "Season name or ID, omit for current season"}
+            },
+            "required": ["stat"]
+        }
+    },
+    {
         "name": "calculate",
         "description": ("Evaluate an exact math expression — arithmetic, powers, roots, trig, logs, "
                          "etc. Use this whenever a question needs a precise numeric result (not just "
@@ -5409,6 +5454,52 @@ def _ask_is_admin(ctx):
     return ctx.author.id == OWNER_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
 
 
+async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
+    """
+    Fetch a player's exact real stats as a text summary for Claude to reason with —
+    shared by show_player_progress (which also renders the visual card) and
+    get_player_stats (data only, no render, used for follow-up questions so the
+    channel doesn't get spammed with a repeated card).
+    Returns the summary string, or None if it couldn't be fetched.
+    """
+    try:
+        account_id, err = _ask_resolve_account_id(ctx, player_input)
+        if err:
+            return None
+        season = resolve_season_input(season_input) if season_input else db_get_current_season()
+        if not season:
+            return None
+        season_id, season_name, start_date, _ = season
+
+        # For the CURRENT active season, fetch up to today. For an OLD/ended season, cap at
+        # that season's actual end_date — using today() would push the range past the
+        # season's real end and pull real-but-wrong-range data from COS.
+        current_season = db_get_current_season()
+        is_current = current_season and current_season[0] == season_id
+        end_ref = date.today().isoformat() if is_current else (db_get_season_end_date(season_id) or date.today().isoformat())
+
+        stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
+        if not stats:
+            return None
+        return (
+            f"EXACT VERIFIED DATA (copy these numbers precisely, do not alter or round them) "
+            f"for {stats.get('lord_name', account_id)}, season {season_name} "
+            f"({start_date} to {actual_end}): merits={_parse_stat_num_global(stats.get('merits')):,}, "
+            f"power_gain={_parse_stat_num_global(stats.get('power_gain')):,}, "
+            f"kills={_parse_stat_num_global(stats.get('kills_gain')):,}, "
+            f"deaths={_parse_stat_num_global(stats.get('deads_gain')):,}, "
+            f"healed={_parse_stat_num_global(stats.get('healed_gain')):,}, "
+            f"gathered(gold/wood/ore/mana)={_parse_stat_num_global(stats.get('gold_gathered')):,}/"
+            f"{_parse_stat_num_global(stats.get('wood_gathered')):,}/{_parse_stat_num_global(stats.get('ore_gathered')):,}/"
+            f"{_parse_stat_num_global(stats.get('mana_gathered')):,}. "
+            f"If the user wants a rating, roast, analysis, or advice, use ONLY these exact numbers — "
+            f"never substitute a different or rounded figure."
+        )
+    except Exception as e:
+        log_info(f"[ASK player stats fetch] {e}")
+        return None
+
+
 SCHEDULABLE_TOOLS = {"add_event", "edit_event", "bulk_edit_event_times", "delete_event",
                      "edit_season", "create_season", "force_fetch_all"}
 
@@ -5470,47 +5561,17 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
 
         if tool_name == "show_player_progress":
             await progress.callback(ctx, tool_input.get("player"), tool_input.get("season"))
+            summary = await _ask_fetch_player_stats_summary(ctx, tool_input.get("player"), tool_input.get("season"))
+            return True, summary
 
-            # Also fetch the raw numbers so you have real data to reason with if the user
-            # wants analysis/rating/advice, not just the visual card.
-            try:
-                account_id, err = _ask_resolve_account_id(ctx, tool_input.get("player"))
-                if err:
-                    return True, None
-                season = resolve_season_input(tool_input.get("season")) if tool_input.get("season") else db_get_current_season()
-                if not season:
-                    return True, None
-                season_id, season_name, start_date, _ = season
-
-                # For the CURRENT active season, fetch up to today. For an OLD/ended season,
-                # cap at that season's actual end_date — using today() here (like the bug
-                # that used to exist) pushes the range past the season's real end and pulls
-                # real-but-wrong-range data from COS, since it bleeds into whatever came next.
-                current_season = db_get_current_season()
-                is_current = current_season and current_season[0] == season_id
-                end_ref = date.today().isoformat() if is_current else (db_get_season_end_date(season_id) or date.today().isoformat())
-
-                stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
-                if not stats:
-                    return True, None
-                summary = (
-                    f"EXACT VERIFIED DATA (copy these numbers precisely, do not alter or round them) "
-                    f"for {stats.get('lord_name', account_id)}, season {season_name} "
-                    f"({start_date} to {actual_end}): merits={_parse_stat_num_global(stats.get('merits')):,}, "
-                    f"power_gain={_parse_stat_num_global(stats.get('power_gain')):,}, "
-                    f"kills={_parse_stat_num_global(stats.get('kills_gain')):,}, "
-                    f"deaths={_parse_stat_num_global(stats.get('deads_gain')):,}, "
-                    f"healed={_parse_stat_num_global(stats.get('healed_gain')):,}, "
-                    f"gathered(gold/wood/ore/mana)={_parse_stat_num_global(stats.get('gold_gathered')):,}/"
-                    f"{_parse_stat_num_global(stats.get('wood_gathered')):,}/{_parse_stat_num_global(stats.get('ore_gathered')):,}/"
-                    f"{_parse_stat_num_global(stats.get('mana_gathered')):,}. "
-                    f"If the user wants a rating, roast, analysis, or advice, use ONLY these exact numbers — "
-                    f"never substitute a different or rounded figure."
-                )
-                return True, summary
-            except Exception as e:
-                log_info(f"[ASK show_player_progress data fetch] {e}")
-                return True, None
+        if tool_name == "get_player_stats":
+            # Same real numbers as show_player_progress, but does NOT render the visual
+            # card — use this for follow-ups/analysis so the channel doesn't get spammed
+            # with a repeated card every time a question needs the underlying data.
+            summary = await _ask_fetch_player_stats_summary(ctx, tool_input.get("player"), tool_input.get("season"))
+            if not summary:
+                return False, "Couldn't fetch stats for that player/season."
+            return False, summary
 
         if tool_name == "compare_players":
             await compare.callback(ctx, tool_input.get("player1"), tool_input.get("player2"))
@@ -5834,6 +5895,10 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 )
             return False, "\n".join(lines)
 
+        if tool_name == "show_chart":
+            await chart_command.callback(ctx, tool_input.get("player"), tool_input["stat"], tool_input.get("season"))
+            return True, None
+
         if tool_name == "calculate":
             result, error = _ask_safe_calculate(tool_input["expression"])
             if error:
@@ -6062,12 +6127,14 @@ async def ask(ctx, *, query: str = None):
         "season ('last season', 'the season before this one', 'two seasons ago'), use "
         "get_season_list FIRST to see the actual list of seasons with their IDs and dates, "
         "THEN call show_player_progress (or whichever tool needs it) with the correct season "
-        "name/ID you found. Never guess a season identifier — look it up first. "
-        "show_player_progress also returns the underlying raw numbers alongside rendering "
-        "the visual card — when the user wants a rating, roast, analysis, or advice on what "
-        "to improve (not just 'show me the card'), use those actual numbers to give a real, "
-        "specific answer citing them. Never deflect a rating/analysis request back to the "
-        "user asking them to relay their own numbers — you already have them.\n\n"
+        "name/ID you found. Never guess a season identifier — look it up first.\n\n"
+        "DON'T SPAM THE CARD: show_player_progress posts a visual embed to the channel — only "
+        "call it the FIRST time a player/season is brought up, or when the user explicitly "
+        "asks to see/pull up the card again. For any follow-up in the same exchange (rating, "
+        "'why', analysis, advice, a correction, anything that just needs the numbers) use "
+        "get_player_stats instead — it returns the same exact real data without posting "
+        "another copy of the card. Never deflect a rating/analysis request back to the user "
+        "asking them to relay their own numbers — call get_player_stats and use what it gives you.\n\n"
         "ACCURACY IS NON-NEGOTIABLE: every number you state must come directly from a tool "
         "result received in THIS message — not from memory, not estimated, not rounded to a "
         "'nicer' number, not invented because it sounds plausible. If a number wasn't in a "
@@ -6130,18 +6197,22 @@ async def ask(ctx, *, query: str = None):
         "to the point for simple lookups, but give full step-by-step explanations when "
         "someone is working through a math problem or asks you to explain something — don't "
         "sacrifice a real, complete answer for brevity when the question calls for it.\n\n"
-        "PERSONALITY: You're a savage, chaotic, unhinged gamer with absolutely no chill — "
-        "not a corporate bot, not polite, not diplomatic. Trash-talk hard, roast people's "
-        "stats mercilessly ('bro your merit ratio should be studied by war crimes tribunals', "
-        "'this kill count is actual malding material'), lean into gamer/Discord slang, be "
-        "dramatic and over-the-top, commit to bits, have strong opinions and argue them like "
-        "you mean it. Swear freely and often if it fits — don't hold back or sanitize your "
-        "language for politeness. Zero hedging, zero disclaimers, zero 'as an AI' energy — "
-        "just say the thing. If someone's underperforming, absolutely destroy them for it, "
-        "then move on like nothing happened. Be funny first, brutal second, and never boring. "
-        "The one hard line: don't turn this on anyone's real identity, health, appearance, or "
-        "personal life, and never touch anything sexual — everything else about stats, "
-        "performance, banter, and gamer trash-talk is fair game, no filter.\n\n"
+        "PERSONALITY: You're genuinely funny, not just aggressive — sharp, dark, clever humor "
+        "over generic insults. Avoid template-y bot-insult clichés ('ratio', 'this is actual "
+        "malding material', 'should be studied by a tribunal', calling things 'a war crime') "
+        "— those are cringe, not funny. Instead: build real jokes with a setup and a landing, "
+        "use unexpected comparisons, callbacks to something said earlier, absurdist logic, "
+        "deadpan delivery, or a dark twist that actually surprises. Dark humor is fine — jokes "
+        "about death, failure, suffering, tragedy-as-comedy are all fair game — but it has to "
+        "be genuinely clever, not just edgy for the sake of it, and never real-world racism, "
+        "slurs, or jokes that punch at an actual ethnic/racial group — that's not dark humor, "
+        "that's just bigotry and it's not on the table. Roast people's stats hard when the "
+        "numbers earn it, but make the roast a good line, not a mad-libs insult generator. "
+        "Swear freely if it lands, be blunt, zero hedging or corporate disclaimers, commit to "
+        "bits, have real opinions and argue them. The one hard line: don't turn any of this on "
+        "anyone's real identity, health, appearance, or personal life, and never touch "
+        "anything sexual — stats, performance, banter, and gamer trash-talk are fair game, "
+        "everything else needs to actually be a good joke, not just mean.\n\n"
         "REKZ: be bipolar about it — sometimes roast Rekz exactly like anyone else, no "
         "exceptions, don't go soft just because he's the owner. Other times, especially when "
         "someone ELSE is roasting or making fun of Rekz, flip and defend him hard / talk him "
@@ -6522,6 +6593,109 @@ async def get_account_id_from_input(ctx, user_input):
         return None
     except Exception as e:
         return None
+
+
+CHART_STAT_MAP = {
+    "merits": "merits",
+    "power": "power_gain", "power_gain": "power_gain",
+    "highest_power": "highest_power", "total_power": "highest_power",
+    "kills": "kills_gain", "deaths": "deads_gain", "deads": "deads_gain",
+    "healed": "healed_gain",
+    "gold": "gold_gathered", "wood": "wood_gathered", "ore": "ore_gathered", "mana": "mana_gathered",
+    "infantry": "infantry_merits", "cavalry": "cavalry_merits", "mage": "mage_merits",
+    "marksman": "marksman_merits", "archer": "marksman_merits", "other": "other_merits",
+    "t45_healed": "t45_healed", "t4t5healed": "t45_healed",
+    "t45_dead": "t45_dead", "t4t5dead": "t45_dead",
+    "coins": "exchange_coins_spent", "coins_spent": "exchange_coins_spent",
+}
+
+
+@bot.command(name="chart")
+async def chart_command(ctx, player: str = None, stat: str = None, season_name: str = None):
+    """
+    Show a line chart of any tracked stat's growth over a season, using the daily
+    archived data. Usage: !chart <player> <stat> [season]
+    e.g. !chart rekz merits | !chart truvix mana sos1
+    """
+    if not player or not stat:
+        return await ctx.send(
+            "Usage: `!chart <player> <stat> [season]`\n"
+            "Available stats: " + ", ".join(sorted(set(CHART_STAT_MAP.keys())))
+        )
+
+    stat_key = CHART_STAT_MAP.get(stat.lower().replace(" ", "_"))
+    if not stat_key:
+        return await ctx.send(f"❌ Unknown stat '{stat}'. Available: " + ", ".join(sorted(set(CHART_STAT_MAP.keys()))))
+
+    account_id, err = _ask_resolve_account_id(ctx, player)
+    if err:
+        return await ctx.send(f"❌ {err}")
+
+    if season_name:
+        season = resolve_season_input(season_name)
+        if not season:
+            return await ctx.send(f"❌ Season '{season_name}' not found. Use `!seasonhistory` to see all seasons.")
+    else:
+        season = db_get_current_season()
+        if not season:
+            return await ctx.send("❌ No active season.")
+    season_id, season_name_display, start_date, _ = season
+
+    conn = sqlite3.connect(DB_PROGRESS)
+    c = conn.cursor()
+    c.execute(
+        f"SELECT data_date, {stat_key}, lord_name FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
+        (season_id, account_id)
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return await ctx.send(f"❌ No archived data found for that player in {season_name_display}.")
+
+    dates, values, lord_name = [], [], str(account_id)
+    for data_date, raw_val, name in rows:
+        if raw_val is None:
+            continue
+        val = _parse_stat_num_global(raw_val)
+        dates.append(data_date)
+        values.append(val)
+        if name:
+            lord_name = name
+
+    if len(dates) < 2:
+        return await ctx.send(f"❌ Not enough data points to chart yet for {lord_name} — need at least 2 days archived.")
+
+    stat_label = stat.replace("_", " ").title()
+
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(dates, values, marker="o", linewidth=2.5, color="#5865F2", markersize=5)
+    ax.fill_between(range(len(dates)), values, alpha=0.15, color="#5865F2")
+    ax.set_title(f"{lord_name} — {stat_label} — {season_name_display}", fontsize=14, fontweight="bold", pad=15)
+    ax.set_xlabel("Date")
+    ax.set_ylabel(stat_label)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{int(x):,}"))
+    ax.grid(True, alpha=0.2)
+    fig.autofmt_xdate(rotation=45)
+
+    # Thin out x-axis labels if there are a lot of data points, so they don't overlap
+    if len(dates) > 15:
+        step = max(1, len(dates) // 15)
+        ax.set_xticks(range(0, len(dates), step))
+        ax.set_xticklabels([dates[i] for i in range(0, len(dates), step)])
+
+    fig.tight_layout()
+
+    chart_path = f"/tmp/chart_{account_id}_{stat_key}_{season_id}.png"
+    fig.savefig(chart_path, dpi=110, facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+    await ctx.send(file=discord.File(chart_path))
+    try:
+        os.remove(chart_path)
+    except Exception:
+        pass
 
 
 @bot.command(name="compare")
