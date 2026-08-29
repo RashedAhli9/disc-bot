@@ -5963,12 +5963,16 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             return False, "\n".join(lines)
 
         if tool_name == "show_chart":
-            await chart_command.callback(ctx, tool_input.get("player"), tool_input["stat"], tool_input.get("season"))
-            return True, None
+            succeeded = await chart_command.callback(ctx, tool_input.get("player"), tool_input["stat"], tool_input.get("season"))
+            if succeeded:
+                return True, None
+            return False, "The chart FAILED to post — an error message was shown in the channel instead (already visible above). Do not say a chart was posted; report that it failed and relay why if you can tell from context."
 
         if tool_name == "show_group_chart":
-            await group_chart_command.callback(ctx, tool_input["stat"], tool_input.get("season"))
-            return True, "Group chart posted above (or an error message if something went wrong) — report exactly what happened, don't assume success."
+            succeeded = await group_chart_command.callback(ctx, tool_input["stat"], tool_input.get("season"))
+            if succeeded:
+                return True, None
+            return False, "The group chart FAILED to post — an error message was shown in the channel instead (already visible above). Do not say a chart was posted; report that it failed and relay why if you can tell from context."
 
         if tool_name == "calculate":
             result, error = _ask_safe_calculate(tool_input["expression"])
@@ -6717,27 +6721,32 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
     e.g. !chart rekz merits | !chart truvix mana sos1
     """
     if not player or not stat:
-        return await ctx.send(
+        await ctx.send(
             "Usage: `!chart <player> <stat> [season]`\n"
             "Available stats: " + ", ".join(sorted(set(CHART_STAT_MAP.keys())))
         )
+        return False
 
     stat_key = CHART_STAT_MAP.get(stat.lower().replace(" ", "_"))
     if not stat_key:
-        return await ctx.send(f"❌ Unknown stat '{stat}'. Available: " + ", ".join(sorted(set(CHART_STAT_MAP.keys()))))
+        await ctx.send(f"❌ Unknown stat '{stat}'. Available: " + ", ".join(sorted(set(CHART_STAT_MAP.keys()))))
+        return False
 
     account_id, err = _ask_resolve_account_id(ctx, player)
     if err:
-        return await ctx.send(f"❌ {err}")
+        await ctx.send(f"❌ {err}")
+        return False
 
     if season_name:
         season = resolve_season_input(season_name)
         if not season:
-            return await ctx.send(f"❌ Season '{season_name}' not found. Use `!seasonhistory` to see all seasons.")
+            await ctx.send(f"❌ Season '{season_name}' not found. Use `!seasonhistory` to see all seasons.")
+            return False
     else:
         season = db_get_current_season()
         if not season:
-            return await ctx.send("❌ No active season.")
+            await ctx.send("❌ No active season.")
+            return False
     season_id, season_name_display, start_date, _ = season
 
     conn = sqlite3.connect(DB_PROGRESS)
@@ -6750,7 +6759,8 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
     conn.close()
 
     if not rows:
-        return await ctx.send(f"❌ No archived data found for that player in {season_name_display}.")
+        await ctx.send(f"❌ No archived data found for that player in {season_name_display} (season #{season_id}).")
+        return False
 
     dates, values, lord_name = [], [], str(account_id)
     for data_date, raw_val, name in rows:
@@ -6763,7 +6773,8 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
             lord_name = name
 
     if len(dates) < 2:
-        return await ctx.send(f"❌ Not enough data points to chart yet for {lord_name} — need at least 2 days archived.")
+        await ctx.send(f"❌ Not enough data points to chart yet for {lord_name} — need at least 2 days archived.")
+        return False
 
     stat_label = stat.replace("_", " ").title()
 
@@ -6796,6 +6807,8 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
     except Exception:
         pass
 
+    return True
+
 
 @bot.command(name="groupchart")
 async def group_chart_command(ctx, stat: str = None, season_name: str = None):
@@ -6803,30 +6816,37 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     Show ONE chart with every tracked guild member's growth for a stat over a season,
     using Discord roles directly (not name matching) so clan-tag/prefix names in COS
     display names can't cause lookup failures. Usage: !groupchart <stat> [season]
+    Returns True if a chart was actually posted, False if it sent an error instead —
+    callers (like !ask's dispatcher) should check this rather than assume success.
     """
     if not stat:
-        return await ctx.send(
+        await ctx.send(
             "Usage: `!groupchart <stat> [season]`\n"
             "Available stats: " + ", ".join(sorted(set(CHART_STAT_MAP.keys())))
         )
+        return False
 
     stat_key = CHART_STAT_MAP.get(stat.lower().replace(" ", "_"))
     if not stat_key:
-        return await ctx.send(f"❌ Unknown stat '{stat}'. Available: " + ", ".join(sorted(set(CHART_STAT_MAP.keys()))))
+        await ctx.send(f"❌ Unknown stat '{stat}'. Available: " + ", ".join(sorted(set(CHART_STAT_MAP.keys()))))
+        return False
 
     if season_name:
         season = resolve_season_input(season_name)
         if not season:
-            return await ctx.send(f"❌ Season '{season_name}' not found. Use `!seasonhistory` to see all seasons.")
+            await ctx.send(f"❌ Season '{season_name}' not found. Use `!seasonhistory` to see all seasons.")
+            return False
     else:
         season = db_get_current_season()
         if not season:
-            return await ctx.send("❌ No active season.")
+            await ctx.send("❌ No active season.")
+            return False
     season_id, season_name_display, start_date, _ = season
 
     lords = get_all_lords_from_guild(ctx.guild)
     if not lords:
-        return await ctx.send("❌ No members with numeric roles found.")
+        await ctx.send("❌ No members with numeric roles found.")
+        return False
 
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(11, 7))
@@ -6861,7 +6881,9 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     conn.close()
 
     if not plotted_any:
-        return await ctx.send(f"❌ No member has enough archived data yet for {season_name_display}.")
+        plt.close(fig)
+        await ctx.send(f"❌ No member has enough archived data yet for {season_name_display} (season #{season_id}).")
+        return False
 
     stat_label = stat.replace("_", " ").title()
     ax.set_title(f"Guild {stat_label} — {season_name_display}", fontsize=14, fontweight="bold", pad=15)
@@ -6885,6 +6907,8 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
 
     if skipped:
         await ctx.send(f"⚠️ Skipped (not enough archived data yet): {', '.join(skipped)}")
+
+    return True
 
 
 @bot.command(name="compare")
