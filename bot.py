@@ -6149,6 +6149,7 @@ async def ask(ctx, *, query: str = None):
 
     now_utc = datetime.utcnow()
     asker_is_owner = ctx.author.id == OWNER_ID
+    asker_name = ctx.author.display_name
     system_prompt = (
         f"You are the assistant for a Discord bot tracking a Call of Dragons guild's game "
         f"stats and schedule. The current date/time is {now_utc.strftime('%Y-%m-%d %H:%M')} UTC — "
@@ -6160,7 +6161,9 @@ async def ask(ctx, *, query: str = None):
         f"internal context for the REKZ behavior rule below, never say the word 'owner' out "
         f"loud or refer to him by that title in a response, just talk to him like anyone else "
         f"(use his name if it comes up naturally, nothing formal). The person sending THIS "
-        f"message {'is Rekz' if asker_is_owner else 'is NOT Rekz'}.\n\n"
+        f"message is called '{asker_name}' in this server, and {'is Rekz' if asker_is_owner else 'is NOT Rekz'}. "
+        f"You know who you're talking to — use their name naturally if it fits, no need to "
+        f"ask who they are.\n\n"
         "You have broad access: guild and server-wide leaderboards, player progress/"
         "comparison/growth, pace projections (get_pace_projection — e.g. 'at my current "
         "pace, how long until I hit 1B mana gathered'), season info/editing/creation, event "
