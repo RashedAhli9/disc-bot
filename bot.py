@@ -6848,6 +6848,8 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
         await ctx.send("❌ No members with numeric roles found.")
         return False
 
+    log_info(f"[GROUPCHART] stat={stat_key} season_id={season_id} ({season_name_display}) checking {len(lords)} lords")
+
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(11, 7))
     color_cycle = plt.cm.tab10.colors
@@ -6862,6 +6864,7 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
             (season_id, lord["account_id"])
         )
         rows = c.fetchall()
+        log_info(f"[GROUPCHART] {lord['name']} ({lord['account_id']}): {len(rows)} total rows for season_id={season_id}")
         dates, values, lord_name = [], [], lord["name"]
         for data_date, raw_val, name in rows:
             if raw_val is None:
@@ -6870,6 +6873,7 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
             values.append(_parse_stat_num_global(raw_val))
             if name:
                 lord_name = name
+        log_info(f"[GROUPCHART] {lord['name']}: {len(dates)} usable (non-null {stat_key}) data points")
 
         if len(dates) < 2:
             skipped.append(lord_name)
