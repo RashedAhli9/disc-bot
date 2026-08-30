@@ -1086,6 +1086,22 @@ def migrate_db_progress():
         ("highest_power", "TEXT"),
         ("exchange_coins_spent", "TEXT"),
         ("max_pets", "TEXT"),
+        # Prepped ahead of a COS update that's expected to expose these — see the game's own
+        # export settings panel. Columns exist now so no further migration is needed once
+        # parsing for them gets wired up; until then they'll just stay NULL/unused.
+        ("t4_deaths", "TEXT"),
+        ("t5_deaths", "TEXT"),
+        ("t4_severely_wounded", "TEXT"),
+        ("t5_severely_wounded", "TEXT"),
+        ("enemy_merits", "TEXT"),
+        ("t4_healed_split", "TEXT"),
+        ("t5_healed_split", "TEXT"),
+        ("alliance_donations", "TEXT"),
+        ("build_time", "TEXT"),
+        ("destruction_time", "TEXT"),
+        ("resource_assistance", "TEXT"),
+        ("behemoth_raid_wins", "TEXT"),
+        ("alliance_help", "TEXT"),
     ]
     try:
         conn = sqlite3.connect(DB_PROGRESS)
@@ -1607,6 +1623,11 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
             "gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered",
             "infantry_merits", "cavalry_merits", "mage_merits", "marksman_merits", "other_merits",
             "t45_healed", "t45_dead", "highest_power", "exchange_coins_spent", "max_pets",
+            # Prepped for a pending COS update — unused until parsing is wired up for them
+            "t4_deaths", "t5_deaths", "t4_severely_wounded", "t5_severely_wounded",
+            "enemy_merits", "t4_healed_split", "t5_healed_split", "alliance_donations",
+            "build_time", "destruction_time", "resource_assistance", "behemoth_raid_wins",
+            "alliance_help",
         ]
 
         def _is_real(v):
@@ -2412,6 +2433,26 @@ async def force_refresh_all_stats():
                     # SAVE to database with actual date (handles missed dates like 24/03)
                     db_save_season_progress(season_id, account_id, stats_today.get("lord_name", account_id), stats_today, actual_date_today)
                     log_info(f"[FORCEFETCH] Saved today {account_id} for {actual_date_today}")
+
+                    # Also fetch and save the "original page" data (Highest Power, Achievements)
+                    # that the ranged/date-comparison fetch above doesn't include — this used to
+                    # only get archived opportunistically whenever !progress happened to run for
+                    # a given account, leaving gaps for anyone nobody checked that day.
+                    try:
+                        hp_val, achievements = await asyncio.gather(
+                            fetch_highest_power(account_id),
+                            fetch_achievement_stats(account_id, actual_date_today),
+                        )
+                        db_save_extra_stats(
+                            season_id, account_id, actual_date_today,
+                            highest_power=hp_val,
+                            exchange_coins_spent=achievements.get("exchange_coins_spent"),
+                            max_pets=achievements.get("max_pets"),
+                            lord_name=stats_today.get("lord_name", account_id),
+                        )
+                        log_info(f"[FORCEFETCH] Saved extra stats (power/achievements) for {account_id} on {actual_date_today}")
+                    except Exception as e:
+                        log_info(f"[FORCEFETCH] Extra stats fetch failed for {account_id}: {e}")
                     
                     # Also cache the day before for comparisons
                     day_before = (datetime.strptime(actual_date_today, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
