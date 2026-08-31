@@ -1,6 +1,6 @@
 # ============================================================
 # FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
-# ===========================================================
+# ============================================================
 
 from flask import Flask
 import threading
@@ -994,6 +994,13 @@ def init_db():
             mage_merits INTEGER DEFAULT 0,
             other_merits INTEGER DEFAULT 0,
             healing INTEGER DEFAULT 0,
+            t4_deaths INTEGER DEFAULT 0,
+            t5_deaths INTEGER DEFAULT 0,
+            t4_severely_wounded INTEGER DEFAULT 0,
+            t5_severely_wounded INTEGER DEFAULT 0,
+            enemy_merits INTEGER DEFAULT 0,
+            t4_healed INTEGER DEFAULT 0,
+            t5_healed INTEGER DEFAULT 0,
             start_date TEXT,
             end_date TEXT,
             uploaded_at TEXT,
@@ -1070,6 +1077,19 @@ def migrate_db(conn):
             c.execute("ALTER TABLE seasons ADD COLUMN end_date TEXT")
             log_info(f"[DB MIGRATE] Added column: seasons.end_date")
             conn.commit()
+
+        # server_lord_stats — COS's server-page Excel export added new columns
+        c.execute("PRAGMA table_info(server_lord_stats)")
+        existing_sls = {row[1] for row in c.fetchall()}
+        new_sls_columns = [
+            "t4_deaths", "t5_deaths", "t4_severely_wounded", "t5_severely_wounded",
+            "enemy_merits", "t4_healed", "t5_healed",
+        ]
+        for col in new_sls_columns:
+            if col not in existing_sls:
+                c.execute(f"ALTER TABLE server_lord_stats ADD COLUMN {col} INTEGER DEFAULT 0")
+                log_info(f"[DB MIGRATE] Added column: server_lord_stats.{col}")
+        conn.commit()
     except Exception as e:
         log_error(f"[DB MIGRATION] Error: {e}")
 
@@ -1250,12 +1270,17 @@ def db_replace_server_lord_stats(server_num, rows, start_date, end_date):
                 server_num, account_id, lord_name, current_power, highest_power,
                 deaths, total_merits, gathering, infantry_merits, cavalry_merits,
                 marksman_merits, mage_merits, other_merits, healing,
+                t4_deaths, t5_deaths, t4_severely_wounded, t5_severely_wounded,
+                enemy_merits, t4_healed, t5_healed,
                 start_date, end_date, uploaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             server_num, r["account_id"], r["lord_name"], r["current_power"], r["highest_power"],
             r["deaths"], r["total_merits"], r["gathering"], r["infantry_merits"], r["cavalry_merits"],
             r["marksman_merits"], r["mage_merits"], r["other_merits"], r["healing"],
+            r.get("t4_deaths", 0), r.get("t5_deaths", 0), r.get("t4_severely_wounded", 0),
+            r.get("t5_severely_wounded", 0), r.get("enemy_merits", 0), r.get("t4_healed", 0),
+            r.get("t5_healed", 0),
             start_date, end_date, now
         ))
     conn.commit()
@@ -1267,14 +1292,16 @@ def db_get_server_lord_stats(server_num):
     c.execute("""
         SELECT account_id, lord_name, current_power, highest_power, deaths, total_merits,
                gathering, infantry_merits, cavalry_merits, marksman_merits, mage_merits,
-               other_merits, healing, start_date, end_date
+               other_merits, healing, t4_deaths, t5_deaths, t4_severely_wounded,
+               t5_severely_wounded, enemy_merits, t4_healed, t5_healed, start_date, end_date
         FROM server_lord_stats WHERE server_num = ?
     """, (server_num,))
     rows = c.fetchall()
     conn.close()
     cols = ["account_id","lord_name","current_power","highest_power","deaths","total_merits",
             "gathering","infantry_merits","cavalry_merits","marksman_merits","mage_merits",
-            "other_merits","healing","start_date","end_date"]
+            "other_merits","healing","t4_deaths","t5_deaths","t4_severely_wounded",
+            "t5_severely_wounded","enemy_merits","t4_healed","t5_healed","start_date","end_date"]
     return [dict(zip(cols, r)) for r in rows]
 migrate_db_progress()
 
@@ -3745,7 +3772,10 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if combat_parts:
             embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value="  ·  ".join(combat_parts), inline=False)
 
-        # Mana Spent — estimated the same way as !stopmana (T4/T5 Healed × 72), assuming it's all T5
+        # Mana Spent — estimated the same way as !stopmana used to, assuming it's all T5.
+        # Guild-side !progress only has the COMBINED T4/T5 Healed figure (unlike the server
+        # Excel export used by !stopmana, which has the real T4/T5 split) — so this can't be
+        # computed exactly here, only estimated using the real T5 rate as a conservative guess.
         mana_source = _parse_stat_num(t45_healed_val)
         if mana_source:
             mana_spent_est = mana_source * MANA_PER_T5_HEAL
@@ -4978,7 +5008,7 @@ async def topheal(ctx, season_name: str = None):
 
 @bot.command(name="topspent")
 async def topspent(ctx, season_name: str = None):
-    """Leaderboard for estimated mana spent (T4/T5 Healed × 72, assuming it's all T5). Usage: !topspent (current) or !topspent sos1"""
+    """Leaderboard for estimated mana spent (T4/T5 Healed × 80, assuming it's all T5 — real per-unit rate, but guild data has no T4/T5 split). Usage: !topspent (current) or !topspent sos1"""
 
     if season_name:
         season = resolve_season_input(season_name)
@@ -8705,10 +8735,10 @@ def _parse_stat_str(raw):
 
 def parse_server_excel(file_bytes):
     """
-    Parse an uploaded server stats Excel file.
-    Expected columns: Rank, Character ID, Character Name, Current Power,
-    Historical Highest Power, Deaths (T4/T5), Total Merits, Gathering,
-    Infantry Only, Cavalry Only, Marksman Only, Magic Only, Other Merits, Healing (T4/T5)
+    Parse an uploaded server stats Excel file. Supports both the newer COS export
+    format (T4/T5 Deaths, T4/T5 Severely Wounded, Enemy Merits, T4/T5 Healed split
+    separately) and the older combined format (Deaths (T4/T5), Healing (T4/T5)) for
+    backward compatibility with files uploaded before COS split these out.
     Returns (rows, error).
     """
     try:
@@ -8732,11 +8762,17 @@ def parse_server_excel(file_bytes):
                     return i
         return None
 
+    def find_col_exact(*names):
+        for name in names:
+            for i, h in enumerate(header_row):
+                if h == name:
+                    return i
+        return None
+
     col_id       = find_col("character id", "lord id", "account id")
     col_name     = find_col("character name", "lord name", "name")
     col_power    = find_col("current power")
     col_highest  = find_col("historical highest power", "highest power")
-    col_deaths   = find_col("deaths")
     col_merits   = find_col("total merits")
     col_gather   = find_col("gathering")
     col_inf      = find_col("infantry")
@@ -8744,10 +8780,26 @@ def parse_server_excel(file_bytes):
     col_mark     = find_col("marksman")
     col_mage     = find_col("magic", "mage")
     col_other    = find_col("other merits")
-    col_heal     = find_col("healing")
+
+    # New split columns (exact match, since "deaths" alone would ambiguously match
+    # both "T4 Deaths" and "T5 Deaths")
+    col_t4_deaths   = find_col_exact("t4 deaths")
+    col_t5_deaths   = find_col_exact("t5 deaths")
+    col_t4_wounded  = find_col_exact("t4 severely wounded")
+    col_t5_wounded  = find_col_exact("t5 severely wounded")
+    col_enemy_merits = find_col("enemy merits")
+    col_t4_healed   = find_col_exact("t4 healed")
+    col_t5_healed   = find_col_exact("t5 healed")
+
+    # Old combined-format columns — only used as a fallback when the new split
+    # columns above aren't present, for backward compatibility with older uploads
+    col_deaths_combined = find_col("deaths (t4/t5)", "deaths")
+    col_heal_combined   = find_col("healing (t4/t5)", "healing")
 
     if col_id is None or col_name is None:
         return None, f"Could not find required columns. Headers found: {header_row}"
+
+    has_split_format = col_t4_healed is not None or col_t5_healed is not None
 
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -8757,12 +8809,25 @@ def parse_server_excel(file_bytes):
             account_id = str(row[col_id]).strip()
             if not account_id or account_id.lower() == "none":
                 continue
+
+            t4_deaths = _parse_stat_str(row[col_t4_deaths]) if col_t4_deaths is not None else 0
+            t5_deaths = _parse_stat_str(row[col_t5_deaths]) if col_t5_deaths is not None else 0
+            t4_healed = _parse_stat_str(row[col_t4_healed]) if col_t4_healed is not None else 0
+            t5_healed = _parse_stat_str(row[col_t5_healed]) if col_t5_healed is not None else 0
+
+            if has_split_format:
+                deaths_total = t4_deaths + t5_deaths
+                healing_total = t4_healed + t5_healed
+            else:
+                deaths_total = _parse_stat_str(row[col_deaths_combined]) if col_deaths_combined is not None else 0
+                healing_total = _parse_stat_str(row[col_heal_combined]) if col_heal_combined is not None else 0
+
             rows.append({
                 "account_id": account_id,
                 "lord_name": str(row[col_name]).strip() if col_name is not None and row[col_name] else account_id,
                 "current_power": _parse_stat_str(row[col_power]) if col_power is not None else 0,
                 "highest_power": _parse_stat_str(row[col_highest]) if col_highest is not None else 0,
-                "deaths": _parse_stat_str(row[col_deaths]) if col_deaths is not None else 0,
+                "deaths": deaths_total,
                 "total_merits": _parse_stat_str(row[col_merits]) if col_merits is not None else 0,
                 "gathering": _parse_stat_str(row[col_gather]) if col_gather is not None else 0,
                 "infantry_merits": _parse_stat_str(row[col_inf]) if col_inf is not None else 0,
@@ -8770,7 +8835,14 @@ def parse_server_excel(file_bytes):
                 "marksman_merits": _parse_stat_str(row[col_mark]) if col_mark is not None else 0,
                 "mage_merits": _parse_stat_str(row[col_mage]) if col_mage is not None else 0,
                 "other_merits": _parse_stat_str(row[col_other]) if col_other is not None else 0,
-                "healing": _parse_stat_str(row[col_heal]) if col_heal is not None else 0,
+                "healing": healing_total,
+                "t4_deaths": t4_deaths,
+                "t5_deaths": t5_deaths,
+                "t4_severely_wounded": _parse_stat_str(row[col_t4_wounded]) if col_t4_wounded is not None else 0,
+                "t5_severely_wounded": _parse_stat_str(row[col_t5_wounded]) if col_t5_wounded is not None else 0,
+                "enemy_merits": _parse_stat_str(row[col_enemy_merits]) if col_enemy_merits is not None else 0,
+                "t4_healed": t4_healed,
+                "t5_healed": t5_healed,
             })
         except Exception as e:
             log_info(f"[SERVERUPDATE] Skipping row due to error: {e}")
@@ -8911,14 +8983,14 @@ async def stopheal(ctx, top: int = 25):
     """Top healing on server. Usage: !stopheal [top]"""
     await _server_leaderboard(ctx, None, "healing", "❤️", "Healing", top)
 
-MANA_PER_T5_HEAL = 72  # estimated mana cost per T4/T5 unit healed
+MANA_PER_T5_HEAL = 78  # real mana cost per T5 unit healed
+MANA_PER_T4_HEAL = 20  # real mana cost per T4 unit healed
 
 @bot.command(name="stopmana")
 async def stopmana(ctx, top: int = 25):
     """
-    Top estimated mana spent on server, calculated as Healing (T4/T5) × 72 mana per unit.
-    This is an estimate since the server Excel export has no direct 'Mana Spent' column.
-    Usage: !stopmana [top]
+    Top mana spent on server — exact total, calculated as (T4 Healed × 20) + (T5 Healed × 80),
+    using COS's real T4/T5 Healed split and the real per-unit mana costs. Usage: !stopmana [top]
     """
     picked = db_get_server_pick()
     if not picked:
@@ -8928,25 +9000,29 @@ async def stopmana(ctx, top: int = 25):
     if not lords:
         return await ctx.send(f"❌ No data for S#{picked}. Use `!serverupdate` to upload the Excel file.")
 
-    scored = [{"name": l["lord_name"], "val": l.get("healing", 0) * MANA_PER_T5_HEAL} for l in lords]
+    scored = [
+        {"name": l["lord_name"],
+         "val": l.get("t4_healed", 0) * MANA_PER_T4_HEAL + l.get("t5_healed", 0) * MANA_PER_T5_HEAL}
+        for l in lords
+    ]
     scored.sort(key=lambda x: x["val"], reverse=True)
     top_list = scored[:top]
 
     if not any(x["val"] > 0 for x in top_list):
-        return await ctx.send(f"❌ No mana spent data found for S#{picked}.")
+        return await ctx.send(f"❌ No T4/T5 Healed data found for S#{picked}. Re-upload with `!serverupdate` if this server's Excel is from before the T4/T5 split.")
 
     date_range = ""
     if lords[0].get("start_date") and lords[0].get("end_date"):
         date_range = f" ({lords[0]['start_date']} → {lords[0]['end_date']})"
 
     medals = ["🥇", "🥈", "🥉"]
-    lines = [f"```💧 Top {top} Mana Spent (est.) — S#{picked}{date_range}", f"(Assuming its all T5)", ""]
+    lines = [f"```💧 Top {top} Mana Spent — S#{picked}{date_range}", ""]
     for i, lord in enumerate(top_list):
         if lord["val"] == 0:
             continue
         medal = medals[i] if i < 3 else f"{i+1}."
         lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
-    lines.append(f"\n*Estimated as Healing (T4/T5) × {MANA_PER_T5_HEAL} mana per unit*")
+    lines.append(f"\n*(T4 Healed × {MANA_PER_T4_HEAL}) + (T5 Healed × {MANA_PER_T5_HEAL}) — exact, not an estimate*")
     lines.append("```")
     await ctx.send("\n".join(lines))
 
