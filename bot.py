@@ -1,6 +1,6 @@
 # ============================================================
-# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE
-# ===========================================================
+# FLASK KEEPALIVE (STARTS IMMEDIATELY – KOYEB SAFE)
+# ============================================================
 
 from flask import Flask
 import threading
@@ -2825,12 +2825,11 @@ def build_help_embed(is_owner: bool):
     embed.add_field(
         name="🖥️ Server Leaderboards",
         value=(
-            "`!stopmerits / !stopdeaths [server] [top]` — Core stats\n"
-            "`!stopheal [top]` — Top healing\n"
-            "`!stopmana [top]` — Top estimated mana spent (Healing × 72)\n"
-            "`!stopinf / !stopcav / !stopmage / !stoparcher / !stopother [server] [top]` — Merit breakdowns\n"
-            "`!stoppower [server] [top]` — Current power\n"
-            "`!stophighest [top]` — Historical highest power\n\n"
+            "`!stopmerits / !stopdeaths / !stopheal [top|player]` — Core stats\n"
+            "`!stopmana [top|player]` — Mana spent, exact ((T4 Healed×20) + (T5 Healed×78))\n"
+            "`!stopinf / !stopcav / !stopmage / !stoparcher / !stopother [top|player]` — Merit breakdowns\n"
+            "`!stoppower / !stophighest [top|player]` — Current / historical power\n\n"
+            "e.g. `!stopmerits 50` for top 50, or `!stopmerits Rekz` for one player's value + rank\n"
             "*Data comes from the latest Excel upload — see admin section below*"
         ),
         inline=False
@@ -5141,7 +5140,13 @@ ASK_TOOLS = [
     },
     {
         "name": "run_server_leaderboard",
-        "description": "Show a server-wide leaderboard from the last uploaded server Excel data (not limited to guild members).",
+        "description": ("Show a server-wide leaderboard from the last uploaded server Excel data. "
+                         "By default this includes ALL players on the server (hundreds), not just "
+                         "this Discord's tracked guild members. If a player name/ID is given, shows "
+                         "just that one player's value and rank. If the user wants the leaderboard "
+                         "limited to just their own guild/group/team (not the whole server), set "
+                         "group_only to true — this filters down to only the members tracked in this "
+                         "Discord server."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -5150,7 +5155,9 @@ ASK_TOOLS = [
                     "enum": ["stopmerits", "stopdeaths", "stopheal", "stopmana", "stopinf", "stopcav",
                               "stopmage", "stoparcher", "stopother", "stoppower", "stophighest"],
                 },
-                "top": {"type": "integer", "description": "How many to show, default 25"}
+                "top": {"type": "integer", "description": "How many to show, default 25. Omit if player or group_only is given."},
+                "player": {"type": "string", "description": "A specific player's name or account ID to look up instead of the top list"},
+                "group_only": {"type": "boolean", "description": "True to limit the leaderboard to just this Discord's tracked guild members instead of the whole server"}
             },
             "required": ["stat"]
         }
@@ -5690,11 +5697,14 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             cmd = action_map.get(tool_input.get("stat"))
             if not cmd:
                 return False, f"Unknown server leaderboard: {tool_input.get('stat')}"
-            top = tool_input.get("top", 25)
-            if tool_input.get("stat") in ("stopheal", "stophighest", "stopmana"):
-                await cmd.callback(ctx, top)
+            player = tool_input.get("player")
+            if tool_input.get("group_only"):
+                await cmd.callback(ctx, arg="group")
+            elif player:
+                await cmd.callback(ctx, arg=str(player))
             else:
-                await cmd.callback(ctx, None, top)
+                top = tool_input.get("top", 25)
+                await cmd.callback(ctx, arg=str(top))
             return True, None
 
         if tool_name == "show_player_progress":
@@ -6287,6 +6297,17 @@ async def ask(ctx, *, query: str = None):
         "get_player_stats instead — it returns the same exact real data without posting "
         "another copy of the card. Never deflect a rating/analysis request back to the user "
         "asking them to relay their own numbers — call get_player_stats and use what it gives you.\n\n"
+        "TWO DIFFERENT DATA SOURCES: show_player_progress/get_player_stats/get_pace_projection/"
+        "get_player_growth pull from the automatic daily-tracked database (COS scrapes). "
+        "run_server_leaderboard/run_server_leaderboard-with-player pulls from whatever server "
+        "Excel file was last manually uploaded via !serverupdate — this is admin-controlled and "
+        "can sometimes be fresher than the automatic tracking, since it's a manual snapshot. By "
+        "default use the automatic-tracking tools. But if the user says something like 'use the "
+        "!stop data', 'the upload is fresher', 'use the server data instead', or otherwise "
+        "explicitly asks for the manually-uploaded source, use run_server_leaderboard with the "
+        "player param for the relevant stat(s) instead — note in your reply that you used the "
+        "uploaded data, not the automatic tracking, since the two can show different numbers "
+        "depending on upload timing.\n\n"
         "ACCURACY IS NON-NEGOTIABLE: every number you state must come directly from a tool "
         "result received in THIS message — not from memory, not estimated, not rounded to a "
         "'nicer' number, not invented because it sounds plausible. If a number wasn't in a "
@@ -8870,8 +8891,37 @@ def parse_server_filename(filename):
     return None, None, None
 
 
-async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=25):
-    """Generic server leaderboard from the uploaded Excel data."""
+def _resolve_server_player(lords, player_input):
+    """
+    Resolve a player on the picked server by account_id (exact) or lord_name
+    (case-insensitive substring). Returns the matching lord dict, or None.
+    Raises ValueError with a message if the match is ambiguous (multiple names match).
+    """
+    player_input = str(player_input).strip()
+    if player_input.isdigit():
+        for l in lords:
+            if str(l["account_id"]) == player_input:
+                return l
+        return None
+
+    query = player_input.lower()
+    matches = [l for l in lords if query in (l.get("lord_name") or "").lower()]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        exact = [l for l in matches if (l.get("lord_name") or "").lower() == query]
+        if len(exact) == 1:
+            return exact[0]
+        names = ", ".join(l["lord_name"] for l in matches[:5])
+        raise ValueError(f"Multiple players match '{player_input}': {names}. Be more specific or use their account ID.")
+    return matches[0]
+
+
+async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=25, player=None, group_only=False):
+    """Generic server leaderboard from the uploaded Excel data. If player is given,
+    shows that one player's value + rank instead of the top N list. If group_only is
+    True, filters the server-wide data down to just this Discord guild's tracked
+    members (matched by account ID) before ranking — a "my group" leaderboard."""
     picked = db_get_server_pick()
     if not picked:
         return await ctx.send("❌ No server picked. Use `!serverupdate` and upload an Excel file first.")
@@ -8882,19 +8932,42 @@ async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=2
     if not lords:
         return await ctx.send(f"❌ No data for S#{picked}. Use `!serverupdate` to upload the Excel file.")
 
+    scope_label = label
+    if group_only:
+        tracked_ids = {l["account_id"] for l in get_all_lords_from_guild(ctx.guild)}
+        if not tracked_ids:
+            return await ctx.send("❌ No members with numeric roles found in this Discord to filter by.")
+        lords = [l for l in lords if l["account_id"] in tracked_ids]
+        if not lords:
+            return await ctx.send(f"❌ None of this Discord's tracked members were found in S#{picked}'s uploaded data.")
+        scope_label = f"Group {label}"
+
     scored = [{"name": l["lord_name"], "val": l.get(stat_field, 0)} for l in lords]
     scored.sort(key=lambda x: x["val"], reverse=True)
-    top = scored[:top_n]
-
-    if not any(x["val"] > 0 for x in top):
-        return await ctx.send(f"❌ No {label} data found for S#{picked}.")
 
     date_range = ""
     if lords[0].get("start_date") and lords[0].get("end_date"):
         date_range = f" ({lords[0]['start_date']} → {lords[0]['end_date']})"
 
+    if player:
+        try:
+            match = _resolve_server_player(lords, player)
+        except ValueError as e:
+            return await ctx.send(f"❌ {e}")
+        if not match:
+            return await ctx.send(f"❌ No player matching '{player}' found{' in this group' if group_only else ''} on S#{picked}.")
+        val = match.get(stat_field, 0)
+        rank = next((i + 1 for i, s in enumerate(scored) if s["name"] == match["lord_name"] and s["val"] == val), None)
+        rank_str = f" (#{rank})" if rank else ""
+        return await ctx.send(f"```{emoji} {scope_label} — S#{picked}{date_range}\n{match['lord_name']}: +{val:,}{rank_str}```")
+
+    top = scored[:top_n]
+
+    if not any(x["val"] > 0 for x in top):
+        return await ctx.send(f"❌ No {label} data found for S#{picked}.")
+
     medals = ["🥇", "🥈", "🥉"]
-    lines = [f"```{emoji} Top {top_n} {label} — S#{picked}{date_range}"]
+    lines = [f"```{emoji} Top {min(top_n, len(scored))} {scope_label} — S#{picked}{date_range}"]
     for i, lord in enumerate(top):
         if lord["val"] == 0:
             continue
@@ -8902,6 +8975,23 @@ async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=2
         lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
     lines.append("```")
     await ctx.send("\n".join(lines))
+
+
+def _parse_stop_args(arg):
+    """
+    Parse the trailing argument for a !stop* command: a top-N count, a player
+    name/account ID, or the keyword 'group'/'guild' to filter the server-wide
+    leaderboard down to just this Discord's tracked members.
+    Returns (top_n, player, group_only).
+    """
+    if not arg:
+        return 25, None, False
+    arg = arg.strip()
+    if arg.lower() in ("group", "guild", "us", "team", "my group"):
+        return 25, None, True
+    if arg.isdigit() and int(arg) <= 200:
+        return int(arg), None, False
+    return 25, arg, False
 
 
 # In-progress serverupdate sessions: user_id -> True (awaiting file upload)
@@ -8969,29 +9059,35 @@ async def _process_serverupdate_attachment(ctx, attachment):
 
 
 @bot.command(name="stopdeaths")
-async def stopdeaths(ctx, server: int = None, top: int = 25):
-    """Top deaths on server. Usage: !stopdeaths [server] [top]"""
-    await _server_leaderboard(ctx, server, "deaths", "💀", "Deaths", top)
+async def stopdeaths(ctx, *, arg: str = None):
+    """Top deaths on server, or one player's deaths + rank. Usage: !stopdeaths [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "deaths", "💀", "Deaths", top, player, group_only)
 
 @bot.command(name="stopmerits")
-async def stopmerits(ctx, server: int = None, top: int = 25):
-    """Top merits on server. Usage: !stopmerits [server] [top]"""
-    await _server_leaderboard(ctx, server, "total_merits", "🏅", "Merits", top)
+async def stopmerits(ctx, *, arg: str = None):
+    """Top merits on server, or one player's merits + rank. Usage: !stopmerits [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "total_merits", "🏅", "Merits", top, player, group_only)
 
 @bot.command(name="stopheal")
-async def stopheal(ctx, top: int = 25):
-    """Top healing on server. Usage: !stopheal [top]"""
-    await _server_leaderboard(ctx, None, "healing", "❤️", "Healing", top)
+async def stopheal(ctx, *, arg: str = None):
+    """Top healing on server, or one player's healing + rank. Usage: !stopheal [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "healing", "❤️", "Healing", top, player, group_only)
 
 MANA_PER_T5_HEAL = 78  # real mana cost per T5 unit healed
 MANA_PER_T4_HEAL = 20  # real mana cost per T4 unit healed
 
 @bot.command(name="stopmana")
-async def stopmana(ctx, top: int = 25):
+async def stopmana(ctx, *, arg: str = None):
     """
-    Top mana spent on server — exact total, calculated as (T4 Healed × 20) + (T5 Healed × 80),
-    using COS's real T4/T5 Healed split and the real per-unit mana costs. Usage: !stopmana [top]
+    Top mana spent on server, or one player's mana spent + rank — exact total,
+    calculated as (T4 Healed × 20) + (T5 Healed × 78), using COS's real T4/T5 Healed
+    split and the real per-unit mana costs. Usage: !stopmana [top|player]
     """
+    top, player, group_only = _parse_stop_args(arg)
+
     picked = db_get_server_pick()
     if not picked:
         return await ctx.send("❌ No server picked. Use `!serverupdate` and upload an Excel file first.")
@@ -9000,23 +9096,46 @@ async def stopmana(ctx, top: int = 25):
     if not lords:
         return await ctx.send(f"❌ No data for S#{picked}. Use `!serverupdate` to upload the Excel file.")
 
+    scope_label = "Mana Spent"
+    if group_only:
+        tracked_ids = {l["account_id"] for l in get_all_lords_from_guild(ctx.guild)}
+        if not tracked_ids:
+            return await ctx.send("❌ No members with numeric roles found in this Discord to filter by.")
+        lords = [l for l in lords if l["account_id"] in tracked_ids]
+        if not lords:
+            return await ctx.send(f"❌ None of this Discord's tracked members were found in S#{picked}'s uploaded data.")
+        scope_label = "Group Mana Spent"
+
     scored = [
         {"name": l["lord_name"],
          "val": l.get("t4_healed", 0) * MANA_PER_T4_HEAL + l.get("t5_healed", 0) * MANA_PER_T5_HEAL}
         for l in lords
     ]
     scored.sort(key=lambda x: x["val"], reverse=True)
-    top_list = scored[:top]
-
-    if not any(x["val"] > 0 for x in top_list):
-        return await ctx.send(f"❌ No T4/T5 Healed data found for S#{picked}. Re-upload with `!serverupdate` if this server's Excel is from before the T4/T5 split.")
 
     date_range = ""
     if lords[0].get("start_date") and lords[0].get("end_date"):
         date_range = f" ({lords[0]['start_date']} → {lords[0]['end_date']})"
 
+    if player:
+        try:
+            match = _resolve_server_player(lords, player)
+        except ValueError as e:
+            return await ctx.send(f"❌ {e}")
+        if not match:
+            return await ctx.send(f"❌ No player matching '{player}' found{' in this group' if group_only else ''} on S#{picked}.")
+        val = match.get("t4_healed", 0) * MANA_PER_T4_HEAL + match.get("t5_healed", 0) * MANA_PER_T5_HEAL
+        rank = next((i + 1 for i, s in enumerate(scored) if s["name"] == match["lord_name"] and s["val"] == val), None)
+        rank_str = f" (#{rank})" if rank else ""
+        return await ctx.send(f"```💧 {scope_label} — S#{picked}{date_range}\n{match['lord_name']}: +{val:,}{rank_str}```")
+
+    top_list = scored[:top]
+
+    if not any(x["val"] > 0 for x in top_list):
+        return await ctx.send(f"❌ No T4/T5 Healed data found for S#{picked}. Re-upload with `!serverupdate` if this server's Excel is from before the T4/T5 split.")
+
     medals = ["🥇", "🥈", "🥉"]
-    lines = [f"```💧 Top {top} Mana Spent — S#{picked}{date_range}", ""]
+    lines = [f"```💧 Top {min(top, len(scored))} {scope_label} — S#{picked}{date_range}", ""]
     for i, lord in enumerate(top_list):
         if lord["val"] == 0:
             continue
@@ -9027,39 +9146,46 @@ async def stopmana(ctx, top: int = 25):
     await ctx.send("\n".join(lines))
 
 @bot.command(name="stopinf")
-async def stopinf(ctx, server: int = None, top: int = 25):
-    """Top infantry merits on server. Usage: !stopinf [server] [top]"""
-    await _server_leaderboard(ctx, server, "infantry_merits", "⚔️", "Infantry Merits", top)
+async def stopinf(ctx, *, arg: str = None):
+    """Top infantry merits on server, or one player's + rank. Usage: !stopinf [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "infantry_merits", "⚔️", "Infantry Merits", top, player, group_only)
 
 @bot.command(name="stopcav", aliases=["stopcavs"])
-async def stopcav(ctx, server: int = None, top: int = 25):
-    """Top cavalry merits on server. Usage: !stopcav [server] [top]"""
-    await _server_leaderboard(ctx, server, "cavalry_merits", "🐴", "Cavalry Merits", top)
+async def stopcav(ctx, *, arg: str = None):
+    """Top cavalry merits on server, or one player's + rank. Usage: !stopcav [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "cavalry_merits", "🐴", "Cavalry Merits", top, player, group_only)
 
 @bot.command(name="stopmage")
-async def stopmage(ctx, server: int = None, top: int = 25):
-    """Top mage merits on server. Usage: !stopmage [server] [top]"""
-    await _server_leaderboard(ctx, server, "mage_merits", "🔮", "Mage Merits", top)
+async def stopmage(ctx, *, arg: str = None):
+    """Top mage merits on server, or one player's + rank. Usage: !stopmage [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "mage_merits", "🔮", "Mage Merits", top, player, group_only)
 
 @bot.command(name="stoparcher")
-async def stoparcher(ctx, server: int = None, top: int = 25):
-    """Top marksman merits on server. Usage: !stoparcher [server] [top]"""
-    await _server_leaderboard(ctx, server, "marksman_merits", "🏹", "Marksman Merits", top)
+async def stoparcher(ctx, *, arg: str = None):
+    """Top marksman merits on server, or one player's + rank. Usage: !stoparcher [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "marksman_merits", "🏹", "Marksman Merits", top, player, group_only)
 
 @bot.command(name="stoppower")
-async def stoppower(ctx, server: int = None, top: int = 25):
-    """Top current power on server. Usage: !stoppower [server] [top]"""
-    await _server_leaderboard(ctx, server, "current_power", "⚡", "Current Power", top)
+async def stoppower(ctx, *, arg: str = None):
+    """Top current power on server, or one player's + rank. Usage: !stoppower [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "current_power", "⚡", "Current Power", top, player, group_only)
 
 @bot.command(name="stophighest")
-async def stophighest(ctx, top: int = 25):
-    """Top historical highest power on server. Usage: !stophighest [top]"""
-    await _server_leaderboard(ctx, None, "highest_power", "⚡", "Highest Power", top)
+async def stophighest(ctx, *, arg: str = None):
+    """Top historical highest power on server, or one player's + rank. Usage: !stophighest [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "highest_power", "⚡", "Highest Power", top, player, group_only)
 
 @bot.command(name="stopother")
-async def stopother(ctx, server: int = None, top: int = 25):
-    """Top other merits on server. Usage: !stopother [server] [top]"""
-    await _server_leaderboard(ctx, server, "other_merits", "🌀", "Other Merits", top)
+async def stopother(ctx, *, arg: str = None):
+    """Top other merits on server, or one player's + rank. Usage: !stopother [top|player]"""
+    top, player, group_only = _parse_stop_args(arg)
+    await _server_leaderboard(ctx, None, "other_merits", "🌀", "Other Merits", top, player, group_only)
 
 
 # ============================================================
