@@ -326,27 +326,32 @@ async def fetch_alliance_tag(account_id):
     import re
     log_info(f"[ALLIANCE TAG] Fetching for {account_id}...")
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://www.callofstats.com/lord/{account_id}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    
-                    # Debug: find where alliance tag might be
-                    if "higher-value" in html:
-                        # Find the section with higher-value
-                        idx = html.find("higher-value")
-                        debug_section = html[max(0, idx-100):min(len(html), idx+300)]
-                        log_info(f"[ALLIANCE TAG DEBUG] HTML around 'higher-value': {debug_section}")
-                    
-                    # Extract alliance tag from <h2 class="higher-value">[TAG]</h2>
-                    match = re.search(r'<h2 class="higher-value">([^<]+)</h2>', html)
-                    if match:
-                        tag = match.group(1).strip()
+        # Must use the authenticated session — the profile page needs login, and a bare
+        # aiohttp.ClientSession() gets a login/challenge page with no <h2> in it.
+        session = await get_callofstats_session()
+        if not session:
+            log_info(f"[ALLIANCE TAG] No authenticated session for {account_id}")
+            return ""
+
+        url = f"https://callofstats.com/lord/{account_id}"
+        async with session.get(url, allow_redirects=True) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+
+                # Extract alliance tag from <h2 class="higher-value">[TAG]</h2>
+                # (tolerant of attribute order / whitespace / nested tags)
+                match = re.search(
+                    r'<h2\b[^>]*\bclass="[^"]*higher-value[^"]*"[^>]*>(.*?)</h2>',
+                    html, re.DOTALL
+                )
+                if match:
+                    tag = re.sub(r'<[^>]+>', '', match.group(1)).strip()
+                    if tag:
                         log_info(f"[ALLIANCE TAG] Found for {account_id}: {tag}")
                         return tag
-                    else:
-                        log_info(f"[ALLIANCE TAG] No match found in HTML for {account_id}")
+                log_info(f"[ALLIANCE TAG] No match found in HTML for {account_id} (first 200 chars: {html[:200]!r})")
+            else:
+                log_info(f"[ALLIANCE TAG] HTTP {resp.status} for {account_id}")
     except Exception as e:
         log_info(f"[ALLIANCE TAG] Error fetching for {account_id}: {e}")
     
@@ -2198,15 +2203,43 @@ def parse_stats(html):
                 log_debug(f"[PARSE DEBUG] NOT FOUND: {label_name}")
             return None
         
-        # Extract lord name - look for <h1 class="higher-value">NAME</h1>
-        name_match = re.search(r'<h1 class="higher-value">([^<]+)</h1>', html)
+        def _clean_heading(raw):
+            """Strip any nested tags/whitespace from a heading's inner HTML."""
+            text = re.sub(r'<[^>]+>', '', raw)
+            text = text.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"')
+            return text.strip()
+
+        # Extract lord name. COS now renders <h1> with attributes/whitespace spread over
+        # multiple lines (e.g. <h1\n class="higher-value"\n >\n Name\n </h1>), so the old
+        # exact-string match `<h1 class="higher-value">` no longer hits. Match any
+        # attribute layout and allow nested tags (custom-colored names on COS+).
+        name_match = re.search(
+            r'<h1\b[^>]*\bclass="[^"]*higher-value[^"]*"[^>]*>(.*?)</h1>',
+            html, re.DOTALL
+        )
         if name_match:
-            stats["lord_name"] = name_match.group(1).strip()
-        
-        # Extract alliance tag - look for <h2 class="higher-value">[TAG]</h2>
-        tag_match = re.search(r'<h2 class="higher-value">([^<]+)</h2>', html)
+            cleaned = _clean_heading(name_match.group(1))
+            if cleaned:
+                stats["lord_name"] = cleaned
+
+        # Fallback: the <title> is "Lord Profile — NAME | Call of Stats"
+        if not stats["lord_name"]:
+            title_match = re.search(r'<title>\s*Lord Profile\s*[—–-]\s*(.*?)\s*\|\s*Call of Stats', html, re.DOTALL)
+            if title_match:
+                cleaned = _clean_heading(title_match.group(1))
+                if cleaned:
+                    stats["lord_name"] = cleaned
+                    log_info(f"[PARSE] Lord name taken from <title> fallback: {cleaned}")
+
+        # Extract alliance tag - <h2 class="higher-value">[TAG]</h2> (same tolerant matching)
+        tag_match = re.search(
+            r'<h2\b[^>]*\bclass="[^"]*higher-value[^"]*"[^>]*>(.*?)</h2>',
+            html, re.DOTALL
+        )
         if tag_match:
-            stats["alliance_tag"] = tag_match.group(1).strip()
+            cleaned = _clean_heading(tag_match.group(1))
+            if cleaned:
+                stats["alliance_tag"] = cleaned
         
         # Power stats
         stats["power_gain"] = find_stat_value("Highest Power")
