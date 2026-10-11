@@ -215,7 +215,7 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
     Returns:
         None (logs success/errors)
     """
-    role = guild.get_role(ABYSS_ROLE_ID)
+    role = guild.get_role(get_setting("abyss_role"))
     if not role:
         log_info(f"[ABYSS] Role not found in guild {guild.id}")
         return
@@ -234,7 +234,7 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
             except Exception as e:
                 log_info(f"[ABYSS] DM error: {e}")
     
-    log_info(f"[ABYSS] Sent DM to {count} members with role {ABYSS_ROLE_ID}")
+    log_info(f"[ABYSS] Sent DM to {count} members with role {role.id}")
 
 
 
@@ -271,7 +271,7 @@ async def upload_backup(path):
         None
     """
     try:
-        ch = bot.get_channel(BACKUP_CHANNEL_ID)
+        ch = bot.get_channel(get_setting("backup_channel"))
         if ch:
             await ch.send("📦 **Backup created**", file=discord.File(path))
     except Exception as e:
@@ -1315,6 +1315,252 @@ def _unix_utc(dt):
     value as the server's local time, so pin it to UTC explicitly."""
     return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
+# ============================================================
+# BOT SETTINGS — editable at runtime with /settings
+# ============================================================
+# Stored in the same /data database as events (so they survive redeploys and ride along in the
+# backups). To add a new setting: add ONE entry to SETTINGS_SCHEMA, then read it with
+# get_setting("key") wherever it's used — /settings picks it up automatically.
+# Every `default` below is the value that used to be hardcoded, so nothing changes until
+# someone edits it.
+
+import re
+
+SETTING_GROUPS = [
+    ("channels", "📡 Channels & roles"),
+    ("events", "📅 Events & reminders"),
+    ("alerts", "🚨 Alerts"),
+    ("clock", "🕒 Clock channel"),
+]
+
+SETTINGS_SCHEMA = {
+    # ---- Channels & roles ----
+    "events_channel": {
+        "group": "channels", "label": "Events channel", "type": "channel",
+        "channel_types": ["text"], "default": channel_id,
+        "desc": "Where custom-event reminders are posted (also the server Abyss reminder DMs go out for).",
+    },
+    "event_role": {
+        "group": "channels", "label": "Default event role", "type": "role",
+        "default": EVENT_ANNOUNCEMENT_ROLE_ID,
+        "desc": "Role pinged in an event's reminder unless that event has its own tag.",
+    },
+    "abyss_role": {
+        "group": "channels", "label": "Abyss role", "type": "role",
+        "default": ABYSS_ROLE_ID,
+        "desc": "Gets the Abyss reminder DMs; also the role /addrole and /removerole hand out.",
+    },
+    "alerts_channel": {
+        "group": "channels", "label": "Bot notices channel", "type": "channel",
+        "channel_types": ["text"], "default": update_channel_id,
+        "desc": "Where 'bot restarted' notices go, and where alerts land if your DMs are closed.",
+    },
+    "backup_channel": {
+        "group": "channels", "label": "Backup channel", "type": "channel",
+        "channel_types": ["text"], "default": BACKUP_CHANNEL_ID,
+        "desc": "Where backup zips and 'new Call of Stats data' notices are posted.",
+    },
+    # ---- Events & reminders ----
+    "event_cleanup_minutes": {
+        "group": "events", "label": "Remove events after", "type": "int",
+        "min": 0, "max": 1440, "unit": " min", "default": 60,
+        "desc": "How long after an event starts it's removed from the schedule.",
+    },
+    # ---- Alerts ----
+    "parse_alarm_enabled": {
+        "group": "alerts", "label": "Parsing alarm", "type": "bool", "default": True,
+        "desc": "DM the owner if Call of Stats pages stop parsing (layout change, login page, ...).",
+    },
+    "parse_alarm_percent": {
+        "group": "alerts", "label": "Alarm sensitivity", "type": "int",
+        "min": 10, "max": 100, "unit": "%", "default": 60,
+        "desc": "Alert when at least this % of recently read pages fail to parse.",
+    },
+    "parse_alarm_cooldown_hours": {
+        "group": "alerts", "label": "Alarm cooldown", "type": "int",
+        "min": 1, "max": 72, "unit": " h", "default": 6,
+        "desc": "Minimum hours between repeat alerts while it stays broken.",
+    },
+    # ---- Clock channel ----
+    "clock_enabled": {
+        "group": "clock", "label": "Clock channel", "type": "bool", "default": False,
+        "desc": "Keep a voice channel's name updated with the current time.",
+    },
+    "clock_channel": {
+        "group": "clock", "label": "Clock channel to update", "type": "channel",
+        "channel_types": ["voice"], "default": None,
+        "desc": "Pick a voice channel, or let me create one. The bot needs Manage Channels on it.",
+    },
+    "clock_format": {
+        "group": "clock", "label": "Time format", "type": "choice",
+        "choices": ["24h", "12h"], "default": "24h",
+        "desc": "24h shows 13:40, 12h shows 1:40pm.",
+    },
+    "clock_timezone": {
+        "group": "clock", "label": "Time zone", "type": "text", "max": 40,
+        "validate": "timezone", "default": "UTC",
+        "desc": "Any tz name, e.g. UTC, Asia/Dubai, Europe/London.",
+    },
+    "clock_label": {
+        "group": "clock", "label": "Channel name text", "type": "text", "max": 40,
+        "default": "Time UTC",
+        "desc": "Text before the time: 'Time UTC' becomes 'Time UTC: 13:40'.",
+    },
+    "clock_interval_min": {
+        "group": "clock", "label": "Update every", "type": "choice",
+        "choices": [10, 15, 30, 60], "unit": " min", "default": 10,
+        "desc": "Discord only allows ~2 channel renames per 10 min, so 10 min is the fastest safe pace.",
+    },
+}
+
+_SETTINGS_CACHE = {}   # key -> value, only for settings that were changed from the default
+
+
+def init_settings():
+    """Create the settings table (if needed) and load saved values into memory."""
+    try:
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT,
+                updated_by TEXT
+            );
+        """)
+        c.execute("SELECT key, value FROM bot_settings")
+        rows = c.fetchall()
+        conn.commit()
+        conn.close()
+        _SETTINGS_CACHE.clear()
+        for key, raw in rows:
+            if key not in SETTINGS_SCHEMA:
+                continue  # setting was removed from the code; ignore the stale row
+            try:
+                _SETTINGS_CACHE[key] = json.loads(raw)
+            except Exception as e:
+                log_error(f"[SETTINGS] Bad stored value for {key!r}: {e}")
+        log_info(f"[SETTINGS] Loaded {len(_SETTINGS_CACHE)} saved setting(s)")
+    except Exception as e:
+        log_error(f"[SETTINGS] init failed: {e}")
+
+
+def get_setting(key):
+    """Current value of a setting (saved value, else the built-in default)."""
+    return _SETTINGS_CACHE.get(key, SETTINGS_SCHEMA[key]["default"])
+
+
+def set_setting(key, value, user_id=None):
+    """Save a setting (already validated by coerce_setting_value) and apply it immediately."""
+    SETTINGS_SCHEMA[key]  # KeyError on typos instead of silently saving junk
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO bot_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+        (key, json.dumps(value), datetime.utcnow().isoformat(), str(user_id) if user_id else None),
+    )
+    conn.commit()
+    conn.close()
+    _SETTINGS_CACHE[key] = value
+    silent_backup()
+
+
+def reset_setting(key):
+    """Put a setting back to its built-in default."""
+    SETTINGS_SCHEMA[key]
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM bot_settings WHERE key=?", (key,))
+    conn.commit()
+    conn.close()
+    _SETTINGS_CACHE.pop(key, None)
+    silent_backup()
+
+
+def _find_timezone(name):
+    """Case-insensitive timezone lookup. Returns the canonical pytz name, or None."""
+    s = (name or "").strip()
+    if not s:
+        return None
+    if s.lower() in ("utc", "gmt", "z"):
+        return "UTC"
+    lookup = {t.lower(): t for t in pytz.all_timezones}
+    return lookup.get(s.lower().replace(" ", "_"))
+
+
+def coerce_setting_value(key, raw):
+    """Validate and convert user input for a setting. Returns (value, error_text_or_None)."""
+    spec = SETTINGS_SCHEMA[key]
+    kind = spec["type"]
+
+    if kind in ("channel", "role"):
+        digits = re.sub(r"\D", "", str(raw))  # accepts an ID, <#id> or <@&id>
+        if not digits:
+            return None, f"Couldn't read an ID from '{raw}'."
+        return int(digits), None
+
+    if kind == "bool":
+        if isinstance(raw, bool):
+            return raw, None
+        s = str(raw).strip().lower()
+        if s in ("1", "true", "yes", "y", "on", "enable", "enabled"):
+            return True, None
+        if s in ("0", "false", "no", "n", "off", "disable", "disabled"):
+            return False, None
+        return None, "Use on or off."
+
+    if kind == "int":
+        try:
+            n = int(str(raw).strip())
+        except ValueError:
+            return None, f"'{raw}' isn't a whole number."
+        lo, hi = spec.get("min"), spec.get("max")
+        if (lo is not None and n < lo) or (hi is not None and n > hi):
+            return None, f"Must be between {lo} and {hi}."
+        return n, None
+
+    if kind == "choice":
+        for option in spec["choices"]:
+            if str(option).lower() == str(raw).strip().lower():
+                return option, None
+        return None, "Pick one of: " + ", ".join(str(o) for o in spec["choices"])
+
+    if kind == "text":
+        s = str(raw).strip()
+        if not s:
+            return None, "Can't be empty."
+        limit = spec.get("max", 100)
+        if len(s) > limit:
+            return None, f"Max {limit} characters."
+        if spec.get("validate") == "timezone":
+            tz = _find_timezone(s)
+            if not tz:
+                return None, f"'{s}' isn't a known time zone. Try UTC, Asia/Dubai or Europe/London."
+            return tz, None
+        return s, None
+
+    return None, "Unsupported setting type."
+
+
+def format_setting_value(key, value):
+    """Human-readable (Discord-markdown) form of a setting's value."""
+    spec = SETTINGS_SCHEMA[key]
+    kind = spec["type"]
+    if value is None:
+        return "*not set*"
+    if kind == "channel":
+        return f"<#{value}>"
+    if kind == "role":
+        return f"<@&{value}>"
+    if kind == "bool":
+        return "✅ On" if value else "❌ Off"
+    return f"`{value}{spec.get('unit', '')}`"
+
+
+init_settings()
+
+
 def db_save_kvk_matchup(nickname, num_zones, zones_data, team1_zones, team2_zones, team1_totals, team2_totals):
     import json
     conn = sqlite3.connect(DB)
@@ -2290,9 +2536,9 @@ _PARSE_HEALTH = deque(maxlen=80)   # (utc time, ok, problem text | None, page <t
 _PARSE_ALARM = {"alerting": False, "last_alert": None}
 PARSE_ALARM_WINDOW_MIN = 60        # only look at parses from the last hour
 PARSE_ALARM_MIN_SAMPLES = 4        # a single odd !progress lookup must never trigger it
-PARSE_ALARM_BAD_RATIO = 0.6        # alert when >= 60% of recent parses are bad
 PARSE_ALARM_RECOVER_RATIO = 0.2    # "recovered" once <= 20% are bad
-PARSE_ALARM_COOLDOWN_HOURS = 6     # don't re-alert more often than this while it stays broken
+# On/off, sensitivity (% bad) and the re-alert cooldown are /settings values:
+#   parse_alarm_enabled, parse_alarm_percent, parse_alarm_cooldown_hours
 
 # Labels present on EVERY valid lord page (a stat of 0 still has its label) — if one is
 # missing, COS changed its layout or we weren't served the real page.
@@ -2358,7 +2604,7 @@ async def _notify_owner(message):
     except Exception as e:
         log_info(f"[PARSE ALARM] DM to owner failed ({type(e).__name__}: {e}), trying update channel")
     try:
-        ch = bot.get_channel(update_channel_id)
+        ch = bot.get_channel(get_setting("alerts_channel"))
         if ch:
             await ch.send(f"<@{OWNER_ID}> {message}")
             return True
@@ -2370,14 +2616,18 @@ async def _notify_owner(message):
 @tasks.loop(minutes=5)
 async def parse_health_monitor():
     try:
+        if not get_setting("parse_alarm_enabled"):
+            return
         now = datetime.utcnow()
         h = _evaluate_parse_health(list(_PARSE_HEALTH), now)
         if not h:
             return
+        bad_ratio = get_setting("parse_alarm_percent") / 100
+        cooldown_hours = get_setting("parse_alarm_cooldown_hours")
 
-        if h["ratio"] >= PARSE_ALARM_BAD_RATIO:
+        if h["ratio"] >= bad_ratio:
             last = _PARSE_ALARM["last_alert"]
-            if last is not None and now - last < timedelta(hours=PARSE_ALARM_COOLDOWN_HOURS):
+            if last is not None and now - last < timedelta(hours=cooldown_hours):
                 return
             lines = [
                 "⚠️ **Call of Stats parsing looks broken**",
@@ -2391,7 +2641,7 @@ async def parse_health_monitor():
             lines.append(
                 "Usually this means COS changed its HTML, or the bot was served a login/Cloudflare "
                 "page. Names and stats in !progress / leaderboards may be wrong or empty until it's "
-                f"fixed. I'll stay quiet for {PARSE_ALARM_COOLDOWN_HOURS}h and DM you when it recovers."
+                f"fixed. I'll stay quiet for {cooldown_hours}h and DM you when it recovers."
             )
             log_error(f"[PARSE ALARM] {h['bad']}/{h['total']} bad parses: {h['problems']}")
             if await _notify_owner("\n".join(lines)):
@@ -2890,7 +3140,7 @@ async def check_callofstats_update():
             try:
                 guild = bot.get_guild(bot.guilds[0].id) if bot.guilds else None
                 if guild:
-                    update_channel = guild.get_channel(BACKUP_CHANNEL_ID)
+                    update_channel = guild.get_channel(get_setting("backup_channel"))
                     if update_channel:
                         embed = discord.Embed(
                             title="🔄 Call of Stats Update",
@@ -2902,7 +3152,7 @@ async def check_callofstats_update():
                         
                         # Also mark as notified
                         db_mark_update_notified()
-                        log_info(f"[CALLOFSTATS UPDATE] Notification sent to channel {BACKUP_CHANNEL_ID}")
+                        log_info(f"[CALLOFSTATS UPDATE] Notification sent to channel {update_channel.id}")
             except Exception as e:
                 log_info(f"[CALLOFSTATS UPDATE CHANNEL ERROR] {e}")
     except Exception as e:
@@ -3038,7 +3288,11 @@ async def on_ready():
     if not parse_health_monitor.is_running():
         parse_health_monitor.start()
 
-    ch = bot.get_channel(update_channel_id)
+    # ✅ LIVE CHANNELS (clock channel etc. — configured in /settings)
+    if not live_channels_loop.is_running():
+        live_channels_loop.start()
+
+    ch = bot.get_channel(get_setting("alerts_channel"))
     if ch:
         await ch.send("🤖 Bot restarted successfully.")
 
@@ -8327,7 +8581,7 @@ async def editevent(inter: discord.Interaction):
 
 @bot.tree.command(name="addrole", description="Get the Abyss role")
 async def addrole(interaction: discord.Interaction):
-    role = interaction.guild.get_role(ABYSS_ROLE_ID)
+    role = interaction.guild.get_role(get_setting("abyss_role"))
     if not role:
         return await interaction.response.send_message(
             "❌ Abyss role not found.", ephemeral=True
@@ -8345,7 +8599,7 @@ async def addrole(interaction: discord.Interaction):
     )
 @bot.tree.command(name="removerole", description="Remove the Abyss role")
 async def removerole(interaction: discord.Interaction):
-    role = interaction.guild.get_role(ABYSS_ROLE_ID)
+    role = interaction.guild.get_role(get_setting("abyss_role"))
     if not role:
         return await interaction.response.send_message(
             "❌ Abyss role not found.", ephemeral=True
@@ -8583,7 +8837,7 @@ async def abyss_reminder_loop():
                     description=f"Abyss starts in **{REMINDER_MINS} minutes**!",
                     color=0xE74C3C
                 )
-                ch = bot.get_channel(channel_id)
+                ch = bot.get_channel(get_setting("events_channel"))
                 if ch and ch.guild:
                     await dm_abyss_role(ch.guild, embed)
                 else:
@@ -8596,7 +8850,7 @@ async def abyss_reminder_loop():
                     description=f"Round 2 starts in **{REMINDER_MINS} minutes**!",
                     color=0xF1C40F
                 )
-                ch = bot.get_channel(channel_id)
+                ch = bot.get_channel(get_setting("events_channel"))
                 if ch and ch.guild:
                     await dm_abyss_role(ch.guild, embed)
                 else:
@@ -8628,10 +8882,12 @@ def _reminder_due(now, dt_obj, rem, already_reminded):
 async def custom_event_loop():
     try:
         now = datetime.utcnow().replace(second=0, microsecond=0)
-        ch = bot.get_channel(channel_id)
+        ch = bot.get_channel(get_setting("events_channel"))
         if not ch:
             return
 
+        cleanup_minutes = get_setting("event_cleanup_minutes")
+        default_event_role = get_setting("event_role")
         rows = db_get_events()
         event_tags = db_get_event_tags()
         # "Already reminded" lives in the DB (not memory), so a redeploy/restart between the
@@ -8645,8 +8901,8 @@ async def custom_event_loop():
                 log_info(f"[CUSTOM EVENT LOOP] Skipping event {event_id}: bad datetime {dt!r}")
                 continue
 
-            # Delete events 1 hour after they pass
-            if now >= dt_obj + timedelta(hours=1):
+            # Remove events N minutes after they start (N is a /settings value, default 60)
+            if now >= dt_obj + timedelta(minutes=cleanup_minutes):
                 db_delete_event(event_id)
                 continue
 
@@ -8663,7 +8919,7 @@ async def custom_event_loop():
             # One failing send must not stop the remaining events (or block them every minute)
             try:
                 # Per-event tag (user and/or role) if one was set, else the default role
-                tag = event_tags.get(event_id) or f"<@&{EVENT_ANNOUNCEMENT_ROLE_ID}>"
+                tag = event_tags.get(event_id) or f"<@&{default_event_role}>"
                 await ch.send(
                     f"{tag} ⏰ Reminder: **{name}** in {mins} minutes! "
                     f"<t:{_unix_utc(dt_obj)}:F>"
@@ -8673,6 +8929,371 @@ async def custom_event_loop():
                 log_info(f"[CUSTOM EVENT LOOP] Reminder send failed for '{name}': {type(e).__name__}: {e}")
     except Exception as e:
         log_info(f"[CUSTOM EVENT LOOP ERROR] {type(e).__name__}: {e}")
+
+
+# ============================================================
+# LIVE CHANNELS — channels whose NAME the bot keeps updated (clock, ...)
+# ============================================================
+# Discord only allows about 2 renames per 10 minutes per channel, so each channel is renamed at
+# most once per LIVE_CHANNEL_MIN_GAP_SECONDS (6 min) however often settings change, and never
+# when its name is already right (so a restart doesn't burn the rename budget).
+#
+# To add another live channel (member count, next-event countdown, ...): add its settings to
+# SETTINGS_SCHEMA and append one {"key", "channel_id", "name"} dict in _live_channel_specs().
+
+LIVE_CHANNEL_MIN_GAP_SECONDS = 360
+_LIVE_LAST_EDIT = {}     # spec key -> utc time of our last rename attempt
+_LIVE_WARNED = set()     # spec keys we've already logged a problem for (avoids log spam)
+
+
+def _clock_text(now_utc, tz_name, fmt, interval_min):
+    """The time as text, rounded DOWN to the update interval, so the name only changes on clean
+    boundaries (13:00, 13:10, ...) instead of at whatever minute the bot happened to tick."""
+    try:
+        tz = pytz.timezone(tz_name)
+    except Exception:
+        tz = pytz.utc
+    local = pytz.utc.localize(now_utc).astimezone(tz)
+    step = max(1, int(interval_min))
+    local = local.replace(minute=(local.minute // step) * step, second=0, microsecond=0)
+    if fmt == "12h":
+        return local.strftime("%I:%M%p").lstrip("0").lower()
+    return local.strftime("%H:%M")
+
+
+def _render_clock_name(now_utc):
+    text = _clock_text(
+        now_utc,
+        get_setting("clock_timezone"),
+        get_setting("clock_format"),
+        get_setting("clock_interval_min"),
+    )
+    return f"{get_setting('clock_label')}: {text}"[:100]  # Discord channel names max out at 100
+
+
+def _live_channel_specs(now_utc):
+    """Every channel the bot should keep renamed right now."""
+    specs = []
+    if get_setting("clock_enabled") and get_setting("clock_channel"):
+        specs.append({
+            "key": "clock",
+            "channel_id": get_setting("clock_channel"),
+            "name": _render_clock_name(now_utc),
+        })
+    return specs
+
+
+def _live_should_edit(current_name, desired_name, last_edit, now, min_gap=LIVE_CHANNEL_MIN_GAP_SECONDS):
+    """Rename only if the name is actually wrong AND we're outside the rate-limit gap."""
+    if current_name == desired_name:
+        return False
+    if last_edit is not None and (now - last_edit).total_seconds() < min_gap:
+        return False
+    return True
+
+
+@tasks.loop(minutes=1)
+async def live_channels_loop():
+    try:
+        now = datetime.utcnow()
+        for spec in _live_channel_specs(now):
+            key = spec["key"]
+            ch = bot.get_channel(spec["channel_id"])
+            if ch is None:
+                if key not in _LIVE_WARNED:
+                    _LIVE_WARNED.add(key)
+                    log_info(f"[LIVE CHANNEL] '{key}': channel {spec['channel_id']} not found — check /settings")
+                continue
+            if not _live_should_edit(ch.name, spec["name"], _LIVE_LAST_EDIT.get(key), now):
+                continue
+            try:
+                await ch.edit(name=spec["name"], reason="Live channel update")
+                _LIVE_LAST_EDIT[key] = now
+                _LIVE_WARNED.discard(key)
+                log_info(f"[LIVE CHANNEL] '{key}' renamed to {spec['name']!r}")
+            except discord.Forbidden:
+                _LIVE_LAST_EDIT[key] = now  # back off instead of retrying every minute
+                if key not in _LIVE_WARNED:
+                    _LIVE_WARNED.add(key)
+                    log_info(f"[LIVE CHANNEL] '{key}': missing Manage Channels on <#{spec['channel_id']}>")
+            except discord.HTTPException as e:
+                _LIVE_LAST_EDIT[key] = now
+                log_info(f"[LIVE CHANNEL] '{key}' rename failed: {type(e).__name__}: {e}")
+    except Exception as e:
+        log_info(f"[LIVE CHANNEL LOOP ERROR] {type(e).__name__}: {e}")
+
+
+# ============================================================
+# /settings — change bot configuration without touching the source
+# ============================================================
+
+def _settings_overview_embed(group_key, note=None):
+    title = dict(SETTING_GROUPS)[group_key]
+    embed = discord.Embed(title=f"⚙️ Settings — {title}", description=note, color=0x5865F2)
+    for key, spec in SETTINGS_SCHEMA.items():
+        if spec["group"] != group_key:
+            continue
+        marker = "" if key in _SETTINGS_CACHE else "  *(default)*"
+        embed.add_field(
+            name=spec["label"],
+            value=f"{format_setting_value(key, get_setting(key))}{marker}\n*{spec['desc']}*",
+            inline=False,
+        )
+    embed.set_footer(text="Pick a setting below to change it. Changes apply immediately and survive restarts.")
+    return embed
+
+
+def _setting_editor_embed(key, note=None):
+    spec = SETTINGS_SCHEMA[key]
+    embed = discord.Embed(title=f"⚙️ {spec['label']}", description=spec["desc"], color=0x5865F2)
+    marker = "" if key in _SETTINGS_CACHE else "  *(default)*"
+    embed.add_field(name="Current", value=f"{format_setting_value(key, get_setting(key))}{marker}", inline=True)
+    embed.add_field(name="Default", value=format_setting_value(key, spec["default"]), inline=True)
+    if note:
+        embed.add_field(name="Note", value=note, inline=False)
+    return embed
+
+
+def _setting_warning(key, value, guild):
+    """A heads-up (not an error) when the bot can't actually do its job with the chosen channel/role."""
+    spec = SETTINGS_SCHEMA[key]
+    if not guild or value is None:
+        return None
+    me = guild.me
+    if spec["type"] == "channel":
+        ch = guild.get_channel(value)
+        if ch is None:
+            return "⚠️ I can't see that channel."
+        perms = ch.permissions_for(me)
+        if key == "clock_channel":
+            if not perms.manage_channels:
+                return "⚠️ I need **Manage Channels** on that channel to rename it."
+        elif not (perms.view_channel and perms.send_messages):
+            return "⚠️ I can't post in that channel."
+    elif spec["type"] == "role":
+        role = guild.get_role(value)
+        if role is None:
+            return "⚠️ That role doesn't exist in this server."
+        if key == "event_role" and not (role.mentionable or me.guild_permissions.mention_everyone):
+            return "⚠️ That role isn't mentionable and I lack **Mention Everyone**, so pings won't notify anyone."
+    return None
+
+
+def _saved_note(key, value, guild):
+    spec = SETTINGS_SCHEMA[key]
+    note = f"✅ **{spec['label']}** is now {format_setting_value(key, value)}."
+    warning = _setting_warning(key, value, guild)
+    if warning:
+        note += f"\n{warning}"
+    if key.startswith("clock_"):
+        note += "\nThe channel name updates within a minute (Discord limits renames, so repeat changes can take a few minutes)."
+    return note
+
+
+class _OwnerOnlyView(discord.ui.View):
+    """Only the admin who opened /settings can press its controls."""
+    def __init__(self, owner_id, timeout=300):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, inter):
+        if inter.user.id != self.owner_id or not has_admin(inter):
+            await inter.response.send_message("❌ Only the admin who opened this can use it.", ephemeral=True)
+            return False
+        return True
+
+
+class SettingsView(_OwnerOnlyView):
+    """Category picker + setting picker."""
+    def __init__(self, owner_id, group="channels"):
+        super().__init__(owner_id)
+        self.group = group
+
+        self._group_select = discord.ui.Select(
+            placeholder="Category",
+            options=[discord.SelectOption(label=label, value=k, default=(k == group)) for k, label in SETTING_GROUPS],
+            row=0,
+        )
+        self._group_select.callback = self._pick_group
+        self.add_item(self._group_select)
+
+        keys = [k for k, s in SETTINGS_SCHEMA.items() if s["group"] == group]
+        self._setting_select = discord.ui.Select(
+            placeholder="Choose a setting to change…",
+            options=[
+                discord.SelectOption(label=SETTINGS_SCHEMA[k]["label"], value=k,
+                                     description=SETTINGS_SCHEMA[k]["desc"][:100])
+                for k in keys
+            ],
+            row=1,
+        )
+        self._setting_select.callback = self._pick_setting
+        self.add_item(self._setting_select)
+
+    async def _pick_group(self, inter):
+        group = self._group_select.values[0]
+        await inter.response.edit_message(embed=_settings_overview_embed(group), view=SettingsView(self.owner_id, group))
+
+    async def _pick_setting(self, inter):
+        key = self._setting_select.values[0]
+        await inter.response.edit_message(embed=_setting_editor_embed(key), view=SettingEditorView(self.owner_id, key))
+
+
+class SettingEditorView(_OwnerOnlyView):
+    """Editor for ONE setting — the control shown depends on the setting's type."""
+    def __init__(self, owner_id, key):
+        super().__init__(owner_id)
+        self.key = key
+        spec = SETTINGS_SCHEMA[key]
+        kind = spec["type"]
+
+        if kind == "channel":
+            type_map = {"text": discord.ChannelType.text, "voice": discord.ChannelType.voice}
+            types = [type_map[t] for t in spec.get("channel_types", ["text"])]
+            sel = discord.ui.ChannelSelect(placeholder="Pick a channel…", channel_types=types,
+                                           min_values=1, max_values=1, row=0)
+            sel.callback = lambda i, s=sel: self._save(i, s.values[0].id)
+            self.add_item(sel)
+        elif kind == "role":
+            sel = discord.ui.RoleSelect(placeholder="Pick a role…", min_values=1, max_values=1, row=0)
+            sel.callback = lambda i, s=sel: self._save(i, s.values[0].id)
+            self.add_item(sel)
+        elif kind == "bool":
+            for label, val, style in (("Turn on", True, discord.ButtonStyle.success),
+                                      ("Turn off", False, discord.ButtonStyle.danger)):
+                btn = discord.ui.Button(label=label, style=style, row=0)
+                btn.callback = lambda i, v=val: self._save(i, v)
+                self.add_item(btn)
+        elif kind == "choice":
+            current = get_setting(key)
+            sel = discord.ui.Select(
+                placeholder="Choose…",
+                options=[discord.SelectOption(label=f"{c}{spec.get('unit', '')}", value=str(c), default=(c == current))
+                         for c in spec["choices"]],
+                row=0,
+            )
+            sel.callback = lambda i, s=sel: self._save_raw(i, s.values[0])
+            self.add_item(sel)
+        else:  # int / text -> modal
+            btn = discord.ui.Button(label="✏️ Change value", style=discord.ButtonStyle.primary, row=0)
+            btn.callback = self._open_modal
+            self.add_item(btn)
+
+        reset = discord.ui.Button(label="↩ Reset to default", style=discord.ButtonStyle.secondary, row=1)
+        reset.callback = self._reset
+        self.add_item(reset)
+
+        back = discord.ui.Button(label="⬅ Back", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self._back
+        self.add_item(back)
+
+        if key == "clock_channel":
+            create = discord.ui.Button(label="➕ Create a clock channel for me",
+                                       style=discord.ButtonStyle.success, row=1)
+            create.callback = self._create_clock_channel
+            self.add_item(create)
+
+    def _overview(self, note=None):
+        group = SETTINGS_SCHEMA[self.key]["group"]
+        return _settings_overview_embed(group, note), SettingsView(self.owner_id, group)
+
+    async def _save(self, inter, value):
+        set_setting(self.key, value, inter.user.id)
+        embed, view = self._overview(_saved_note(self.key, value, inter.guild))
+        await inter.response.edit_message(embed=embed, view=view)
+
+    async def _save_raw(self, inter, raw):
+        value, err = coerce_setting_value(self.key, raw)
+        if err:
+            return await inter.response.send_message(f"❌ {err}", ephemeral=True)
+        await self._save(inter, value)
+
+    async def _open_modal(self, inter):
+        await inter.response.send_modal(SettingValueModal(self.owner_id, self.key))
+
+    async def _reset(self, inter):
+        reset_setting(self.key)
+        spec = SETTINGS_SCHEMA[self.key]
+        embed, view = self._overview(
+            f"↩ **{spec['label']}** reset to the default ({format_setting_value(self.key, spec['default'])})."
+        )
+        await inter.response.edit_message(embed=embed, view=view)
+
+    async def _back(self, inter):
+        embed, view = self._overview()
+        await inter.response.edit_message(embed=embed, view=view)
+
+    async def _create_clock_channel(self, inter):
+        await inter.response.defer()  # creating a channel can take longer than the 3s reply window
+        guild = inter.guild
+        try:
+            ch = await guild.create_voice_channel(
+                name=_render_clock_name(datetime.utcnow()),
+                # everyone can see it, nobody can join it — it's a display-only channel
+                overwrites={guild.default_role: discord.PermissionOverwrite(connect=False)},
+                reason=f"Clock channel created by {inter.user} via /settings",
+            )
+        except discord.Forbidden:
+            return await inter.edit_original_response(
+                embed=_setting_editor_embed(self.key, "❌ I need the **Manage Channels** permission to create it."),
+                view=SettingEditorView(self.owner_id, self.key),
+            )
+        except Exception as e:
+            return await inter.edit_original_response(
+                embed=_setting_editor_embed(self.key, f"❌ Couldn't create it: {e}"),
+                view=SettingEditorView(self.owner_id, self.key),
+            )
+        set_setting("clock_channel", ch.id, inter.user.id)
+        set_setting("clock_enabled", True, inter.user.id)
+        await inter.edit_original_response(
+            embed=_settings_overview_embed(
+                "clock",
+                f"✅ Created {ch.mention} and turned the clock on. "
+                "If another bot also renames a time channel, turn that one off or they'll keep overwriting each other.",
+            ),
+            view=SettingsView(self.owner_id, "clock"),
+        )
+
+
+class SettingValueModal(discord.ui.Modal):
+    """Text box for number/text settings."""
+    def __init__(self, owner_id, key):
+        spec = SETTINGS_SCHEMA[key]
+        super().__init__(title=spec["label"][:45])
+        self.owner_id = owner_id
+        self.key = key
+        self.value_input = discord.ui.TextInput(
+            label=spec["label"][:45],
+            default=str(get_setting(key)),
+            max_length=12 if spec["type"] == "int" else spec.get("max", 100),
+            required=True,
+            placeholder=(f"{spec['min']} to {spec['max']}" if spec["type"] == "int" else None),
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, inter):
+        value, err = coerce_setting_value(self.key, self.value_input.value)
+        if err:
+            return await inter.response.send_message(f"❌ {err}", ephemeral=True)
+        set_setting(self.key, value, inter.user.id)
+        group = SETTINGS_SCHEMA[self.key]["group"]
+        await inter.response.edit_message(
+            embed=_settings_overview_embed(group, _saved_note(self.key, value, inter.guild)),
+            view=SettingsView(self.owner_id, group),
+        )
+
+
+@bot.tree.command(name="settings", description="View and change the bot's settings (admin only)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def settings_command(inter: discord.Interaction):
+    if not has_admin(inter):
+        return await inter.response.send_message("❌ Admin only.", ephemeral=True)
+    await inter.response.send_message(
+        embed=_settings_overview_embed("channels"),
+        view=SettingsView(inter.user.id, "channels"),
+        ephemeral=True,
+    )
 
 
 # ============================================================
