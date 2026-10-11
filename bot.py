@@ -576,19 +576,55 @@ async def fetch_advanced_stats_ranged(account_id, start_date, end_date):
     return result
 
 
+def _parse_max_decorations(html):
+    """
+    Parse the MAX DECORATIONS achievement from a COS lord page. It has its own block
+    (<div class="max-deco-achievement">) laid out differently from the grid rows used by
+    Max Pets / Exchange Coins — the name sits on separate lines and the target only
+    appears inside "Not Completed (N)" — so the generic row regexes can't read it.
+
+    Returns a short display string, or None if the block isn't on the page:
+      "1/5"  -> progress 1, target 5, not completed yet
+      "5 ✅"  -> completed (COS drops the target once it's done)
+    """
+    import re
+    m = re.search(r'class="max-deco-achievement"[^>]*>(.*?)<div class="achievements-grid"', html, re.DOTALL)
+    if m:
+        block = m.group(1)
+    else:
+        i = html.find("max-deco-achievement")
+        if i == -1:
+            return None
+        block = html[i:i + 1500]
+
+    p = re.search(r'achievement-values">\s*<span>\s*\+?([0-9,]+)\s*</span>', block)
+    if not p:
+        return None
+    progress = int(p.group(1).replace(",", ""))
+
+    t = re.search(r'achievement-not-completed">\s*Not Completed\s*\(\s*([0-9,]+)\s*\)', block)
+    if t:
+        return f"{progress}/{int(t.group(1).replace(',', ''))}"
+    if "achievement-completed" in block:
+        return f"{progress} ✅"
+    return str(progress)
+
+
 async def fetch_achievement_stats(account_id, selected_date=None):
     """
-    Fetch EXCHANGE COINS SPENT and MAX PETS achievement values from the profile page.
-    If selected_date is given, fetches the value AS OF that date (for computing an increase
-    over a range, same as Highest Power). Otherwise fetches the current/live value.
-    Returns dict {"exchange_coins_spent": int|None, "max_pets": int|None}.
+    Fetch EXCHANGE COINS SPENT, MAX PETS and MAX DECORATIONS achievement values from the
+    profile page. If selected_date is given, fetches the value AS OF that date (for
+    computing an increase over a range, same as Highest Power). Otherwise fetches the
+    current/live value.
+    Returns dict {"exchange_coins_spent": int|None, "max_pets": int|None,
+                  "max_decorations": str|None}  (max_decorations is display text, e.g. "1/5").
     """
     import re
 
     url = f"https://callofstats.com/lord/{account_id}"
     if selected_date:
         url += f"?selected_date={selected_date}"
-    result = {"exchange_coins_spent": None, "max_pets": None}
+    result = {"exchange_coins_spent": None, "max_pets": None, "max_decorations": None}
 
     achievement_patterns = {
         "exchange_coins_spent": [
@@ -639,9 +675,16 @@ async def fetch_achievement_stats(account_id, selected_date=None):
                             except Exception as e:
                                 log_info(f"[ACHIEVEMENTS] Parse error for {key}: {e}")
 
+                try:
+                    result["max_decorations"] = _parse_max_decorations(html)
+                    if result["max_decorations"] is not None:
+                        log_info(f"[ACHIEVEMENTS] {account_id} max_decorations = {result['max_decorations']}")
+                except Exception as e:
+                    log_info(f"[ACHIEVEMENTS] Parse error for max_decorations: {e}")
+
                 # If we got at least one value, or this is the last attempt, return what we have
-                if result["exchange_coins_spent"] is not None or result["max_pets"] is not None or attempt == 2:
-                    if result["exchange_coins_spent"] is None and result["max_pets"] is None:
+                if any(v is not None for v in result.values()) or attempt == 2:
+                    if all(v is None for v in result.values()):
                         log_info(f"[ACHIEVEMENTS] Nothing found for {account_id}")
                     return result
                 else:
@@ -1159,6 +1202,22 @@ def migrate_db_events():
         if "tag_mentions" not in existing:
             c.execute("ALTER TABLE events ADD COLUMN tag_mentions TEXT")
             log_info("[DB MIGRATE] Added column: events.tag_mentions")
+        if "reminded" not in existing:
+            # 1 = this event's reminder has already been sent. Persisted (instead of the old
+            # in-memory set) so a redeploy/restart can't re-ping everyone.
+            c.execute("ALTER TABLE events ADD COLUMN reminded INTEGER DEFAULT 0")
+            log_info("[DB MIGRATE] Added column: events.reminded")
+            # One-time backfill: the old process tracked this only in memory, which this
+            # deploy just wiped. Any reminder whose time has ALREADY passed was (almost
+            # certainly) sent by the old process, so mark it done rather than pinging again.
+            now = datetime.utcnow()
+            c.execute("SELECT id, datetime, reminder FROM events")
+            for event_id, dt_str, rem in c.fetchall():
+                try:
+                    if rem and rem > 0 and now >= datetime.fromisoformat(dt_str) - timedelta(minutes=rem):
+                        c.execute("UPDATE events SET reminded=1 WHERE id=?", (event_id,))
+                except Exception:
+                    continue
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1184,6 +1243,22 @@ def db_get_event_tags():
     rows = c.fetchall()
     conn.close()
     return {event_id: tag for event_id, tag in rows}
+
+def db_get_reminded_ids():
+    """Return the set of event ids whose reminder has already been sent."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id FROM events WHERE reminded = 1")
+    ids = {row[0] for row in c.fetchall()}
+    conn.close()
+    return ids
+
+def db_mark_event_reminded(event_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE events SET reminded=1 WHERE id=?", (event_id,))
+    conn.commit()
+    conn.close()
 
 def db_set_event_tag(event_id, tag_mentions):
     """Set an event's tag. Pass None/'' to reset it to the default announcement role."""
@@ -1214,6 +1289,10 @@ def db_update_event(event_id, name=None, dt=None, reminder=None):
         c.execute("UPDATE events SET datetime=? WHERE id=?", (dt, event_id))
     if reminder is not None:
         c.execute("UPDATE events SET reminder=? WHERE id=?", (reminder, event_id))
+    if dt is not None or reminder is not None:
+        # The time or lead-time changed, so a reminder that already fired is stale —
+        # let the event remind again at its new reminder time.
+        c.execute("UPDATE events SET reminded=0 WHERE id=?", (event_id,))
 
     conn.commit()
     conn.close()
@@ -2197,6 +2276,139 @@ async def fetch_stats_for_account(account_id, start_date, end_date, skip_cache=F
         log_info(f"[CALLOFSTATS] Fetch error: {e}")
         return None
 
+# ============================================================
+# CALL OF STATS PARSE-HEALTH ALARM
+# ============================================================
+# COS changed its page layout and the bot kept running for days with "None" names and
+# empty stats before anyone noticed. Every parse_stats() call now records whether the page
+# still contained what we rely on. If most recent parses are bad, the owner gets ONE DM
+# (then a cooldown) instead of finding out from wrong numbers, plus a DM when it recovers.
+
+from collections import deque, Counter
+
+_PARSE_HEALTH = deque(maxlen=80)   # (utc time, ok, problem text | None, page <title> | None)
+_PARSE_ALARM = {"alerting": False, "last_alert": None}
+PARSE_ALARM_WINDOW_MIN = 60        # only look at parses from the last hour
+PARSE_ALARM_MIN_SAMPLES = 4        # a single odd !progress lookup must never trigger it
+PARSE_ALARM_BAD_RATIO = 0.6        # alert when >= 60% of recent parses are bad
+PARSE_ALARM_RECOVER_RATIO = 0.2    # "recovered" once <= 20% are bad
+PARSE_ALARM_COOLDOWN_HOURS = 6     # don't re-alert more often than this while it stays broken
+
+# Labels present on EVERY valid lord page (a stat of 0 still has its label) — if one is
+# missing, COS changed its layout or we weren't served the real page.
+_PARSE_CORE_FIELDS = {
+    "power_gain": "Highest Power",
+    "merits": "Merits",
+    "kills_gain": "Units Killed",
+    "deads_gain": "Units Dead",
+    "healed_gain": "Units Healed",
+}
+
+
+def _record_parse_health(stats, html):
+    """Called by parse_stats() for every page it handles. Must never raise."""
+    try:
+        import re as _re_h
+        title = None
+        tm = _re_h.search(r"<title>\s*(.*?)\s*</title>", html or "", _re_h.DOTALL | _re_h.IGNORECASE)
+        if tm:
+            title = _re_h.sub(r"\s+", " ", tm.group(1))[:80]
+
+        problems = []
+        head = (html or "")[:5000].lower()
+        if "sign in to call of stats" in head or "<title>login" in head or "just a moment" in head:
+            problems.append("login/Cloudflare page instead of the lord page")
+        elif stats is None:
+            problems.append("parser crashed")
+        else:
+            if not stats.get("lord_name"):
+                problems.append("lord name not found")
+            missing = [label for key, label in _PARSE_CORE_FIELDS.items() if stats.get(key) is None]
+            if missing:
+                problems.append("missing: " + ", ".join(missing))
+        _PARSE_HEALTH.append((datetime.utcnow(), not problems, "; ".join(problems) or None, title))
+    except Exception:
+        pass
+
+
+def _evaluate_parse_health(entries, now):
+    """Summarise the recent parses. Returns None when there are too few samples to judge,
+    else {"total", "bad", "ratio", "problems": [(text, count)...], "title"}."""
+    cutoff = now - timedelta(minutes=PARSE_ALARM_WINDOW_MIN)
+    recent = [e for e in entries if e[0] >= cutoff]
+    if len(recent) < PARSE_ALARM_MIN_SAMPLES:
+        return None
+    bad = [e for e in recent if not e[1]]
+    return {
+        "total": len(recent),
+        "bad": len(bad),
+        "ratio": len(bad) / len(recent),
+        "problems": Counter(e[2] for e in bad).most_common(3),
+        "title": next((e[3] for e in reversed(bad) if e[3]), None),
+    }
+
+
+async def _notify_owner(message):
+    """DM the owner; if their DMs are closed, post in the update channel instead.
+    Returns True if it was delivered somewhere."""
+    try:
+        owner = bot.get_user(OWNER_ID) or await bot.fetch_user(OWNER_ID)
+        await owner.send(message)
+        return True
+    except Exception as e:
+        log_info(f"[PARSE ALARM] DM to owner failed ({type(e).__name__}: {e}), trying update channel")
+    try:
+        ch = bot.get_channel(update_channel_id)
+        if ch:
+            await ch.send(f"<@{OWNER_ID}> {message}")
+            return True
+    except Exception as e:
+        log_info(f"[PARSE ALARM] Update-channel post failed too: {type(e).__name__}: {e}")
+    return False
+
+
+@tasks.loop(minutes=5)
+async def parse_health_monitor():
+    try:
+        now = datetime.utcnow()
+        h = _evaluate_parse_health(list(_PARSE_HEALTH), now)
+        if not h:
+            return
+
+        if h["ratio"] >= PARSE_ALARM_BAD_RATIO:
+            last = _PARSE_ALARM["last_alert"]
+            if last is not None and now - last < timedelta(hours=PARSE_ALARM_COOLDOWN_HOURS):
+                return
+            lines = [
+                "⚠️ **Call of Stats parsing looks broken**",
+                f"{h['bad']} of the last {h['total']} pages the bot read in the past "
+                f"{PARSE_ALARM_WINDOW_MIN} min came back wrong ({h['ratio']:.0%}).",
+            ]
+            for text, count in h["problems"]:
+                lines.append(f"• {text}  (×{count})")
+            if h["title"]:
+                lines.append(f"Page title it received: \"{h['title']}\"")
+            lines.append(
+                "Usually this means COS changed its HTML, or the bot was served a login/Cloudflare "
+                "page. Names and stats in !progress / leaderboards may be wrong or empty until it's "
+                f"fixed. I'll stay quiet for {PARSE_ALARM_COOLDOWN_HOURS}h and DM you when it recovers."
+            )
+            log_error(f"[PARSE ALARM] {h['bad']}/{h['total']} bad parses: {h['problems']}")
+            if await _notify_owner("\n".join(lines)):
+                _PARSE_ALARM["last_alert"] = now
+                _PARSE_ALARM["alerting"] = True
+
+        elif h["ratio"] <= PARSE_ALARM_RECOVER_RATIO and _PARSE_ALARM["alerting"]:
+            if await _notify_owner(
+                f"✅ **Call of Stats parsing looks healthy again** "
+                f"({h['total'] - h['bad']} of the last {h['total']} pages parsed fine)."
+            ):
+                _PARSE_ALARM["alerting"] = False
+                _PARSE_ALARM["last_alert"] = None
+    except Exception as e:
+        log_info(f"[PARSE ALARM ERROR] {type(e).__name__}: {e}")
+
+
 def parse_stats(html):
     """Parse stats from HTML using proper HTML parsing"""
     import re
@@ -2333,9 +2545,11 @@ def parse_stats(html):
         log_info(f"[PARSE] Alliance tag: {stats['alliance_tag']}")
         log_info(f"[PARSE] RSS Spent - Gold: {stats['gold_spent']}, Wood: {stats['wood_spent']}, Ore: {stats['ore_spent']}, Mana: {stats['mana_spent']}")
         log_info(f"[PARSE] T-Kills - T5: {stats['t5_gain']}, T4: {stats['t4_gain']}, T3: {stats['t3_gain']}, T2: {stats['t2_gain']}, T1: {stats['t1_gain']}")
+        _record_parse_health(stats, html)
         return stats
     except Exception as e:
         log_info(f"[PARSE STATS] Error: {e}")
+        _record_parse_health(None, html)
         return None
 
 # ============================================================
@@ -2819,6 +3033,10 @@ async def on_ready():
 
     if not custom_event_loop.is_running():
         custom_event_loop.start()
+
+    # ✅ COS PARSE-HEALTH ALARM (DMs the owner if COS changes its layout again)
+    if not parse_health_monitor.is_running():
+        parse_health_monitor.start()
 
     ch = bot.get_channel(update_channel_id)
     if ch:
@@ -3678,13 +3896,15 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if _has_real_value(highest_power):
             db_save_extra_stats(season_id, account_id, power_date_key, highest_power=highest_power)
 
-        if achievement_stats["exchange_coins_spent"] is None and achievement_stats["max_pets"] is None:
+        if (achievement_stats["exchange_coins_spent"] is None and achievement_stats["max_pets"] is None
+                and achievement_stats.get("max_decorations") is None):
             # COS may not have a page for a date it hasn't scanned yet (e.g. today) — try yesterday
             fallback_date = (datetime.strptime(end_date_used, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
             log_info(f"[ACHIEVEMENTS] No data for {end_date_used}, trying {fallback_date}")
             achievement_stats = await fetch_achievement_stats(account_id, fallback_date)
         exchange_coins_spent = achievement_stats["exchange_coins_spent"]
         max_pets = achievement_stats["max_pets"]
+        max_decorations = achievement_stats.get("max_decorations")
 
         if exchange_coins_spent is not None or max_pets is not None:
             db_save_extra_stats(season_id, account_id, end_date_used,
@@ -3922,9 +4142,11 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         else:
             coins_str = "n/a"
         pets_str = f"{max_pets:,}" if max_pets is not None else "n/a"
+        deco_str = max_decorations if max_decorations is not None else "n/a"
         embed.add_field(
             name="🏆 Achievements",
-            value=f"🪙 Coins Spent: {coins_str}  ·  🐾 Max Pets: {pets_str}",
+            value=(f"🪙 Coins Spent: {coins_str}  ·  🐾 Max Pets: {pets_str}\n"
+                   f"🎨 Max Decorations: {deco_str}"),
             inline=False
         )
 
@@ -5343,6 +5565,8 @@ ASK_TOOLS = [
             "type": "object",
             "properties": {
                 "match": {"type": "string", "description": "Text to match against existing event names"},
+                "match_date": {"type": "string", "description": "UTC date YYYY-MM-DD of the event to change. REQUIRED to pick one when several events share a name (e.g. 'Supreme Statue') — take the date from get_upcoming_events."},
+                "match_time_utc": {"type": "string", "description": "UTC time HH:MM, only needed if two same-named events fall on the same date."},
                 "new_name": {"type": "string"},
                 "new_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "new_time_utc": {"type": "string", "description": "HH:MM in 24h UTC"},
@@ -5375,11 +5599,13 @@ ASK_TOOLS = [
     },
     {
         "name": "delete_event",
-        "description": "Delete one event by matching its name (partial match ok). Admin only — always confirm what was deleted.",
+        "description": "Delete one event by matching its name (partial match ok), plus its date if several share the name. Admin only — always confirm what was deleted.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "match": {"type": "string", "description": "Text to match against existing event names"},
+                "match_date": {"type": "string", "description": "UTC date YYYY-MM-DD of the event to delete. REQUIRED to pick one when several events share a name (e.g. 'Supreme Statue') — take the date from get_upcoming_events."},
+                "match_time_utc": {"type": "string", "description": "UTC time HH:MM, only needed if two same-named events fall on the same date."},
                 "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["match"]
@@ -5670,6 +5896,77 @@ def _ask_is_admin(ctx):
     return ctx.author.id == OWNER_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
 
 
+def _ask_parse_event_selector(tool_input):
+    """Read + validate the optional match_date / match_time_utc selectors.
+    Returns (date_str|None, time_str|None, error|None). Both are in UTC, same as the event list."""
+    match_date = (tool_input.get("match_date") or "").strip() or None
+    match_time = (tool_input.get("match_time_utc") or "").strip() or None
+    if match_date:
+        try:
+            match_date = datetime.strptime(match_date, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            return None, None, f"match_date must be YYYY-MM-DD (UTC), got '{match_date}'."
+    if match_time:
+        try:
+            match_time = datetime.strptime(match_time, "%H:%M").strftime("%H:%M")
+        except ValueError:
+            return None, None, f"match_time_utc must be HH:MM in 24h UTC, got '{match_time}'."
+    return match_date, match_time, None
+
+
+def _ask_find_events(events, match_text, match_date=None, match_time=None):
+    """Events whose name contains match_text (case-insensitive) AND, when given, whose UTC date
+    and/or UTC time match. Lets 'Supreme Statue' be narrowed down to one of its five dates."""
+    needle = (match_text or "").lower().strip()
+    found = []
+    for e in events:
+        if needle and needle not in e[1].lower():
+            continue
+        if match_date or match_time:
+            try:
+                dt = datetime.fromisoformat(e[2])
+            except Exception:
+                continue
+            if match_date and dt.strftime("%Y-%m-%d") != match_date:
+                continue
+            if match_time and dt.strftime("%H:%M") != match_time:
+                continue
+        found.append(e)
+    return found
+
+
+def _ask_event_choices(matches, limit=8):
+    """'Name' (YYYY-MM-DD HH:MM UTC) list so the user/AI can see WHICH same-named event is which."""
+    parts = []
+    for _eid, name, dt_str, _rem in matches[:limit]:
+        try:
+            when = datetime.fromisoformat(dt_str).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            when = str(dt_str)
+        parts.append(f"'{name}' ({when})")
+    extra = f" (+{len(matches) - limit} more)" if len(matches) > limit else ""
+    return "; ".join(parts) + extra
+
+
+def _ask_pick_one_event(events, tool_input, action_word):
+    """Shared by edit_event / delete_event. Returns (event_row|None, error_text|None)."""
+    match_date, match_time, sel_err = _ask_parse_event_selector(tool_input)
+    if sel_err:
+        return None, sel_err
+    matches = _ask_find_events(events, tool_input.get("match"), match_date, match_time)
+    where = f" on {match_date}" if match_date else ""
+    where += f" at {match_time} UTC" if match_time else ""
+    if not matches:
+        return None, f"No event found matching '{tool_input.get('match')}'{where}."
+    if len(matches) > 1:
+        return None, (
+            f"Multiple events match '{tool_input.get('match')}'{where}: {_ask_event_choices(matches)}. "
+            f"Nothing was {action_word}. Pick one by passing match_date (YYYY-MM-DD, UTC) — and "
+            f"match_time_utc (HH:MM) if two share a date — or ask the user which one they mean."
+        )
+    return matches[0], None
+
+
 async def _ask_build_tag_mentions(ctx, user_id, role_id):
     """
     Turn optional user/role IDs from a tool call into a Discord mention string for an
@@ -5891,7 +6188,8 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             if not upcoming:
                 return False, "No upcoming events scheduled."
             return False, (
-                "Upcoming events (copy every <t:...> token EXACTLY as written so Discord shows each "
+                f"Upcoming events — {len(upcoming)} total (state this exact count if you mention one; "
+                "copy every <t:...> token EXACTLY as written so Discord shows each "
                 "reader their local time and day, and keep the UTC time next to it; keep any "
                 "<@...>/<@&...> mention tokens exactly as written too):\n" + "\n".join(upcoming)
             )
@@ -5958,15 +6256,11 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can edit events."
             events = db_get_events()
-            match_text = tool_input["match"].lower()
-            matches = [e for e in events if match_text in e[1].lower()]
-            if not matches:
-                return False, f"No event found matching '{tool_input['match']}'."
-            if len(matches) > 1:
-                names = ", ".join(f"'{m[1]}'" for m in matches[:5])
-                return False, f"Multiple events match '{tool_input['match']}': {names}. Be more specific."
+            picked, pick_err = _ask_pick_one_event(events, tool_input, "changed")
+            if pick_err:
+                return False, pick_err
 
-            event_id, old_name, old_dt_str, old_reminder = matches[0]
+            event_id, old_name, old_dt_str, old_reminder = picked
             try:
                 old_dt = datetime.fromisoformat(old_dt_str)
             except Exception:
@@ -6053,16 +6347,16 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             if not bypass_permission and not _ask_is_admin(ctx):
                 return False, "Only admins can delete events."
             events = db_get_events()
-            match_text = tool_input["match"].lower()
-            matches = [e for e in events if match_text in e[1].lower()]
-            if not matches:
-                return False, f"No event found matching '{tool_input['match']}'."
-            if len(matches) > 1:
-                names = ", ".join(f"'{m[1]}'" for m in matches[:5])
-                return False, f"Multiple events match '{tool_input['match']}': {names}. Be more specific."
-            event_id, name, dt_str, reminder = matches[0]
+            picked, pick_err = _ask_pick_one_event(events, tool_input, "deleted")
+            if pick_err:
+                return False, pick_err
+            event_id, name, dt_str, reminder = picked
             db_delete_event(event_id)
-            return False, f"Deleted event '{name}'."
+            try:
+                when = datetime.fromisoformat(dt_str)
+                return False, f"Deleted event '{name}' ({when.strftime('%Y-%m-%d %H:%M UTC')})."
+            except Exception:
+                return False, f"Deleted event '{name}'."
 
         if tool_name == "run_server_rankings":
             n = tool_input.get("n", 10)
@@ -6529,7 +6823,11 @@ async def ask(ctx, *, query: str = None):
         "<@123456> (user) or <@&123456> (role), pass the digits as the ID. You CAN change who "
         "gets tagged now — never say it's hardcoded. If someone names a role or person without "
         "an ID or mention, ask them to @mention it or paste the ID. A tag only pings when the "
-        "event has a reminder_minutes > 0.\n\n"
+        "event has a reminder_minutes > 0. Several events can share one name (e.g. 'Supreme "
+        "Statue' appears many times): for edit_event/delete_event pass match_date (UTC "
+        "YYYY-MM-DD, from get_upcoming_events; remember the list shows UTC next to local time) "
+        "and, only if two share a date, match_time_utc. If a tool answers that several events "
+        "match, show the user those candidates and ask which one — never guess.\n\n"
         "EVENT TIMES: when listing or confirming events, keep the Discord timestamp tokens "
         "(<t:UNIX:F>) from tool results exactly as given so each reader sees their own local "
         "time and day, and keep the UTC time beside them.\n\n"
@@ -8306,7 +8604,25 @@ async def abyss_reminder_loop():
     except Exception as e:
         log_info(f"[ABYSS REMINDER ERROR] {type(e).__name__}: {e}")
 
-sent_custom = set()
+def _reminder_due(now, dt_obj, rem, already_reminded):
+    """
+    Decide what the reminder loop should do for ONE event (pure function, easy to test).
+      None                -> nothing to do yet (no reminder set, already sent, or too early)
+      ("send", minutes)   -> send the reminder now; `minutes` is the REAL time left, which is
+                             smaller than `rem` if the bot was down/restarting at the planned time
+      ("expire", 0)       -> the event already started while we were away; a "reminder" now would
+                             be stale, so just mark it done without pinging anyone
+    """
+    if not rem or rem <= 0 or already_reminded:
+        return None
+    rtime = (dt_obj - timedelta(minutes=rem)).replace(second=0, microsecond=0)
+    if now < rtime:
+        return None
+    if now >= dt_obj:
+        return ("expire", 0)
+    mins_left = max(1, int(-(-(dt_obj - now).total_seconds() // 60)))  # ceil to whole minutes
+    return ("send", min(rem, mins_left))
+
 
 @tasks.loop(minutes=1)
 async def custom_event_loop():
@@ -8318,34 +8634,43 @@ async def custom_event_loop():
 
         rows = db_get_events()
         event_tags = db_get_event_tags()
+        # "Already reminded" lives in the DB (not memory), so a redeploy/restart between the
+        # reminder time and the event can't make the same reminder fire a second time.
+        reminded = db_get_reminded_ids()
         for ev in rows:
             event_id, name, dt, rem = ev
-            dt_obj = datetime.fromisoformat(dt)
+            try:
+                dt_obj = datetime.fromisoformat(dt)
+            except Exception:
+                log_info(f"[CUSTOM EVENT LOOP] Skipping event {event_id}: bad datetime {dt!r}")
+                continue
 
             # Delete events 1 hour after they pass
             if now >= dt_obj + timedelta(hours=1):
                 db_delete_event(event_id)
                 continue
 
-            # Reminder logic (robust, restart-safe)
-            if rem > 0:
-                rtime = (dt_obj - timedelta(minutes=rem)).replace(
-                    second=0,
-                    microsecond=0
+            action = _reminder_due(now, dt_obj, rem, event_id in reminded)
+            if not action:
+                continue
+            kind, mins = action
+
+            if kind == "expire":
+                db_mark_event_reminded(event_id)
+                log_info(f"[CUSTOM EVENT LOOP] '{name}' already started — reminder skipped, not pinging")
+                continue
+
+            # One failing send must not stop the remaining events (or block them every minute)
+            try:
+                # Per-event tag (user and/or role) if one was set, else the default role
+                tag = event_tags.get(event_id) or f"<@&{EVENT_ANNOUNCEMENT_ROLE_ID}>"
+                await ch.send(
+                    f"{tag} ⏰ Reminder: **{name}** in {mins} minutes! "
+                    f"<t:{_unix_utc(dt_obj)}:F>"
                 )
-
-                if now >= rtime and event_id not in sent_custom:
-                    # Per-event tag (user and/or role) if one was set, else the default role
-                    tag = event_tags.get(event_id) or f"<@&{EVENT_ANNOUNCEMENT_ROLE_ID}>"
-                    await ch.send(
-                        f"{tag} ⏰ Reminder: **{name}** in {rem} minutes! "
-                        f"<t:{_unix_utc(dt_obj)}:F>"
-                    )
-                    sent_custom.add(event_id)
-
-        # Prevent memory growth
-        if len(sent_custom) > 300:
-            sent_custom.clear()
+                db_mark_event_reminded(event_id)
+            except Exception as e:
+                log_info(f"[CUSTOM EVENT LOOP] Reminder send failed for '{name}': {type(e).__name__}: {e}")
     except Exception as e:
         log_info(f"[CUSTOM EVENT LOOP ERROR] {type(e).__name__}: {e}")
 
