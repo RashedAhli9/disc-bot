@@ -34,7 +34,7 @@ from discord import app_commands
 import json
 import sqlite3
 import pytz
-from datetime import datetime, timedelta, date, time
+from datetime import datetime, timedelta, date, time, timezone
 from discord.ui import View, Select, Button, Modal, TextInput
 import io
 import zipfile
@@ -1142,14 +1142,54 @@ def migrate_db_progress():
     except Exception as e:
         log_error(f"[DB MIGRATE PROGRESS] Error: {e}")
 
-def db_add_event(name, dt, reminder):
+def migrate_db_events():
+    """Add events.tag_mentions if missing (safe to run every boot).
+
+    tag_mentions holds the ready-to-send Discord mention string for an event's reminder,
+    e.g. '<@&123>' (role), '<@456>' (user) or both space-separated. NULL/empty means
+    "use the default EVENT_ANNOUNCEMENT_ROLE_ID". db_get_events() deliberately still
+    returns 4-tuples so every existing unpack site keeps working — read tags separately
+    with db_get_event_tags().
+    """
+    try:
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(events)")
+        existing = {row[1] for row in c.fetchall()}
+        if "tag_mentions" not in existing:
+            c.execute("ALTER TABLE events ADD COLUMN tag_mentions TEXT")
+            log_info("[DB MIGRATE] Added column: events.tag_mentions")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_error(f"[DB MIGRATE EVENTS] Error: {e}")
+
+def db_add_event(name, dt, reminder, tag_mentions=None):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO events (name, datetime, reminder) VALUES (?, ?, ?)",
-        (name, dt, reminder)
+        "INSERT INTO events (name, datetime, reminder, tag_mentions) VALUES (?, ?, ?, ?)",
+        (name, dt, reminder, tag_mentions or None)
     )
     log_info(f"[DB ADD EVENT] writing to: {DB}")
+    conn.commit()
+    conn.close()
+    silent_backup()
+
+def db_get_event_tags():
+    """Return {event_id: mention_string} for events that have a custom tag set."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, tag_mentions FROM events WHERE tag_mentions IS NOT NULL AND tag_mentions != ''")
+    rows = c.fetchall()
+    conn.close()
+    return {event_id: tag for event_id, tag in rows}
+
+def db_set_event_tag(event_id, tag_mentions):
+    """Set an event's tag. Pass None/'' to reset it to the default announcement role."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE events SET tag_mentions=? WHERE id=?", (tag_mentions or None, event_id))
     conn.commit()
     conn.close()
     silent_backup()
@@ -1188,7 +1228,13 @@ def db_delete_event(event_id):
     silent_backup()
 
 init_db()
+migrate_db_events()
 init_db_progress()
+
+def _unix_utc(dt):
+    """Unix timestamp for a NAIVE-UTC datetime. datetime.timestamp() would treat a naive
+    value as the server's local time, so pin it to UTC explicitly."""
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
 def db_save_kvk_matchup(nickname, num_zones, zones_data, team1_zones, team2_zones, team1_totals, team2_totals):
     import json
@@ -5254,7 +5300,11 @@ ASK_TOOLS = [
     },
     {
         "name": "get_upcoming_events",
-        "description": "Get the list of upcoming scheduled events with their dates. Returns data for you to summarize in your own words.",
+        "description": ("Get the list of upcoming scheduled events with their dates. Each event comes with "
+                         "ready-made Discord timestamp markup like <t:1792245600:F> — when you list events, "
+                         "copy those <t:...> tokens EXACTLY as given (never convert them to plain text), "
+                         "since Discord renders them in each reader's own timezone with the weekday — and "
+                         "keep the UTC time shown next to them. Also shows who each event's reminder pings."),
         "input_schema": {"type": "object", "properties": {}}
     },
     {
@@ -5279,6 +5329,8 @@ ASK_TOOLS = [
                 "date": {"type": "string", "description": "YYYY-MM-DD"},
                 "time_utc": {"type": "string", "description": "HH:MM in 24h UTC, default 12:00 if not given"},
                 "reminder_minutes": {"type": "integer", "description": "Minutes before the event to remind, default 0 (no reminder)"},
+                "tag_user_id": {"type": "string", "description": "Discord USER ID to ping in this event's reminder (digits only; a <@123> mention in the message gives the ID). Omit to use the default role."},
+                "tag_role_id": {"type": "string", "description": "Discord ROLE ID to ping in this event's reminder (digits only; a <@&123> mention in the message gives the ID). Can be combined with tag_user_id. Omit both to use the default role."},
                 "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["name", "date"]
@@ -5295,6 +5347,9 @@ ASK_TOOLS = [
                 "new_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "new_time_utc": {"type": "string", "description": "HH:MM in 24h UTC"},
                 "new_reminder_minutes": {"type": "integer"},
+                "new_tag_user_id": {"type": "string", "description": "Change who gets pinged: a Discord USER ID (digits only). Replaces the event's current tag."},
+                "new_tag_role_id": {"type": "string", "description": "Change who gets pinged: a Discord ROLE ID (digits only). Replaces the event's current tag; can be combined with new_tag_user_id."},
+                "reset_tag": {"type": "boolean", "description": "true = remove the custom tag so the event pings the default role again."},
                 "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["match"]
@@ -5615,6 +5670,42 @@ def _ask_is_admin(ctx):
     return ctx.author.id == OWNER_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
 
 
+async def _ask_build_tag_mentions(ctx, user_id, role_id):
+    """
+    Turn optional user/role IDs from a tool call into a Discord mention string for an
+    event reminder, validating that they actually exist in this guild so a typo'd ID
+    can't silently ping nobody. Returns (mention_string_or_None, error_or_None).
+    Role comes first in the string, then user, e.g. '<@&123> <@456>'.
+    """
+    import re as _re_tag
+    parts = []
+
+    if role_id not in (None, ""):
+        rid = _re_tag.sub(r"\D", "", str(role_id))  # tolerate '<@&123>' pasted as-is
+        if not rid:
+            return None, f"'{role_id}' isn't a valid role ID."
+        role = ctx.guild.get_role(int(rid)) if ctx.guild else None
+        if not role:
+            return None, f"I couldn't find a role with ID {rid} in this server."
+        parts.append(f"<@&{rid}>")
+
+    if user_id not in (None, ""):
+        uid = _re_tag.sub(r"\D", "", str(user_id))  # tolerate '<@123>' pasted as-is
+        if not uid:
+            return None, f"'{user_id}' isn't a valid user ID."
+        member = ctx.guild.get_member(int(uid)) if ctx.guild else None
+        if not member and ctx.guild:
+            try:
+                member = await ctx.guild.fetch_member(int(uid))
+            except Exception:
+                member = None
+        if not member:
+            return None, f"I couldn't find a member with ID {uid} in this server."
+        parts.append(f"<@{uid}>")
+
+    return (" ".join(parts) if parts else None), None
+
+
 async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
     """
     Fetch a player's exact real stats as a text summary for Claude to reason with —
@@ -5781,17 +5872,29 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             if not events:
                 return False, "No upcoming events scheduled."
             now = datetime.utcnow()
+            tags = db_get_event_tags()
             upcoming = []
             for eid, name, dt_str, reminder in events:
                 try:
                     dt = datetime.fromisoformat(dt_str)
                     if dt > now:
-                        upcoming.append(f"{name}: {dt.strftime('%Y-%m-%d %H:%M UTC')}")
+                        ts = _unix_utc(dt)
+                        # <t:ts:F> = full date/time in the READER's local timezone (weekday included).
+                        # The UTC time stays alongside for reference. (No :R token — it adds ~20
+                        # raw chars per line and the whole reply must fit Discord's 2000 limit.)
+                        line = f"{name}: <t:{ts}:F> · {dt.strftime('%H:%M UTC')}"
+                        if eid in tags:
+                            line += f" — pings {tags[eid]}"
+                        upcoming.append(line)
                 except Exception:
                     continue
             if not upcoming:
                 return False, "No upcoming events scheduled."
-            return False, "Upcoming events:\n" + "\n".join(upcoming)
+            return False, (
+                "Upcoming events (copy every <t:...> token EXACTLY as written so Discord shows each "
+                "reader their local time and day, and keep the UTC time next to it; keep any "
+                "<@...>/<@&...> mention tokens exactly as written too):\n" + "\n".join(upcoming)
+            )
 
         if tool_name == "get_player_growth":
             account_id, err = _ask_resolve_account_id(ctx, tool_input.get("player"))
@@ -5836,8 +5939,20 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
             except Exception as e:
                 return False, f"Couldn't parse that date/time: {e}"
-            db_add_event(tool_input["name"], dt.isoformat(), reminder)
-            return False, f"Added event '{tool_input['name']}' on {dt.strftime('%Y-%m-%d %H:%M UTC')}."
+            tag_mentions, tag_err = await _ask_build_tag_mentions(
+                ctx, tool_input.get("tag_user_id"), tool_input.get("tag_role_id")
+            )
+            if tag_err:
+                return False, f"Event NOT added — {tag_err}"
+            db_add_event(tool_input["name"], dt.isoformat(), reminder, tag_mentions)
+            ts = _unix_utc(dt)
+            tag_note = f" Reminders will ping {tag_mentions}." if tag_mentions else ""
+            if tag_mentions and not reminder:
+                tag_note += " (No reminder is set, so nothing will be pinged until a reminder time is added.)"
+            return False, (
+                f"Added event '{tool_input['name']}' on <t:{ts}:F> ({dt.strftime('%Y-%m-%d %H:%M UTC')})."
+                f"{tag_note}"
+            )
 
         if tool_name == "edit_event":
             if not bypass_permission and not _ask_is_admin(ctx):
@@ -5871,15 +5986,35 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 except Exception as e:
                     return False, f"Couldn't parse that date/time: {e}"
 
+            # Validate any new tag BEFORE writing anything, so a bad ID changes nothing.
+            new_tag_user = tool_input.get("new_tag_user_id")
+            new_tag_role = tool_input.get("new_tag_role_id")
+            reset_tag = bool(tool_input.get("reset_tag"))
+            tag_mentions = None
+            if new_tag_user or new_tag_role:
+                tag_mentions, tag_err = await _ask_build_tag_mentions(ctx, new_tag_user, new_tag_role)
+                if tag_err:
+                    return False, f"Event NOT changed — {tag_err}"
+
             db_update_event(
                 event_id,
                 name=new_name,
                 dt=new_dt.isoformat() if new_dt else None,
                 reminder=new_reminder,
             )
+            tag_note = ""
+            if tag_mentions:
+                db_set_event_tag(event_id, tag_mentions)
+                tag_note = f" Reminders will now ping {tag_mentions}."
+            elif reset_tag:
+                db_set_event_tag(event_id, None)
+                tag_note = " Reminders are back to pinging the default role."
             final_name = new_name or old_name
             final_dt = new_dt or old_dt
-            return False, f"Updated event: '{final_name}' now at {final_dt.strftime('%Y-%m-%d %H:%M UTC')}."
+            return False, (
+                f"Updated event: '{final_name}' now at <t:{_unix_utc(final_dt)}:F> "
+                f"({final_dt.strftime('%Y-%m-%d %H:%M UTC')}).{tag_note}"
+            )
 
         if tool_name == "bulk_edit_event_times":
             if not bypass_permission and not _ask_is_admin(ctx):
@@ -6388,6 +6523,16 @@ async def ask(ctx, *, query: str = None):
         "as an exact ISO datetime instead of leaving it out, and the action will be queued "
         "rather than run right away. Use list_queued_tasks to show what's queued, "
         "cancel_queued_task to cancel one by ID, and edit_queued_task_time to reschedule one.\n\n"
+        "EVENT TAGGING: add_event takes optional tag_user_id and/or tag_role_id, and edit_event "
+        "takes new_tag_user_id / new_tag_role_id / reset_tag, to choose who an event's reminder "
+        "pings (default is the usual announcement role). When a message contains a mention like "
+        "<@123456> (user) or <@&123456> (role), pass the digits as the ID. You CAN change who "
+        "gets tagged now — never say it's hardcoded. If someone names a role or person without "
+        "an ID or mention, ask them to @mention it or paste the ID. A tag only pings when the "
+        "event has a reminder_minutes > 0.\n\n"
+        "EVENT TIMES: when listing or confirming events, keep the Discord timestamp tokens "
+        "(<t:UNIX:F>) from tool results exactly as given so each reader sees their own local "
+        "time and day, and keep the UTC time beside them.\n\n"
         "For open-ended member comparisons, use get_activity_rankings rather than a "
         "single-stat leaderboard — it gives you merits, power, merit-to-power ratio, kills, "
         "deaths, and resources gathered for every member so you can actually reason about "
@@ -6489,7 +6634,26 @@ async def ask(ctx, *, query: str = None):
             # progress) or is done, in which case the next response will have no tool_use.
 
         if final_text:
-            await ctx.send(f"🧠 {final_text}")
+            # Discord rejects messages over 2000 chars (and counts raw <t:..> markup), so split
+            # long replies on line boundaries instead of failing the whole response.
+            _reply = f"🧠 {final_text}"
+            if len(_reply) <= 2000:
+                await ctx.send(_reply)
+            else:
+                _chunk = ""
+                for _line in _reply.split("\n"):
+                    while len(_line) > 1900:  # pathological single line
+                        if _chunk:
+                            await ctx.send(_chunk)
+                            _chunk = ""
+                        await ctx.send(_line[:1900])
+                        _line = _line[1900:]
+                    if len(_chunk) + len(_line) + 1 > 1900:
+                        await ctx.send(_chunk)
+                        _chunk = ""
+                    _chunk += _line + "\n"
+                if _chunk.strip():
+                    await ctx.send(_chunk)
 
         _ask_save_turn(channel_id, q, final_text or "(showed results above)")
 
@@ -8153,6 +8317,7 @@ async def custom_event_loop():
             return
 
         rows = db_get_events()
+        event_tags = db_get_event_tags()
         for ev in rows:
             event_id, name, dt, rem = ev
             dt_obj = datetime.fromisoformat(dt)
@@ -8170,9 +8335,11 @@ async def custom_event_loop():
                 )
 
                 if now >= rtime and event_id not in sent_custom:
+                    # Per-event tag (user and/or role) if one was set, else the default role
+                    tag = event_tags.get(event_id) or f"<@&{EVENT_ANNOUNCEMENT_ROLE_ID}>"
                     await ch.send(
-                        f"<@&{EVENT_ANNOUNCEMENT_ROLE_ID}> ⏰ Reminder: **{name}** in {rem} minutes! "
-                        f"<t:{int(dt_obj.timestamp())}:F>"
+                        f"{tag} ⏰ Reminder: **{name}** in {rem} minutes! "
+                        f"<t:{_unix_utc(dt_obj)}:F>"
                     )
                     sent_custom.add(event_id)
 
