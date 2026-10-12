@@ -1408,8 +1408,8 @@ SETTINGS_SCHEMA = {
     },
     "clock_interval_min": {
         "group": "clock", "label": "Update every", "type": "choice",
-        "choices": [10, 15, 30, 60], "unit": " min", "default": 10,
-        "desc": "Discord only allows ~2 channel renames per 10 min, so 10 min is the fastest safe pace.",
+        "choices": [5, 10, 15, 30, 60], "unit": " min", "default": 5,
+        "desc": "Discord allows only 2 channel renames per 10 min, so every 5 min is the fastest possible.",
     },
 }
 
@@ -8934,14 +8934,17 @@ async def custom_event_loop():
 # ============================================================
 # LIVE CHANNELS — channels whose NAME the bot keeps updated (clock, ...)
 # ============================================================
-# Discord only allows about 2 renames per 10 minutes per channel, so each channel is renamed at
-# most once per LIVE_CHANNEL_MIN_GAP_SECONDS (6 min) however often settings change, and never
-# when its name is already right (so a restart doesn't burn the rename budget).
+# Discord only allows 2 renames per 10 minutes per channel, so the fastest sustainable pace is one
+# every 5 minutes. Each channel is renamed at most once per LIVE_CHANNEL_MIN_GAP_SECONDS however
+# often settings change, and never when its name is already right (so a restart doesn't burn the
+# rename budget). The gap is a hair UNDER 5 min (295 s) on purpose: with a 5-minute clock the
+# renames land exactly 300 s apart, and a gap of 300+ would let loop jitter push every other
+# rename a minute late, so the clock would slowly drift behind.
 #
 # To add another live channel (member count, next-event countdown, ...): add its settings to
 # SETTINGS_SCHEMA and append one {"key", "channel_id", "name"} dict in _live_channel_specs().
 
-LIVE_CHANNEL_MIN_GAP_SECONDS = 360
+LIVE_CHANNEL_MIN_GAP_SECONDS = 295
 _LIVE_LAST_EDIT = {}     # spec key -> utc time of our last rename attempt
 _LIVE_WARNED = set()     # spec keys we've already logged a problem for (avoids log spam)
 
