@@ -5931,7 +5931,7 @@ ASK_TOOLS = [
     },
     {
         "name": "show_weekly_events",
-        "description": "Show the rotating weekly Abyss events (Forge and Wheel schedule). Renders its own message directly.",
+        "description": "Show the rotating weekly Abyss events (alternating Wheel/Forge schedule). Renders its own message directly.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
@@ -8302,9 +8302,10 @@ async def active_members(ctx):
 # WEEKLY EVENTS
 # ============================================================
 
-weekly_events = ["Forge and Wheel"] * 4
+weekly_events = ["Wheel", "Forge", "Wheel", "Forge"]
 event_emojis = {
-    "Forge and Wheel": "🔨🎡",
+    "Wheel": "🎡",
+    "Forge": "🔨",
 }
 
 start_date = date(2025, 9, 16)
