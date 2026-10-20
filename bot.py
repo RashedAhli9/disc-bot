@@ -7920,7 +7920,7 @@ async def _ask_impl(ctx, *, query: str = None):
         return await asyncio.to_thread(
             _anthropic_client.messages.create,
             model=model_name,
-            max_tokens=900,
+            max_tokens=1400,
             system=system_blocks,
             tools=ASK_TOOLS,
             messages=_cache_last(messages),
@@ -7930,6 +7930,7 @@ async def _ask_impl(ctx, *, query: str = None):
         final_text = None
         any_rendered = False
         finished = False
+        empty_retries = 0
 
         for _ in range(8):  # allow several tool round-trips so Claude can chain calls
             try:
@@ -7950,6 +7951,16 @@ async def _ask_impl(ctx, *, query: str = None):
 
             if not tool_use_blocks:
                 final_text = " ".join(text_blocks).strip()
+                if not final_text and ctx._ask_meta["tools"] and empty_retries < 2:
+                    # The AI fetched data but wrote no answer — nudge it to actually reply instead of showing "Done."
+                    empty_retries += 1
+                    log_info(f"[ASK] empty reply after tools {ctx._ask_meta['tools']} (stop={response.stop_reason}); nudging")
+                    if response.content:
+                        messages.append({"role": "assistant", "content": response.content})
+                        messages.append({"role": "user", "content": "Now write your answer to the user's question in plain text, using the data you just fetched."})
+                    else:
+                        messages[-1] = {"role": "user", "content": (messages[-1]["content"] if isinstance(messages[-1]["content"], list) else [{"type": "text", "text": str(messages[-1]["content"])}]) + [{"type": "text", "text": "Now write your answer to the user's question in plain text, using the data you just fetched."}]}
+                    continue
                 finished = True
                 break
 
@@ -7978,7 +7989,11 @@ async def _ask_impl(ctx, *, query: str = None):
                 "Check what got done (e.g. `/kvkevent`) and ask again for anything missing."
             )
         elif not final_text and not any_rendered:
-            final_text = "✅ Done."
+            _used = ctx._ask_meta["tools"]
+            if _used and all(t.startswith(("get_", "search_", "list_")) for t in _used):
+                final_text = "I pulled the data but my answer came out blank — ask again and I'll give it another shot."
+            else:
+                final_text = "✅ Done."
 
         if final_text:
             # Discord rejects messages over 2000 chars (and counts raw <t:..> markup), so split
