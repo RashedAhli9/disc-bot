@@ -1332,6 +1332,7 @@ SETTING_GROUPS = [
     ("events", "📅 Events & reminders"),
     ("alerts", "🚨 Alerts"),
     ("clock", "🕒 Clock channel"),
+    ("ask", "🧠 !ask AI"),
 ]
 
 SETTINGS_SCHEMA = {
@@ -1387,6 +1388,13 @@ SETTINGS_SCHEMA = {
         "group": "alerts", "label": "Alarm cooldown", "type": "int",
         "min": 1, "max": 72, "unit": " h", "default": 6,
         "desc": "Minimum hours between repeat alerts while it stays broken.",
+    },
+    # ---- !ask AI ----
+    "ask_fast_model": {
+        "group": "ask", "label": "Fast model for simple questions", "type": "bool", "default": True,
+        "desc": "Answer simple lookups (leaderboards, next event, weekly events, season info) with a "
+                "faster model. Anything that edits events or needs analysis always uses the full model. "
+                "Turn off if answers ever seem off.",
     },
     # ---- Clock channel ----
     "clock_enabled": {
@@ -3064,15 +3072,25 @@ async def check_callofstats_update():
     try:
         # Always check Rekz's profile for latest data
         account_id = REKZ_ACCOUNT_ID
-        
+
+        # Get last known date
+        last_known = db_get_last_known_data_date()
+
+        # Once we already hold data for today's date (UTC), there is nothing newer to wait for —
+        # skip the Call of Stats login + page fetch until the UTC date rolls over. Checking only
+        # runs while today's data hasn't shown up yet.
+        try:
+            _d, _m, _y = str(last_known).split("/")
+            if date(int(_y), int(_m), int(_d)) >= datetime.utcnow().date():
+                return
+        except Exception:
+            pass  # no/odd stored date -> fall through and check normally
+
         # Fetch latest data date from website
         latest_date = await fetch_latest_data_date(account_id)
         if not latest_date:
             log_info(f"[CALLOFSTATS UPDATE] Could not fetch latest date")
             return
-        
-        # Get last known date
-        last_known = db_get_last_known_data_date()
         
         # If date changed, verify actual data exists before notifying
         if last_known != latest_date:
@@ -3080,7 +3098,8 @@ async def check_callofstats_update():
             
             # Try to fetch stats for the new date to verify it exists
             # Convert DD/MM/YYYY to YYYY-MM-DD for the query
-            from datetime import datetime
+            # (no local `from datetime import datetime` here — it would make `datetime` a local
+            # name for the whole function and break the early check above)
             try:
                 date_obj = datetime.strptime(latest_date, "%d/%m/%Y")
                 new_date_iso = date_obj.strftime("%Y-%m-%d")
@@ -3116,7 +3135,7 @@ async def check_callofstats_update():
                         if num_val > 0:
                             real_stat_count += 1
                             log_info(f"[CALLOFSTATS UPDATE] Verified stat: {stat_key}={num_val}")
-                    except:
+                    except Exception:
                         pass
                 
                 # Require at least 1 stat with a real value (not just an "Unknown" placeholder).
@@ -3997,7 +4016,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 return 0
             try:
                 return int(str(s).replace("+", "").replace(",", "").strip() or 0)
-            except:
+            except Exception:
                 return 0
 
         raw_power_gain = _parse_stat_num(stats.get("power_gain"))
@@ -4081,7 +4100,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 return 0
             try:
                 return int(str(s).replace(",", "").replace("+", "").replace("-", "").strip())
-            except:
+            except Exception:
                 return 0
 
         def _adv_gain(field):
@@ -4595,7 +4614,7 @@ async def loadhistory(ctx, mode: str = None):
             progress = (day_num / total_days) * 100
             try:
                 await msg.edit(content=f"⏳ Loading historical data...\n📅 {date_range_text}\nDay {day_num}/{total_days} ({progress:.0f}%)\n✅ Saved {saved_count} | ⏭️ Skipped {skipped_count}")
-            except:
+            except Exception:
                 pass
         
         current_date += timedelta(days=1)
@@ -5378,7 +5397,7 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
             return 0
         try:
             return abs(int(str(raw).replace(",", "").replace("+", "").replace("-", "").strip()))
-        except:
+        except Exception:
             return 0
 
     await ctx.send(f"⏳ Fetching {label} leaderboard...")
@@ -5483,7 +5502,7 @@ def _parse_stat_num_global(s):
         return 0
     try:
         return int(str(s).replace("+", "").replace(",", "").replace("-", "").strip())
-    except:
+    except Exception:
         return 0
 
 
@@ -6502,7 +6521,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                     return 0
                 try:
                     return int(str(s).replace("+", "").replace(",", "").strip())
-                except:
+                except Exception:
                     return 0
 
             result_lines = [f"Player: {today_stats.get('lord_name', account_id)}, season: {season_name}, comparing {past_str} to {today_str} ({days_back} days):"]
@@ -6797,7 +6816,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                     return 0
                 try:
                     return int(str(s).replace("+", "").replace(",", "").strip())
-                except:
+                except Exception:
                     return 0
 
             rows = []
@@ -7003,25 +7022,59 @@ async def check_queued_tasks():
 
 _ask_inflight = set()  # (channel_id, user_id, query) currently being processed
 
+ASK_MAIN_MODEL = "claude-sonnet-5"
+ASK_FAST_MODEL = "claude-haiku-5-5"
+# Simple read-only lookups the fast model handles well...
+_ASK_FAST_OK = re.compile(
+    r"\b(top\s*\d*|leaderboard|rankings?|next event|upcoming|weekly (abyss )?events?|"
+    r"when (is|does|do)|season (list|info|end|start)|active members|inactive)\b")
+# ...unless the message also changes things or wants analysis, which always gets the full model.
+_ASK_NEEDS_MAIN = re.compile(
+    r"\b(add|edit|delete|remove|change|create|move|cancel|set|force|update|schedule|remind\w*|"
+    r"rename|queue\w*|compare|vs|why|rate|rating|advice|should|slack\w*|best|worst|analy\w*|"
+    r"pace|project\w*|grow\w*|chart|graph|tag|every|recurring|until)\b")
+
+
+def _ask_pick_model(q_lower):
+    """Fast model for short, simple, read-only lookups; the full model for everything else."""
+    if not get_setting("ask_fast_model"):
+        return ASK_MAIN_MODEL
+    if len(q_lower) > 120 or "\n" in q_lower or _ASK_NEEDS_MAIN.search(q_lower):
+        return ASK_MAIN_MODEL
+    return ASK_FAST_MODEL if _ASK_FAST_OK.search(q_lower) else ASK_MAIN_MODEL
+
 
 @bot.command(name="ask")
 async def ask(ctx, *, query: str = None):
-    """Wrapper: shows the typing indicator while the AI works (it can take a while) and ignores an
+    """Wrapper: shows the typing indicator while the AI works (it can take a while), ignores an
     identical !ask from the same person in the same channel while the first is still running
-    (double-sent messages used to run twice and could add events twice)."""
+    (double-sent messages used to run twice and could add events twice), and logs one line per ask."""
     key = (ctx.channel.id, ctx.author.id, (query or "").strip().lower())
     if query and key in _ask_inflight:
+        log_info(f"[ASK] ignored duplicate from {ctx.author.display_name} in #{ctx.channel.id}")
         try:
             await ctx.message.add_reaction("⏳")
         except Exception:
             pass
         return
     _ask_inflight.add(key)
+    started = datetime.utcnow()
+    outcome = "ok"
     try:
         async with ctx.typing():
             await _ask_impl(ctx, query=query)
+    except Exception:
+        outcome = "error"
+        raise
     finally:
         _ask_inflight.discard(key)
+        meta = getattr(ctx, "_ask_meta", {})
+        secs = (datetime.utcnow() - started).total_seconds()
+        log_info(
+            f"[ASK] {outcome} {secs:.1f}s user={ctx.author.display_name} ch={ctx.channel.id} "
+            f"model={meta.get('model', '-')} rounds={meta.get('rounds', 0)} "
+            f"tools={meta.get('tools', [])} q={(query or '')[:80]!r}"
+        )
 
 
 async def _ask_impl(ctx, *, query: str = None):
@@ -7266,22 +7319,39 @@ async def _ask_impl(ctx, *, query: str = None):
     else:
         system_blocks = system_prompt
 
+    model = _ask_pick_model(q_lower)
+    ctx._ask_meta = {"model": model, "rounds": 0, "tools": []}
+
+    async def _ask_call(model_name):
+        return await asyncio.to_thread(
+            _anthropic_client.messages.create,
+            model=model_name,
+            max_tokens=900,
+            system=system_blocks,
+            tools=ASK_TOOLS,
+            messages=messages,
+        )
+
     try:
         final_text = None
         any_rendered = False
         finished = False
 
         for _ in range(8):  # allow several tool round-trips so Claude can chain calls
-            response = await asyncio.to_thread(
-                _anthropic_client.messages.create,
-                model="claude-sonnet-5",
-                max_tokens=900,
-                system=system_blocks,
-                tools=ASK_TOOLS,
-                messages=messages,
-            )
+            try:
+                response = await _ask_call(model)
+            except Exception as e:
+                if model == ASK_MAIN_MODEL:
+                    raise
+                # The fast model failed (e.g. unavailable) — retry once on the full model and stick with it.
+                log_info(f"[ASK] fast model {model} failed ({type(e).__name__}: {e}); falling back to {ASK_MAIN_MODEL}")
+                model = ASK_MAIN_MODEL
+                ctx._ask_meta["model"] = model + " (fallback)"
+                response = await _ask_call(model)
+            ctx._ask_meta["rounds"] += 1
 
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            ctx._ask_meta["tools"].extend(b.name for b in tool_use_blocks)
             text_blocks = [b.text for b in response.content if b.type == "text"]
 
             if not tool_use_blocks:
@@ -7594,7 +7664,7 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
                     try:
                         val = int(val_str) if val_str.lstrip("-").isdigit() else 0
                         stats_list.append({"account_id": account_id, "value": val})
-                    except:
+                    except Exception:
                         pass
             except Exception as e:
                 log_error(f"[RANKINGS] Error querying {account_id}: {e}")
@@ -9075,18 +9145,20 @@ async def custom_event_loop():
 # ============================================================
 # LIVE CHANNELS — channels whose NAME the bot keeps updated (clock, ...)
 # ============================================================
-# Discord only allows 2 renames per 10 minutes per channel, so the fastest sustainable pace is one
-# every 5 minutes. Each channel is renamed at most once per LIVE_CHANNEL_MIN_GAP_SECONDS however
-# often settings change, and never when its name is already right (so a restart doesn't burn the
-# rename budget). The gap is a hair UNDER 5 min (295 s) on purpose: with a 5-minute clock the
-# renames land exactly 300 s apart, and a gap of 300+ would let loop jitter push every other
-# rename a minute late, so the clock would slowly drift behind.
+# Discord only allows 2 renames per 10 minutes per channel. We track the last renames per channel
+# and only rename when fewer than LIVE_CHANNEL_MAX_PER_WINDOW happened in the last
+# LIVE_CHANNEL_WINDOW_SECONDS (10 min + a little slack), and never when the name is already right
+# (so a restart doesn't burn the rename budget). The old "at least 295 s apart" rule allowed 3
+# renames inside 10 minutes, so Discord answered 429 every cycle and discord.py then sat waiting
+# ~4 minutes inside the rename, leaving the clock stale. With the sliding window we never hit the
+# limit; a 5-minute clock just lands up to a minute late on some updates.
 #
 # To add another live channel (member count, next-event countdown, ...): add its settings to
 # SETTINGS_SCHEMA and append one {"key", "channel_id", "name"} dict in _live_channel_specs().
 
-LIVE_CHANNEL_MIN_GAP_SECONDS = 295
-_LIVE_LAST_EDIT = {}     # spec key -> utc time of our last rename attempt
+LIVE_CHANNEL_MAX_PER_WINDOW = 2
+LIVE_CHANNEL_WINDOW_SECONDS = 615
+_LIVE_EDIT_HISTORY = {}  # spec key -> utc times of our recent rename attempts
 _LIVE_WARNED = set()     # spec keys we've already logged a problem for (avoids log spam)
 
 
@@ -9127,13 +9199,13 @@ def _live_channel_specs(now_utc):
     return specs
 
 
-def _live_should_edit(current_name, desired_name, last_edit, now, min_gap=LIVE_CHANNEL_MIN_GAP_SECONDS):
-    """Rename only if the name is actually wrong AND we're outside the rate-limit gap."""
+def _live_should_edit(current_name, desired_name, history, now,
+                      window=LIVE_CHANNEL_WINDOW_SECONDS, max_edits=LIVE_CHANNEL_MAX_PER_WINDOW):
+    """Rename only if the name is actually wrong AND we still have rename budget in the window."""
     if current_name == desired_name:
         return False
-    if last_edit is not None and (now - last_edit).total_seconds() < min_gap:
-        return False
-    return True
+    recent = [t for t in (history or []) if (now - t).total_seconds() < window]
+    return len(recent) < max_edits
 
 
 @tasks.loop(minutes=1)
@@ -9148,20 +9220,22 @@ async def live_channels_loop():
                     _LIVE_WARNED.add(key)
                     log_info(f"[LIVE CHANNEL] '{key}': channel {spec['channel_id']} not found — check /settings")
                 continue
-            if not _live_should_edit(ch.name, spec["name"], _LIVE_LAST_EDIT.get(key), now):
+            history = _LIVE_EDIT_HISTORY.setdefault(key, [])
+            history[:] = [t for t in history if (now - t).total_seconds() < LIVE_CHANNEL_WINDOW_SECONDS]
+            if not _live_should_edit(ch.name, spec["name"], history, now):
                 continue
             try:
+                history.append(now)
                 await ch.edit(name=spec["name"], reason="Live channel update")
-                _LIVE_LAST_EDIT[key] = now
                 _LIVE_WARNED.discard(key)
                 log_info(f"[LIVE CHANNEL] '{key}' renamed to {spec['name']!r}")
             except discord.Forbidden:
-                _LIVE_LAST_EDIT[key] = now  # back off instead of retrying every minute
+                history.extend([now] * LIVE_CHANNEL_MAX_PER_WINDOW)  # back off a full window instead of retrying every minute
                 if key not in _LIVE_WARNED:
                     _LIVE_WARNED.add(key)
                     log_info(f"[LIVE CHANNEL] '{key}': missing Manage Channels on <#{spec['channel_id']}>")
             except discord.HTTPException as e:
-                _LIVE_LAST_EDIT[key] = now
+                history.extend([now] * LIVE_CHANNEL_MAX_PER_WINDOW)
                 log_info(f"[LIVE CHANNEL] '{key}' rename failed: {type(e).__name__}: {e}")
     except Exception as e:
         log_info(f"[LIVE CHANNEL LOOP ERROR] {type(e).__name__}: {e}")
@@ -9680,7 +9754,7 @@ async def cmd_servercheck(message, server_num):
 def kvk_fmt(n):
     try:
         n = int(n)
-    except:
+    except Exception:
         return str(n)
     if n >= 1_000_000_000:
         return f"{n/1_000_000_000:.2f}B"
@@ -10040,7 +10114,7 @@ def _parse_stat_str(raw):
         return int(raw)
     try:
         return abs(int(str(raw).replace(",", "").replace("+", "").replace("-", "").strip()))
-    except:
+    except Exception:
         return 0
 
 
