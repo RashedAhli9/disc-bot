@@ -7893,7 +7893,30 @@ async def _ask_impl(ctx, *, query: str = None):
         "given isn't that."
     )
 
-    messages = history + [{"role": "user", "content": q}]
+    # Recent channel context so "this guy" / "him" / "what he said" can be resolved to a real person.
+    _ctx_lines = []
+    try:
+        _ref = getattr(ctx.message, "reference", None)
+        _ref_msg = getattr(_ref, "resolved", None) if _ref else None
+        if _ref_msg is not None and getattr(_ref_msg, "content", None):
+            _ctx_lines.append(f"[The asker is REPLYING to this message by {_ref_msg.author.display_name}: {_ref_msg.content[:300]}]")
+        _recent = []
+        async for _m in ctx.channel.history(limit=8, before=ctx.message):
+            if _m.content and not _m.content.startswith(("!", "/")):
+                _recent.append(f"{_m.author.display_name}: {_m.content[:200]}")
+        if _recent:
+            _ctx_lines.append("[Recent chat in this channel, newest first:\n" + "\n".join(_recent) + "]")
+    except Exception as _e:
+        log_info(f"[ASK] context fetch failed: {_e}")
+    _q_for_ai = q
+    if _ctx_lines:
+        _q_for_ai = (
+            "\n".join(_ctx_lines)
+            + "\n(Use the chat above only to work out who 'this guy', 'him', 'he', 'what he said' etc. refer to — "
+            "usually the person who just spoke or the one being replied to. Don't rate or discuss anyone the asker didn't mean.)\n\n"
+            + f"{asker_name} asks: {q}"
+        )
+    messages = history + [{"role": "user", "content": _q_for_ai}]
 
     # Prompt caching: the big static instructions + tool list are identical on every call, so mark
     # them cacheable (repeat calls read them from cache = faster and cheaper). The per-message part
