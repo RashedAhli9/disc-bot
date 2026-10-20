@@ -1366,6 +1366,12 @@ SETTINGS_SCHEMA = {
         "min": 0, "max": 1440, "unit": " min", "default": 60,
         "desc": "How long after an event starts it's removed from the schedule.",
     },
+    "weekly_events_style": {
+        "group": "events", "label": "Weekly events style", "type": "choice",
+        "choices": ["wheel-forge", "melee-range"], "default": "wheel-forge",
+        "desc": "wheel-forge alternates Wheel / Forge each week. melee-range is the old 4-week "
+                "rotation (Melee Wheel, Melee Forge, Range Wheel, Range Forge).",
+    },
     # ---- Alerts ----
     "parse_alarm_enabled": {
         "group": "alerts", "label": "Parsing alarm", "type": "bool", "default": True,
@@ -5931,7 +5937,7 @@ ASK_TOOLS = [
     },
     {
         "name": "show_weekly_events",
-        "description": "Show the rotating weekly Abyss events (alternating Wheel/Forge schedule). Renders its own message directly.",
+        "description": "Show the rotating weekly Abyss events (Wheel/Forge schedule; style set in /settings). Renders its own message directly.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
@@ -6665,7 +6671,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
             for i in range(4):
                 idx = (weeks + i) % 4
-                nm = weekly_events[idx]
+                nm = get_weekly_events()[idx]
                 emoji = event_emojis.get(nm, "📌")
                 ev_date = sunday + timedelta(weeks=weeks + i, days=2)
                 base_dt = datetime.combine(ev_date, time(0, 0))
@@ -8302,11 +8308,23 @@ async def active_members(ctx):
 # WEEKLY EVENTS
 # ============================================================
 
-weekly_events = ["Wheel", "Forge", "Wheel", "Forge"]
+WEEKLY_EVENT_STYLES = {
+    "wheel-forge": ["Wheel", "Forge", "Wheel", "Forge"],
+    "melee-range": ["Melee Wheel", "Melee Forge", "Range Wheel", "Range Forge"],
+}
 event_emojis = {
     "Wheel": "🎡",
     "Forge": "🔨",
+    "Melee Wheel": "⚔️",
+    "Melee Forge": "🔨",
+    "Range Wheel": "🎯",
+    "Range Forge": "🏹",
 }
+
+
+def get_weekly_events():
+    """The 4-week rotation for the style chosen in /settings."""
+    return WEEKLY_EVENT_STYLES.get(get_setting("weekly_events_style"), WEEKLY_EVENT_STYLES["wheel-forge"])
 
 start_date = date(2025, 9, 16)
 
@@ -8333,7 +8351,7 @@ async def weeklyevent(inter):
 
     for i in range(4):
         idx = (weeks + i) % 4
-        nm = weekly_events[idx]
+        nm = get_weekly_events()[idx]
         emoji = event_emojis.get(nm, "📌")
         ev_date = sunday + timedelta(weeks=weeks + i, days=2)
         base_dt = datetime.combine(ev_date, time(0, 0))
