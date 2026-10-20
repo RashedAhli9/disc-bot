@@ -6195,8 +6195,10 @@ ASK_TOOLS = [
             "Add a repeating event in ONE call (e.g. 'supreme statue at 13 UTC every 84 hours until "
             "Nov 21'). Creates one event per occurrence from the first date/time, stepping every_hours, "
             "up to and including the end date. Skips occurrences that already exist (same name + time). "
-            "Use this instead of calling add_event many times. Admin only. You need a real end date — "
-            "if the user didn't give one, ask."
+            "Use this instead of calling add_event many times. Admin only. For the end, give either "
+            "until_date OR until_event (the NAME of an existing event it should run until, e.g. "
+            "'kvk summary' — the tool finds that event's date itself, so don't look it up first). "
+            "If the user gave neither, ask."
         ),
         "input_schema": {
             "type": "object",
@@ -6206,11 +6208,12 @@ ASK_TOOLS = [
                 "time_utc": {"type": "string", "description": "HH:MM 24h UTC of the first occurrence, default 12:00"},
                 "every_hours": {"type": "number", "description": "Hours between occurrences, e.g. 84 or 24"},
                 "until_date": {"type": "string", "description": "YYYY-MM-DD last day to include (occurrences up to the end of this day UTC)"},
+                "until_event": {"type": "string", "description": "Instead of until_date: name (partial ok) of an existing event to run until, e.g. 'kvk summary'. Occurrences stop before that event's time."},
                 "reminder_minutes": {"type": "integer", "description": "Minutes before each event to remind, default 0 (no reminder)"},
                 "tag_user_id": {"type": "string", "description": "Discord USER ID to ping in each reminder (digits only)."},
                 "tag_role_id": {"type": "string", "description": "Discord ROLE ID to ping in each reminder (digits only)."}
             },
-            "required": ["name", "first_date", "every_hours", "until_date"]
+            "required": ["name", "first_date", "every_hours"]
         }
     },
     {
@@ -6966,13 +6969,32 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             try:
                 first_dt = datetime.strptime(
                     f"{tool_input['first_date']} {tool_input.get('time_utc', '12:00')}", "%Y-%m-%d %H:%M")
-                until_dt = datetime.strptime(tool_input["until_date"], "%Y-%m-%d") + timedelta(days=1)
+                until_dt = None
+                if tool_input.get("until_date"):
+                    until_dt = datetime.strptime(tool_input["until_date"], "%Y-%m-%d") + timedelta(days=1)
                 step = timedelta(hours=float(tool_input["every_hours"]))
                 reminder = tool_input.get("reminder_minutes", 0)
             except Exception as e:
                 return False, f"Couldn't parse that date/time/interval: {e}"
             if step < timedelta(hours=1):
                 return False, "every_hours must be at least 1."
+            if until_dt is None:
+                _ue = (tool_input.get("until_event") or "").strip().lower()
+                if not _ue:
+                    return False, "Need an end: give until_date or until_event."
+                _cands = []
+                for _r in db_get_events():
+                    try:
+                        _d = datetime.fromisoformat(_r[2])
+                    except Exception:
+                        continue
+                    if _ue in _r[1].strip().lower() and _d > first_dt:
+                        _cands.append(_d)
+                if not _cands:
+                    return False, (f"No event matching '{tool_input.get('until_event')}' is on the list after "
+                                   f"{first_dt.strftime('%Y-%m-%d %H:%M')} UTC, so I can't tell where to stop. "
+                                   f"Ask the user for the end date (or add that event first).")
+                until_dt = min(_cands)
             occurrences = []
             cur = first_dt
             while cur < until_dt:
@@ -7743,8 +7765,9 @@ async def _ask_impl(ctx, *, query: str = None):
         "cancel_queued_task to cancel one by ID, and edit_queued_task_time to reschedule one.\n\n"
         "REPEATING EVENTS: for anything that repeats on a fixed interval ('every 84 hours', "
         "'every 3.5 days', 'daily at 13 UTC') use add_recurring_event ONCE — never loop add_event. "
-        "It needs a real end date; if the user gives a vague one ('until the summary') and you "
-        "can't resolve it from the conversation, ask for a date. Resolve a named date like "
+        "If it should run until another event on the list ('until the kvk summary'), pass that "
+        "event's name as until_event and call it straight away — no lookups first. If it fails "
+        "because that event isn't on the list, ask the user for the end date. Resolve a named date like "
         "'Saturday November 21' to YYYY-MM-DD yourself.\n\n"
         "EVENT TAGGING: add_event takes optional tag_user_id and/or tag_role_id, and edit_event "
         "takes new_tag_user_id / new_tag_role_id / reset_tag, to choose who an event's reminder "
@@ -7977,7 +8000,7 @@ async def _ask_impl(ctx, *, query: str = None):
         finished = False
         empty_retries = 0
 
-        for _ in range(8):  # allow several tool round-trips so Claude can chain calls
+        for _ in range(12):  # allow several tool round-trips so Claude can chain calls
             try:
                 response = await _ask_call(model)
             except Exception as e:
