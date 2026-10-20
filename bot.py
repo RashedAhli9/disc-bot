@@ -1411,6 +1411,12 @@ SETTINGS_SCHEMA = {
         "min": 50, "max": 5000, "default": 3000,
         "desc": "How many recent messages to read from a channel when learning (!learnchat and the setting above).",
     },
+    "season_length_days": {
+        "group": "ask", "label": "Season length (days)", "type": "int", "min": 7, "max": 120, "default": 30,
+        "unit": " days",
+        "desc": "Used to pro-rate the deads requirement by how far into the season we are when the season "
+                "has no end date set (last season was 30 days).",
+    },
     "deads_requirement": {
         "group": "ask", "label": "Deads requirement", "type": "text", "max": 80,
         "validate": "deads_tiers", "default": "100:1.5,150:3.5,200:5",
@@ -1472,9 +1478,10 @@ def _parse_deads_tiers(raw):
     return sorted(tiers)
 
 
-def deads_requirement_line(deaths, highest_power, season_note=""):
-    """One text line for the AI: the season deads requirement for this highest power, and how the
-    player's deaths compare (as % of it). Power/deaths are raw unit counts."""
+def deads_requirement_line(deaths, highest_power, season_note="", days_elapsed=None, season_days=None):
+    """One text line for the AI: the season deads requirement for this highest power and how the player's
+    deaths compare. With days_elapsed/season_days it pro-rates the requirement to how far into the season
+    we are (pace), instead of comparing a half-finished season against the full-season number."""
     try:
         tiers = _parse_deads_tiers(get_setting("deads_requirement"))
     except Exception:
@@ -1494,11 +1501,23 @@ def deads_requirement_line(deaths, highest_power, season_note=""):
         required = int(highest_power * ratio)
         basis = (f"highest power {hp_m:,.1f}m is below the lowest tier, so it scales at {ratio * 100:.1f}% of "
                  f"highest power")
+    if days_elapsed and season_days and season_days > 0:
+        days = max(1, min(int(days_elapsed), int(season_days)))
+        expected = required * days / season_days
+        pace_pct = deaths / expected * 100 if expected else 0
+        projected = deaths / days * season_days
+        proj_pct = projected / required * 100 if required else 0
+        early = " It's very early in the season, so the numbers are noisy — go easy." if days < 5 else ""
+        return (f"DEADS REQUIREMENT: {basis} = {required:,} deaths for the full {int(season_days)}-day season. "
+                f"We're {days} day(s) in, so by now they should have about {expected:,.0f}; their deaths: "
+                f"{deaths:,} = {pace_pct:,.0f}% of that pro-rated requirement (on pace for about "
+                f"{projected:,.0f} by season end = {proj_pct:,.0f}% of the full requirement){season_note}.{early} "
+                f"(Bands for the pace %: under 50% barely fighting, 50-99% behind, 100-149% on track, "
+                f"150-249% well ahead, 250%+ a monster.)")
     pct = deaths / required * 100 if required else 0
-    return (f"DEADS REQUIREMENT: {basis} = {required:,} deaths needed. Their deaths: {deaths:,} = {pct:,.0f}% of the "
-            f"requirement{season_note}. (Bands: under 50% barely fighting, 50-99% short, 100-149% met it, "
+    return (f"DEADS REQUIREMENT: {basis} = {required:,} deaths needed. Their deaths: {deaths:,} = {pct:,.0f}% of "
+            f"the requirement{season_note}. (Bands: under 50% barely fighting, 50-99% short, 100-149% met it, "
             f"150-249% well above, 250%+ a monster.)")
-
 
 
 def init_settings():
@@ -5984,8 +6003,16 @@ def _ask_server_ranks(ctx, player_input):
                          f"#{g_rank} of {len(group)} in our group")
         else:
             lines.append(f"- {label}: {val:,} — #{s_rank} of {len(lords)} on the server (top {s_rank / len(lords) * 100:.0f}%)")
-    window = f" ({lord['start_date']} to {lord['end_date']} — may be shorter than a full season)" if lord.get("start_date") and lord.get("end_date") else ""
-    lines.append(deads_requirement_line(lord.get("deaths") or 0, lord.get("highest_power") or 0, window))
+    window, win_days = "", None
+    try:
+        sd = date.fromisoformat(str(lord["start_date"])[:10])
+        ed = date.fromisoformat(str(lord["end_date"])[:10])
+        win_days = (ed - sd).days + 1
+        window = f" (server data covers {sd} to {ed}, {win_days} days)"
+    except Exception:
+        pass
+    lines.append(deads_requirement_line(lord.get("deaths") or 0, lord.get("highest_power") or 0, window,
+                                        win_days, int(get_setting("season_length_days")) if win_days else None))
     return "\n".join(lines), None
 
 
@@ -6632,19 +6659,26 @@ async def _ask_build_tag_mentions(ctx, user_id, role_id):
 
 
 def _ask_deads_line(stats, start_date, actual_end, season_id, is_current):
-    """Deads-requirement line for the tracked season stats (deaths so far vs the full-season requirement)."""
+    """Season-progress + deads-requirement text for the tracked season stats, pro-rated by season day."""
     try:
         hp = _parse_stat_num_global(stats.get("highest_power"))
         deaths = _parse_stat_num_global(stats.get("deads_gain"))
-        season_note = ""
+        prefix, days, season_days = "", None, None
         try:
-            day_n = (date.fromisoformat(str(actual_end)[:10]) - date.fromisoformat(str(start_date)[:10])).days + 1
-            end = db_get_season_end_date(season_id) if is_current else None
-            season_note = (f"; this is season day {day_n}" + (f", season ends {end}" if end else ", season end date not set")
-                           + " — the requirement is for the FULL season, so judge the pace if it's still running")
+            start = date.fromisoformat(str(start_date)[:10])
+            days = (date.fromisoformat(str(actual_end)[:10]) - start).days + 1
+            end = db_get_season_end_date(season_id)
+            if end:
+                season_days = (date.fromisoformat(str(end)[:10]) - start).days + 1
+                length_note = ""
+            else:
+                season_days = int(get_setting("season_length_days"))
+                length_note = " (no end date set, so assuming a standard season length)"
+            days = max(1, min(days, season_days))
+            prefix = f"SEASON PROGRESS: day {days} of {season_days}{length_note}. "
         except Exception:
-            pass
-        return deads_requirement_line(deaths, hp, season_note)
+            days, season_days = None, None
+        return prefix + deads_requirement_line(deaths, hp, "", days, season_days)
     except Exception as e:
         return f"DEADS REQUIREMENT: couldn't be computed ({e})."
 
@@ -7779,28 +7813,34 @@ async def _ask_impl(ctx, *, query: str = None):
         "rating means an actual verdict (a score out of 10 or a clear take with a reason), never a "
         "list of observations or a stat readout.\n\n"
         "RATING STATS — imagine you're the leader of a kingdom at war deciding who to trust on the "
-        "front line. In ONE turn, call these together: get_player_stats (their season numbers), "
-        "get_activity_rankings (how they stack up in our group) and get_server_ranks (their rank "
-        "among every lord on the game server, from the !stop data) — for the asker, or for each "
-        "person named. Then judge on what wins wars, in this order of weight: (1) DEATHS — "
-        "heaviest, and measured against the group's season DEADS REQUIREMENT, which depends on a "
-        "player's highest power. get_player_stats and get_server_ranks each end with a DEADS "
-        "REQUIREMENT line giving the exact tier, the number needed and their deaths as a % of it — "
-        "use that line, never your own guess: under 50% = barely fighting, 50-99% = short of the "
-        "requirement, 100-149% = met it, 150-249% = well above, 250%+ = a monster. More deaths = "
-        "not scared to fight; T5 deaths count more than T4. The requirement is for the FULL "
-        "season, so if the season is still running judge their pace, not the raw total. (2) MERITS "
-        "and enemy merits / kills — real damage dealt, the main measure of war impact. (3) HEALING "
-        "— how much punishment they take and keep coming back from; read it against kills. (4) "
-        "POWER and power gain — are they growing, and highest vs current power (a big drop means "
-        "lost troops). (5) MERIT-TO-POWER ratio — are they using the power they have. (6) "
-        "RESOURCES GATHERED — lowest weight; heavy gathering with few merits or deaths is a "
-        "farmer, not a fighter. Rank beats raw numbers for everything except the deads "
-        "requirement: weigh the server rank (out of everyone on the server) and the group rank, so "
-        "a top-10-on-the-server stat beats a bigger number ranked low. Finish with a verdict — a "
-        "score out of 10 plus a one-line take in the group's voice — and the 2-3 numbers that "
-        "decided it, including the weak spot (e.g. deaths well under the requirement = scared to "
-        "fight). If the server data isn't uploaded, say so and rate from the tracked data only.\n\n"
+        "front line. ALWAYS rate the CURRENT season, pro-rated by how many days into it we are: "
+        "the tools tell you the season day and what people should have by now, so compare pace, "
+        "never a finished season's totals and never last season's numbers. Last season's data (for "
+        "example from the Call of Stats leaderboard, when you're given it) is only a benchmark for "
+        "what's normal and how people tend to perform — use it to understand the field, never as "
+        "the thing being rated. In ONE turn, call these together: get_player_stats (their season "
+        "numbers), get_activity_rankings (how they stack up in our group) and get_server_ranks "
+        "(their rank among every lord on the game server, from the !stop data) — for the asker, or "
+        "for each person named. Then judge on what wins wars, in this order of weight: (1) DEATHS "
+        "— heaviest, and measured against the group's season DEADS REQUIREMENT, which depends on a "
+        "player's highest power. get_player_stats and get_server_ranks each include a DEADS "
+        "REQUIREMENT line with the exact tier, the full-season number, what they should have by "
+        "now and their pace % — use that line, never your own guess: under 50% = barely fighting, "
+        "50-99% = behind, 100-149% = on track, 150-249% = well ahead, 250%+ = a monster. More "
+        "deaths = not scared to fight; T5 deaths count more than T4. Very early in a season the "
+        "numbers are noisy, so go easy. (2) MERITS and enemy merits / kills — real damage dealt, "
+        "the main measure of war impact. (3) HEALING — how much punishment they take and keep "
+        "coming back from; read it against kills. (4) POWER and power gain — are they growing, and "
+        "highest vs current power (a big drop means lost troops). (5) MERIT-TO-POWER ratio — are "
+        "they using the power they have. (6) RESOURCES GATHERED — lowest weight; heavy gathering "
+        "with few merits or deaths is a farmer, not a fighter. For every stat other than deaths, "
+        "think per-day pace too (total divided by season days so far). Rank beats raw numbers for "
+        "everything except the deads requirement: weigh the server rank (out of everyone on the "
+        "server) and the group rank, so a top-10-on-the-server stat beats a bigger number ranked "
+        "low. Finish with a verdict — a score out of 10 plus a one-line take in the group's voice "
+        "— and the 2-3 numbers that decided it, including the weak spot (e.g. deaths well behind "
+        "pace = scared to fight). If the server data isn't uploaded, say so and rate from the "
+        "tracked data only.\n\n"
         "RATING FAIRNESS — judge by where someone actually sits in the pool, not by how they "
         "compare to the very best. Use percentiles (top X% = rank divided by total): top 10% = "
         "elite, top 25% = strong, top 50% = solid or above average, 50-75% = below average, bottom "
