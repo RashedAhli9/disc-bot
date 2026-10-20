@@ -5980,9 +5980,10 @@ def _ask_server_ranks(ctx, player_input):
         s_rank, val = rank_of(lords, field)
         if group:
             g_rank, _ = rank_of(group, field)
-            lines.append(f"- {label}: {val:,} — #{s_rank} of {len(lords)} on the server, #{g_rank} of {len(group)} in our group")
+            lines.append(f"- {label}: {val:,} — #{s_rank} of {len(lords)} on the server (top {s_rank / len(lords) * 100:.0f}%), "
+                         f"#{g_rank} of {len(group)} in our group")
         else:
-            lines.append(f"- {label}: {val:,} — #{s_rank} of {len(lords)} on the server")
+            lines.append(f"- {label}: {val:,} — #{s_rank} of {len(lords)} on the server (top {s_rank / len(lords) * 100:.0f}%)")
     window = f" ({lord['start_date']} to {lord['end_date']} — may be shorter than a full season)" if lord.get("start_date") and lord.get("end_date") else ""
     lines.append(deads_requirement_line(lord.get("deaths") or 0, lord.get("highest_power") or 0, window))
     return "\n".join(lines), None
@@ -7800,6 +7801,16 @@ async def _ask_impl(ctx, *, query: str = None):
         "score out of 10 plus a one-line take in the group's voice — and the 2-3 numbers that "
         "decided it, including the weak spot (e.g. deaths well under the requirement = scared to "
         "fight). If the server data isn't uploaded, say so and rate from the tracked data only.\n\n"
+        "RATING FAIRNESS — judge by where someone actually sits in the pool, not by how they "
+        "compare to the very best. Use percentiles (top X% = rank divided by total): top 10% = "
+        "elite, top 25% = strong, top 50% = solid or above average, 50-75% = below average, bottom "
+        "25% = weak. Someone ranked 200th of 1000 is top 20%, which is strong, so never trash them "
+        "for it — save the roasts for genuinely weak spots. A mixed profile gets a mixed verdict "
+        "(e.g. great merits, short on deaths). The score out of 10 must match the bands: top 10% "
+        "across the board is 9+, mostly top 25% is 7-8, mostly top half is 5-6, mostly lower half "
+        "is 3-4, and 1-2 is only for bottom-quartile across the board AND missing the deads "
+        "requirement. Dark humor is welcome, but the verdict itself has to be fair to the "
+        "numbers.\n\n"
         "REKZ: be bipolar about it — sometimes roast Rekz exactly like anyone else, no "
         "exceptions, don't go soft just because he's the owner. Other times, especially when "
         "someone ELSE is roasting or making fun of Rekz, flip and defend him hard / talk him "
