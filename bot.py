@@ -1400,6 +1400,17 @@ SETTINGS_SCHEMA = {
                 "faster model. Anything that edits events or needs analysis always uses the full model. "
                 "Turn off if answers ever seem off.",
     },
+    "learn_channel": {
+        "group": "ask", "label": "Learn from a channel now", "type": "channel",
+        "channel_types": ["text"], "default": None,
+        "desc": "Pick a channel and I read its recent history right away (amount below) so !ask learns how "
+                "everyone talks. Picking one starts the read. You can also type !learnchat in any channel.",
+    },
+    "learn_amount": {
+        "group": "ask", "label": "Messages to read", "type": "int",
+        "min": 50, "max": 5000, "default": 3000,
+        "desc": "How many recent messages to read from a channel when learning (!learnchat and the setting above).",
+    },
     "deads_requirement": {
         "group": "ask", "label": "Deads requirement", "type": "text", "max": 80,
         "validate": "deads_tiers", "default": "100:1.5,150:3.5,200:5",
@@ -7372,34 +7383,112 @@ async def check_queued_tasks():
             db_set_task_status(task_id, "failed", str(e))
 
 
+_BG_TASKS = set()  # keeps background tasks alive until they finish
+
+
+async def _learn_from_channel(channel, limit):
+    """Read a channel's recent history into the chat-learning table. Returns (seen, new, members, total)."""
+    rows, seen = [], 0
+    async for m in channel.history(limit=limit):
+        seen += 1
+        if m.author.bot:
+            continue
+        text = clean_chat_text(m.content)
+        if text:
+            rows.append((m.id, m.author.id, m.author.display_name, text,
+                         m.created_at.replace(tzinfo=None).isoformat()))
+    new = await asyncio.to_thread(db_save_chat_batch, rows) if rows else 0
+    silent_backup()
+    members, total = db_chat_counts()
+    return seen, new, members, total
+
+
+async def _learn_channel_from_settings(inter, channel_id):
+    """Background job started by picking a channel in /settings -> !ask AI -> Learn from a channel now."""
+    channel = inter.guild.get_channel(channel_id) if inter.guild else None
+    if channel is None:
+        return await inter.followup.send("❌ I can't see that channel.", ephemeral=True)
+    try:
+        seen, new, members, total = await _learn_from_channel(channel, get_setting("learn_amount"))
+    except Exception as e:
+        log_error(f"[LEARN] {type(e).__name__}: {e}")
+        return await inter.followup.send(f"❌ Couldn't read {channel.mention}: {e}", ephemeral=True)
+    await inter.followup.send(
+        f"✅ Read {seen} messages from {channel.mention}, learned {new} new ones. Now holding {total} messages "
+        f"from {members} member(s) (newest {CHAT_SAMPLES_PER_USER} each).", ephemeral=True)
+
+
 @bot.command(name="learnchat")
-async def learnchat(ctx, limit: int = 1000):
-    """Owner only: read this channel's recent history so !ask can learn how everyone talks right away
-    (new messages are learned automatically from then on). Usage: !learnchat [how many, 50-5000]"""
+async def learnchat(ctx, *, arg: str = ""):
+    """Owner only: read a channel's recent history so !ask learns how everyone talks right away (new
+    messages are learned automatically afterwards). Usage: !learnchat [#channel] [how many, 50-5000]
+    — no channel = this one, no number = the 'Messages to read' setting (default 3000)."""
     if ctx.author.id != OWNER_ID:
         return await ctx.send("❌ Owner only.")
-    limit = max(50, min(int(limit), 5000))
-    status = await ctx.send(f"📚 Reading the last {limit} messages in this channel…")
-    rows, seen = [], 0
+    channel, limit = ctx.channel, get_setting("learn_amount")
+    for tok in arg.split():
+        m = re.fullmatch(r"<#(\d+)>", tok)
+        if m or (tok.isdigit() and len(tok) >= 15):  # channel mention or channel ID
+            channel = ctx.guild.get_channel(int(m.group(1) if m else tok))
+            if channel is None:
+                return await ctx.send("❌ I can't see that channel.")
+        elif tok.isdigit():
+            limit = int(tok)
+    limit = max(50, min(limit, 5000))
+    if not channel.permissions_for(ctx.guild.me).read_message_history:
+        return await ctx.send(f"❌ I can't read the history of {channel.mention}.")
+    status = await ctx.send(f"📚 Reading the last {limit} messages in {channel.mention}…")
     try:
-        async for m in ctx.channel.history(limit=limit):
-            seen += 1
-            if m.author.bot:
-                continue
-            text = clean_chat_text(m.content)
-            if text:
-                rows.append((m.id, m.author.id, m.author.display_name, text,
-                             m.created_at.replace(tzinfo=None).isoformat()))
-        new = await asyncio.to_thread(db_save_chat_batch, rows) if rows else 0
+        seen, new, members, total = await _learn_from_channel(channel, limit)
     except Exception as e:
         log_error(f"[LEARNCHAT] {type(e).__name__}: {e}")
         return await status.edit(content=f"❌ Couldn't read the history: {e}")
-    silent_backup()
-    members, total = db_chat_counts()
     await status.edit(content=(
         f"✅ Read {seen} messages, learned {new} new ones. Now holding {total} messages from {members} "
-        f"member(s) (newest {CHAT_SAMPLES_PER_USER} each). Run it in other channels too if you want more."
+        f"member(s) (newest {CHAT_SAMPLES_PER_USER} each). Run it on other channels too for more."
     ))
+
+
+@bot.command(name="cosdump")
+async def cosdump(ctx, *, url: str = None):
+    """Owner only: fetch a Call of Stats page with the bot's login and DM you what it contains (table
+    columns, filter field names, first rows, plus the raw HTML as a file) so new tools can be built on it.
+    Usage: !cosdump <full https://callofstats.com/... link copied from your browser>"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    url = (url or "").strip().strip("<>")
+    if not url.startswith("https://callofstats.com/"):
+        return await ctx.send("Usage: `!cosdump <full https://callofstats.com/... link>` (copy it from your browser).")
+    session = await get_callofstats_session()
+    if not session:
+        return await ctx.send("❌ No Call of Stats login is configured on the bot.")
+    try:
+        async with session.get(url, allow_redirects=True) as resp:
+            status_code, html = resp.status, await resp.text()
+    except Exception as e:
+        return await ctx.send(f"❌ Couldn't fetch it: {type(e).__name__}: {e}")
+
+    def _plain(fragment):
+        return " ".join(re.sub(r"<[^>]+>", " ", fragment).split())
+
+    headers = [_plain(h) for h in re.findall(r"<th[^>]*>(.*?)</th>", html, re.S | re.I)]
+    fields = sorted(set(re.findall(r'<(?:input|select)[^>]*\bname="([^"]+)"', html, re.I)))
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I)
+    sample = [" | ".join(_plain(c) for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", r, re.S | re.I)) for r in rows[:6]]
+    report = (
+        f"HTTP {status_code}, {len(html):,} chars, {len(rows)} table rows\n"
+        f"COLUMNS: {headers[:40]}\n"
+        f"FORM FIELDS: {fields[:40]}\n"
+        f"FIRST ROWS:\n" + "\n".join(sample)
+    )
+    try:
+        await ctx.author.send(
+            f"```\n{report[:1800]}\n```",
+            file=discord.File(io.BytesIO(html[:7_000_000].encode("utf-8", "replace")), filename="callofstats_dump.html"),
+        )
+        await ctx.send("📬 Sent you a DM with what's on that page (and the raw HTML as a file).")
+    except discord.Forbidden:
+        await ctx.send("❌ I couldn't DM you — open your DMs for this server and run it again.")
 
 
 @bot.command(name="clearlearned")
@@ -7659,19 +7748,24 @@ async def _ask_impl(ctx, *, query: str = None):
         "to the point for simple lookups, but give full step-by-step explanations when "
         "someone is working through a math problem or asks you to explain something — don't "
         "sacrifice a real, complete answer for brevity when the question calls for it.\n\n"
-        "HOW YOU TALK: you're one of the people in this group, not a bot doing a bit. Talk the "
-        "way the members actually talk — the 'HOW THE GROUP TALKS' section of this prompt (when "
+        "HOW YOU TALK: you're one of the people in this group, not a bot doing a bit. Talk the way "
+        "the members actually talk — the 'HOW THE GROUP TALKS' section of this prompt (when "
         "present) shows real recent messages, so match their slang, spelling, abbreviations, "
         "message length, swearing level and emoji habits, naturally and without caricaturing "
         "anyone. Default to short, casual chat-message replies (1-3 sentences) unless someone "
         "asked for a real explanation. Don't narrate what you're about to do, don't repeat the "
         "question back, don't announce things, don't dump stats nobody asked for, no 'let's break "
         "it down', no corporate or AI-sounding phrasing, no recycled catchphrases or insult "
-        "templates. Humor is welcome when it's natural and specific to the person or moment, and "
-        "swearing is fine at the level the server already uses. The hard lines: never target "
-        "anyone's real identity, health, appearance, family or personal life, never anything "
-        "sexual, and no racism or slurs. Never say 'guild' — the members call it the server. "
-        "'The server' is the game server (the kingdom, hundreds of players); our tracked members are 'the group' or 'us'.\n\n"
+        "templates. This is an adults-only (21+) group with a dark, often overboard sense of humor "
+        "that everyone in it understands is jokes: gallows humor, morbid jokes, savage roasts and "
+        "heavy swearing are normal here, so match that energy instead of toning it down, softening "
+        "it, adding disclaimers or lecturing — and make the jokes actually good and specific to "
+        "the person or moment. The only hard lines: no slurs or hate aimed at a race, religion, "
+        "nationality or any other group, nothing sexual, and never tell anyone to hurt or kill "
+        "themselves — if someone genuinely sounds like they're not okay (and isn't joking), drop "
+        "the bit and just be decent for a second. Never say 'guild' — the members call it the "
+        "server. 'The server' is the game server (the kingdom, hundreds of players); our tracked "
+        "members are 'the group' or 'us'.\n\n"
         "READ WHAT IS ACTUALLY BEING ASKED when someone wants a rating or an opinion. (a) STATS — "
         "'rate my stats', 'how am I doing', 'am I good at the game': use the stat tools and rate "
         "the stats with real numbers and rank context, in the group's voice. (b) THE PERSON — "
@@ -9773,6 +9867,9 @@ def _setting_warning(key, value, guild):
         if key == "clock_channel":
             if not perms.manage_channels:
                 return "⚠️ I need **Manage Channels** on that channel to rename it."
+        elif key == "learn_channel":
+            if not (perms.view_channel and perms.read_message_history):
+                return "⚠️ I can't read that channel's history (I need View Channel + Read Message History)."
         elif not (perms.view_channel and perms.send_messages):
             return "⚠️ I can't post in that channel."
     elif spec["type"] == "role":
@@ -9790,6 +9887,8 @@ def _saved_note(key, value, guild):
     warning = _setting_warning(key, value, guild)
     if warning:
         note += f"\n{warning}"
+    if key == "learn_channel":
+        note += f"\n📚 Reading the last {get_setting('learn_amount')} messages now — I'll message you when it's done."
     if key.startswith("clock_"):
         note += "\nThe channel name updates within a minute (Discord limits renames, so repeat changes can take a few minutes)."
     return note
@@ -9906,6 +10005,10 @@ class SettingEditorView(_OwnerOnlyView):
         set_setting(self.key, value, inter.user.id)
         embed, view = self._overview(_saved_note(self.key, value, inter.guild))
         await inter.response.edit_message(embed=embed, view=view)
+        if self.key == "learn_channel":
+            task = asyncio.create_task(_learn_channel_from_settings(inter, value))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
 
     async def _save_raw(self, inter, raw):
         value, err = coerce_setting_value(self.key, raw)
