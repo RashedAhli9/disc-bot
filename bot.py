@@ -1223,7 +1223,7 @@ def migrate_db_events():
     except Exception as e:
         log_error(f"[DB MIGRATE EVENTS] Error: {e}")
 
-def db_add_event(name, dt, reminder, tag_mentions=None):
+def db_add_event(name, dt, reminder, tag_mentions=None, backup=True):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute(
@@ -1233,7 +1233,8 @@ def db_add_event(name, dt, reminder, tag_mentions=None):
     log_info(f"[DB ADD EVENT] writing to: {DB}")
     conn.commit()
     conn.close()
-    silent_backup()
+    if backup:  # bulk adds pass backup=False and call silent_backup() once at the end
+        silent_backup()
 
 def db_get_event_tags():
     """Return {event_id: mention_string} for events that have a custom tag set."""
@@ -5819,6 +5820,30 @@ ASK_TOOLS = [
         }
     },
     {
+        "name": "add_recurring_event",
+        "description": (
+            "Add a repeating event in ONE call (e.g. 'supreme statue at 13 UTC every 84 hours until "
+            "Nov 21'). Creates one event per occurrence from the first date/time, stepping every_hours, "
+            "up to and including the end date. Skips occurrences that already exist (same name + time). "
+            "Use this instead of calling add_event many times. Admin only. You need a real end date — "
+            "if the user didn't give one, ask."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "first_date": {"type": "string", "description": "YYYY-MM-DD of the first occurrence"},
+                "time_utc": {"type": "string", "description": "HH:MM 24h UTC of the first occurrence, default 12:00"},
+                "every_hours": {"type": "number", "description": "Hours between occurrences, e.g. 84 or 24"},
+                "until_date": {"type": "string", "description": "YYYY-MM-DD last day to include (occurrences up to the end of this day UTC)"},
+                "reminder_minutes": {"type": "integer", "description": "Minutes before each event to remind, default 0 (no reminder)"},
+                "tag_user_id": {"type": "string", "description": "Discord USER ID to ping in each reminder (digits only)."},
+                "tag_role_id": {"type": "string", "description": "Discord ROLE ID to ping in each reminder (digits only)."}
+            },
+            "required": ["name", "first_date", "every_hours", "until_date"]
+        }
+    },
+    {
         "name": "edit_event",
         "description": "Edit one existing event by matching its name (partial match ok). Change its name, date, time, and/or reminder. Admin only.",
         "input_schema": {
@@ -6502,6 +6527,12 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             )
             if tag_err:
                 return False, f"Event NOT added — {tag_err}"
+            # Don't create a duplicate if this exact event (same name + time) is already scheduled —
+            # e.g. the same !ask got sent twice.
+            if any(r[1].strip().lower() == tool_input["name"].strip().lower() and r[2] == dt.isoformat()
+                   for r in db_get_events()):
+                return False, (f"Event '{tool_input['name']}' at {dt.strftime('%Y-%m-%d %H:%M UTC')} "
+                               f"already exists — nothing added.")
             db_add_event(tool_input["name"], dt.isoformat(), reminder, tag_mentions)
             ts = _unix_utc(dt)
             tag_note = f" Reminders will ping {tag_mentions}." if tag_mentions else ""
@@ -6511,6 +6542,50 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 f"Added event '{tool_input['name']}' on <t:{ts}:F> ({dt.strftime('%Y-%m-%d %H:%M UTC')})."
                 f"{tag_note}"
             )
+
+        if tool_name == "add_recurring_event":
+            if not bypass_permission and not _ask_is_admin(ctx):
+                return False, "Only admins can add events."
+            try:
+                first_dt = datetime.strptime(
+                    f"{tool_input['first_date']} {tool_input.get('time_utc', '12:00')}", "%Y-%m-%d %H:%M")
+                until_dt = datetime.strptime(tool_input["until_date"], "%Y-%m-%d") + timedelta(days=1)
+                step = timedelta(hours=float(tool_input["every_hours"]))
+                reminder = tool_input.get("reminder_minutes", 0)
+            except Exception as e:
+                return False, f"Couldn't parse that date/time/interval: {e}"
+            if step < timedelta(hours=1):
+                return False, "every_hours must be at least 1."
+            occurrences = []
+            cur = first_dt
+            while cur < until_dt:
+                occurrences.append(cur)
+                cur += step
+            if not occurrences:
+                return False, "The end date is before the first occurrence — nothing to add."
+            if len(occurrences) > 60:
+                return False, (f"That would create {len(occurrences)} events — the limit is 60 per request. "
+                               f"Use a nearer end date or split it up.")
+            tag_mentions, tag_err = await _ask_build_tag_mentions(
+                ctx, tool_input.get("tag_user_id"), tool_input.get("tag_role_id")
+            )
+            if tag_err:
+                return False, f"Events NOT added — {tag_err}"
+            existing = {(r[1].strip().lower(), r[2]) for r in db_get_events()}
+            name = tool_input["name"]
+            added, skipped = [], 0
+            for occ in occurrences:
+                if (name.strip().lower(), occ.isoformat()) in existing:
+                    skipped += 1
+                    continue
+                db_add_event(name, occ.isoformat(), reminder, tag_mentions, backup=False)
+                added.append(occ)
+            if added:
+                silent_backup()
+            lines = "\n".join(f"- <t:{_unix_utc(o)}:F>" for o in added)
+            note = f" ({skipped} already existed and were skipped.)" if skipped else ""
+            return False, (f"Added {len(added)} '{name}' events every {tool_input['every_hours']}h"
+                           f"{note}:\n{lines}")
 
         if tool_name == "edit_event":
             if not bypass_permission and not _ask_is_admin(ctx):
@@ -6926,8 +7001,30 @@ async def check_queued_tasks():
             db_set_task_status(task_id, "failed", str(e))
 
 
+_ask_inflight = set()  # (channel_id, user_id, query) currently being processed
+
+
 @bot.command(name="ask")
 async def ask(ctx, *, query: str = None):
+    """Wrapper: shows the typing indicator while the AI works (it can take a while) and ignores an
+    identical !ask from the same person in the same channel while the first is still running
+    (double-sent messages used to run twice and could add events twice)."""
+    key = (ctx.channel.id, ctx.author.id, (query or "").strip().lower())
+    if query and key in _ask_inflight:
+        try:
+            await ctx.message.add_reaction("⏳")
+        except Exception:
+            pass
+        return
+    _ask_inflight.add(key)
+    try:
+        async with ctx.typing():
+            await _ask_impl(ctx, query=query)
+    finally:
+        _ask_inflight.discard(key)
+
+
+async def _ask_impl(ctx, *, query: str = None):
     """
     Natural-language command interface. Handles leaderboards (guild and server),
     player progress, comparisons, season info, events, and growth questions
@@ -6992,7 +7089,7 @@ async def ask(ctx, *, query: str = None):
         f"parameters a tool needs (date, time_utc, scheduled_time, new_date, new_time_utc, "
         f"etc.) — never leave a relative expression unresolved or ask the user to restate it "
         f"in a different format. Rekz is the owner of this bot and this server — this is "
-        f"internal context for the REKZ behavior rule below, never say the word 'owner' out "
+        f"internal context for the REKZ behavior rule in these instructions, never say the word 'owner' out "
         f"loud or refer to him by that title in a response, just talk to him like anyone else "
         f"(use his name if it comes up naturally, nothing formal). The person sending THIS "
         f"message is called '{asker_name}' in this server, and {'is Rekz' if asker_is_owner else 'is NOT Rekz'}. "
@@ -7077,6 +7174,11 @@ async def ask(ctx, *, query: str = None):
         "as an exact ISO datetime instead of leaving it out, and the action will be queued "
         "rather than run right away. Use list_queued_tasks to show what's queued, "
         "cancel_queued_task to cancel one by ID, and edit_queued_task_time to reschedule one.\n\n"
+        "REPEATING EVENTS: for anything that repeats on a fixed interval ('every 84 hours', "
+        "'every 3.5 days', 'daily at 13 UTC') use add_recurring_event ONCE — never loop add_event. "
+        "It needs a real end date; if the user gives a vague one ('until the summary') and you "
+        "can't resolve it from the conversation, ask for a date. Resolve a named date like "
+        "'Saturday November 21' to YYYY-MM-DD yourself.\n\n"
         "EVENT TAGGING: add_event takes optional tag_user_id and/or tag_role_id, and edit_event "
         "takes new_tag_user_id / new_tag_role_id / reset_tag, to choose who an event's reminder "
         "pings (default is the usual announcement role). When a message contains a mention like "
@@ -7152,16 +7254,29 @@ async def ask(ctx, *, query: str = None):
 
     messages = history + [{"role": "user", "content": q}]
 
+    # Prompt caching: the big static instructions + tool list are identical on every call, so mark
+    # them cacheable (repeat calls read them from cache = faster and cheaper). The per-message part
+    # (current time, who's asking) goes in its own block AFTER the cached one so it doesn't break the cache.
+    _static_part, _marker, _rest = system_prompt.partition("You have broad access")
+    if _marker:
+        system_blocks = [
+            {"type": "text", "text": _marker + _rest, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": _static_part},
+        ]
+    else:
+        system_blocks = system_prompt
+
     try:
         final_text = None
         any_rendered = False
+        finished = False
 
-        for _ in range(4):  # allow a few tool round-trips so Claude can chain calls
+        for _ in range(8):  # allow several tool round-trips so Claude can chain calls
             response = await asyncio.to_thread(
                 _anthropic_client.messages.create,
                 model="claude-sonnet-5",
                 max_tokens=900,
-                system=system_prompt,
+                system=system_blocks,
                 tools=ASK_TOOLS,
                 messages=messages,
             )
@@ -7171,6 +7286,7 @@ async def ask(ctx, *, query: str = None):
 
             if not tool_use_blocks:
                 final_text = " ".join(text_blocks).strip()
+                finished = True
                 break
 
             messages.append({"role": "assistant", "content": response.content})
@@ -7190,6 +7306,15 @@ async def ask(ctx, *, query: str = None):
             # Loop continues — Claude decides on the next turn whether it needs another
             # tool call (e.g. checking season history before pulling a specific season's
             # progress) or is done, in which case the next response will have no tool_use.
+
+        if not finished:
+            # Ran out of tool round-trips before the AI wrote a final answer — say so instead of going silent.
+            final_text = ((final_text or "") + "\n\n" if final_text else "") + (
+                "⚠️ That took more steps than I'm allowed in one go, so I stopped partway. "
+                "Check what got done (e.g. `/kvkevent`) and ask again for anything missing."
+            )
+        elif not final_text and not any_rendered:
+            final_text = "✅ Done."
 
         if final_text:
             # Discord rejects messages over 2000 chars (and counts raw <t:..> markup), so split
