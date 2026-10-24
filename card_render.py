@@ -512,3 +512,117 @@ def render_compare_card(d):
     c.finish(y).save(out, "PNG", optimize=True)
     out.seek(0)
     return out
+
+
+# ============================================================
+# EVENTS CARD (timeline)
+# ============================================================
+def _chip(c, x, y, text, color=MUTED, fill=PANEL2):
+    w = c.text_w(text, "s", 13) + 22
+    c.rect(x, y, w, 26, fill, r=13)
+    c.text(x + 11, y + 13, text, "s", 13, color, anchor="lm")
+    return w + 8
+
+
+def _human_delta(seconds):
+    seconds = max(0, int(seconds))
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
+def render_events_card(d):
+    """d: now (datetime, UTC), events: [{name, dt (datetime UTC), repeat(str|None), lead(int minutes|None),
+    channel(str), ping(str)}] sorted by time, tz_label (str), total (int)."""
+    from datetime import timedelta
+    now = d["now"]
+    evs = d["events"]
+    c = _Canvas(3000)
+    y = PAD
+
+    c.rect(PAD, y, W - 2 * PAD, 96, PANEL)
+    c.rect(PAD, y + 20, 5, 56, BLUE, r=3)
+    c.text(PAD + 28, y + 22, "Upcoming Events", "b", 30, TEXT)
+    c.text(PAD + 28, y + 62, f"{d.get('tz_label', 'UTC')}  ·  as of {now.strftime('%a %d %b, %H:%M')}", "r", 15, MUTED)
+    cnt = f"{d.get('total', len(evs))} scheduled"
+    w = c.text_w(cnt, "b", 13) + 28
+    c.rect(W - PAD - 28 - w, y + 34, w, 28, PANEL2, r=14)
+    c.text(W - PAD - 28 - w / 2, y + 48, cnt, "b", 13, BLUE, anchor="mm")
+    y += 96 + 16
+
+    if not evs:
+        c.rect(PAD, y, W - 2 * PAD, 90, PANEL)
+        c.text(W / 2, y + 45, "Nothing scheduled", "s", 18, MUTED, anchor="mm")
+        y += 106
+    else:
+        # hero: next event
+        e = evs[0]
+        secs = (e["dt"] - now).total_seconds()
+        soon = secs < 3600
+        accent = ORANGE if soon else GREEN
+        hh = 132
+        c.rect(PAD, y, W - 2 * PAD, hh, PANEL)
+        c.rect(PAD, y, 6, hh, accent, r=3)
+        c.text(PAD + 30, y + 20, "NEXT UP", "s", 13, MUTED)
+        nm = _fit(c, e["name"], "b", 32, 560)
+        c.text(PAD + 30, y + 44, nm[0], "b", nm[1], TEXT)
+        c.text(W - PAD - 30, y + 24, _human_delta(secs), "b", 44, accent, anchor="ra")
+        c.text(W - PAD - 30, y + 80, "until it starts", "r", 14, MUTED, anchor="ra")
+        c.text(PAD + 30, y + 92, f"{e['dt'].strftime('%a %d %b · %H:%M')}", "s", 16, MUTED)
+        cx = PAD + 30 + c.text_w(f"{e['dt'].strftime('%a %d %b · %H:%M')}", "s", 16) + 20
+        for chip in _event_chips(e):
+            cx += _chip(c, cx, y + 88, *chip) if False else _chip(c, cx, y + 88, chip[0], chip[1])
+        y += hh + 16
+
+        # grouped by day
+        groups = {}
+        for e in evs[1:]:
+            groups.setdefault(e["dt"].date(), []).append(e)
+        for day, items in groups.items():
+            delta_days = (day - now.date()).days
+            label = "TODAY" if delta_days == 0 else "TOMORROW" if delta_days == 1 else day.strftime("%A").upper()
+            c.text(PAD + 6, y + 6, f"{label}  ·  {day.strftime('%d %b')}", "s", 13, MUTED)
+            y += 28
+            rh = 70
+            ph = len(items) * rh + 8
+            c.rect(PAD, y, W - 2 * PAD, ph, PANEL)
+            ry = y + 4
+            for i, e in enumerate(items):
+                c.text(PAD + 28, ry + 22, e["dt"].strftime("%H:%M"), "b", 22, BLUE, anchor="lm")
+                nm = _fit(c, e["name"], "b", 19, 380)
+                c.text(PAD + 130, ry + 22, nm[0], "b", nm[1], TEXT, anchor="lm")
+                c.text(W - PAD - 28, ry + 22, f"in {_human_delta((e['dt'] - now).total_seconds())}", "s", 15, MUTED, anchor="rm")
+                cx = PAD + 130
+                for chip in _event_chips(e):
+                    cx += _chip(c, cx, ry + 36, chip[0], chip[1])
+                if i < len(items) - 1:
+                    c.d.line([(PAD + 28) * S, (ry + rh - 2) * S, (W - PAD - 28) * S, (ry + rh - 2) * S], fill=TRACK, width=S)
+                ry += rh
+            y += ph + 14
+
+    more = d.get("total", len(evs)) - len(evs)
+    if more > 0:
+        c.text(PAD + 6, y + 4, f"+ {more} more not shown", "r", 13, MUTED)
+        y += 24
+    y += 14
+    out = io.BytesIO()
+    c.finish(max(y, 200)).save(out, "PNG", optimize=True)
+    out.seek(0)
+    return out
+
+
+def _event_chips(e):
+    chips = []
+    if e.get("repeat"):
+        chips.append((f"↻ {e['repeat']}", PURPLE))
+    chips.append((f"{e['lead']}m before" if e.get("lead") else "no reminder", MUTED if not e.get("lead") else TEAL))
+    if e.get("channel"):
+        chips.append((f"#{e['channel']}", MUTED))
+    if e.get("ping"):
+        chips.append((e["ping"], YELLOW))
+    return chips
