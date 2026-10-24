@@ -5841,6 +5841,61 @@ async def gains(ctx, param1: str = None, param2: str = None):
         await ctx.send("❌ Error loading data. Try again later.")
 
 
+LB_ACCENTS = {
+    "deaths": card_render.RED, "deads": card_render.RED, "total_merits": card_render.YELLOW, "merits": card_render.YELLOW,
+    "healing": card_render.PURPLE, "healed": card_render.PURPLE, "infantry_merits": card_render.BLUE,
+    "cavalry_merits": card_render.ORANGE, "mage_merits": card_render.PURPLE, "marksman_merits": card_render.GREEN,
+    "current_power": card_render.GREEN, "highest_power": card_render.GREEN, "other_merits": card_render.TEAL,
+    "mana": card_render.TEAL, "rss": card_render.ORANGE,
+}
+
+
+def _deads_level(deaths, highest_power, start_date, end_date):
+    """'good'/'mid'/'bad' against the season deads requirement, or None if it can't be worked out."""
+    try:
+        season = db_get_current_season()
+        if not season or not highest_power:
+            return None
+        sid, _n, s_start, _c = season
+        p = deads_progress(deaths, highest_power, start_date or s_start, end_date or date.today().isoformat(), sid)
+        return p["level"] if p else None
+    except Exception:
+        return None
+
+
+async def send_lb_card(ctx, fallback, *, title, subtitle, rows, accent, footer=None, group=False,
+                       skip_zero=False, max_rows=25, level_fn=None, prefix="+"):
+    """Send a leaderboard as an image (list style) so everyone can see it. rows = [{name, val, aid?}] sorted
+    high->low. If the image can't be drawn, sends `fallback` (the old text version) instead."""
+    try:
+        my_aid = _member_account_id(ctx.author)
+        ranked = []
+        for r in rows:
+            if skip_zero and not r["val"]:
+                continue
+            rr = dict(r)
+            rr["rank"] = len(ranked) + 1
+            rr["me"] = bool(my_aid and r.get("aid") == my_aid)
+            if level_fn:
+                rr["level"] = level_fn(rr)
+            ranked.append(rr)
+        if not ranked:
+            raise ValueError("no rows")
+        shown = ranked[:max_rows]
+        me_row = None
+        if not any(r["me"] for r in shown):
+            mine = next((r for r in ranked if r["me"]), None)
+            if mine:
+                me_row = {"rank": mine["rank"], "name": mine["name"], "val": mine["val"]}
+        png = await asyncio.to_thread(card_render.render_leaderboard_card, {
+            "title": title, "subtitle": subtitle, "accent": accent, "group": group,
+            "rows": shown, "me_row": me_row, "footer": footer, "unit_prefix": prefix})
+        await ctx.send(file=discord.File(png, filename="leaderboard.png"))
+    except Exception as e:
+        log_info(f"[LEADERBOARD] image failed, using text: {type(e).__name__}: {e}")
+        await ctx.send(fallback)
+
+
 @bot.command(name="topmana")
 async def topmana(ctx, season_name: str = None):
     """Leaderboard for mana gathered. Usage: !topmana (current) or !topmana sos1 (specific season)"""
@@ -5905,14 +5960,14 @@ async def topmana(ctx, season_name: str = None):
                 lord_name = lord["name"]
             
             leaderboard.append({
-                "name": lord_name,
+                "aid": lord["account_id"], "name": lord_name,
                 "mana": mana_num,
                 "mana_str": mana_str
             })
         except Exception as e:
             log_info(f"[TOPMANA ERROR] {lord['account_id']}: {e}")
             leaderboard.append({
-                "name": lord["name"],
+                "aid": lord["account_id"], "name": lord["name"],
                 "mana": 0,
                 "mana_str": "+0"
             })
@@ -5929,7 +5984,9 @@ async def topmana(ctx, season_name: str = None):
         output += f"{medal} {lord['name']}: {lord['mana_str']}\n"
     
     output += f"📅 {start_date} → {actual_end_date}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title="Top Mana Gathered", subtitle=f"{season_name_display}  ·  {start_date} → {actual_end_date}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["mana"]} for l in leaderboard],
+                       accent=LB_ACCENTS["mana"], group=True)
 
 
 @bot.command(name="topdeaths")
@@ -5996,14 +6053,14 @@ async def topdeaths(ctx, season_name: str = None):
                 lord_name = lord["name"]
             
             leaderboard.append({
-                "name": lord_name,
+                "aid": lord["account_id"], "name": lord_name,
                 "deaths": deaths_num,
                 "deaths_str": deaths_str
             })
         except Exception as e:
             log_info(f"[TOPDEATHS ERROR] {lord['account_id']}: {e}")
             leaderboard.append({
-                "name": lord["name"],
+                "aid": lord["account_id"], "name": lord["name"],
                 "deaths": 0,
                 "deaths_str": "+0"
             })
@@ -6020,7 +6077,11 @@ async def topdeaths(ctx, season_name: str = None):
         output += f"{medal} {lord['name']}: {lord['deaths_str']}\n"
     
     output += f"📅 {start_date} → {actual_end_date}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title="Most Deads", subtitle=f"{season_name_display}  ·  {start_date} → {actual_end_date}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["deaths"]} for l in leaderboard],
+                       accent=LB_ACCENTS["deads"], group=True,
+                       footer="Bar color: green = requirement met, yellow = on pace, red = behind",
+                       level_fn=lambda r: _deads_level(r["val"], db_get_latest_field_value(season_id, r.get("aid"), "highest_power") if r.get("aid") else None, start_date, actual_end_date))
 
 
 @bot.command(name="topmerits")
@@ -6070,10 +6131,10 @@ async def topmerits(ctx, season_name: str = None):
                         merits_clean = merits_str.replace(",", "").replace("+", "")
                         merits_num = abs(int(merits_clean)) if merits_clean.lstrip("-").isdigit() else 0
             
-            leaderboard.append({"name": lord_name, "merits": merits_num, "merits_str": merits_str})
+            leaderboard.append({"aid": lord["account_id"], "name": lord_name, "merits": merits_num, "merits_str": merits_str})
         except Exception as e:
             log_info(f"[TOPMERITS ERROR] {lord.get('account_id')}: {e}")
-            leaderboard.append({"name": lord["name"], "merits": 0, "merits_str": "+0"})
+            leaderboard.append({"aid": lord["account_id"], "name": lord["name"], "merits": 0, "merits_str": "+0"})
     
     leaderboard.sort(key=lambda x: x["merits"], reverse=True)
     
@@ -6083,7 +6144,9 @@ async def topmerits(ctx, season_name: str = None):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['merits_str']}\n"
     output += f"📅 {start_date} → {actual_end_date}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title="Top Merits", subtitle=f"{season_name_display}  ·  {start_date} → {actual_end_date}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["merits"]} for l in leaderboard],
+                       accent=LB_ACCENTS["merits"], group=True)
 
 
 
@@ -6183,7 +6246,7 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
                 gain = val - prev if val > prev else 0
         except Exception as e:
             log_info(f"[{tag}] Error for {lord['account_id']}: {e}")
-        leaderboard.append({"name": lord_name, "val": val, "gain": gain})
+        leaderboard.append({"aid": lord["account_id"], "name": lord_name, "val": val, "gain": gain})
 
     leaderboard.sort(key=lambda x: x["val"], reverse=True)
 
@@ -6203,7 +6266,9 @@ async def _top_adv_merit(ctx, season_name, field, emoji, label, tag):
         gain_str  = f" (+{lord['gain']:,} today)" if lord["gain"] > 0 else ""
         output += f"{medal} {lord['name']}: {total_str}{gain_str}\n"
     output += f"📅 {start_date} → {data_as_of}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title=f"Top {label}", subtitle=f"{season_name_display}  ·  {start_date} → {data_as_of}  ·  {header_note}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["val"]} for l in leaderboard],
+                       accent=LB_ACCENTS.get(field, card_render.BLUE), group=True)
 
 
 @bot.command(name="topinf")
@@ -6306,7 +6371,7 @@ async def topheal(ctx, season_name: str = None):
                 lord_name = resolved_name or lord["name"]
         except Exception as e:
             log_info(f"[TOPHEAL ERROR] {lord['account_id']}: {e}")
-        leaderboard.append({"name": lord_name, "val": healed_num})
+        leaderboard.append({"aid": lord["account_id"], "name": lord_name, "val": healed_num})
 
     leaderboard.sort(key=lambda x: x["val"], reverse=True)
 
@@ -6316,7 +6381,9 @@ async def topheal(ctx, season_name: str = None):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: +{lord['val']:,}\n"
     output += f"📅 {start_date} → {today}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title="Top T4/T5 Healed", subtitle=f"{season_name_display}  ·  {start_date} → {today}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["val"]} for l in leaderboard],
+                       accent=LB_ACCENTS["healed"], group=True)
 
 
 @bot.command(name="topspent")
@@ -6359,7 +6426,7 @@ async def topspent(ctx, season_name: str = None):
                 lord_name = resolved_name or lord["name"]
         except Exception as e:
             log_info(f"[TOPMANASPENT ERROR] {lord['account_id']}: {e}")
-        leaderboard.append({"name": lord_name, "val": healed_num * mana_per_t5()})
+        leaderboard.append({"aid": lord["account_id"], "name": lord_name, "val": healed_num * mana_per_t5()})
 
     leaderboard.sort(key=lambda x: x["val"], reverse=True)
 
@@ -6369,7 +6436,10 @@ async def topspent(ctx, season_name: str = None):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: +{lord['val']:,}\n"
     output += f"\n📅 {start_date} → {today}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title="Top Mana Spent (est.)", subtitle=f"{season_name_display}  ·  {start_date} → {today}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["val"]} for l in leaderboard],
+                       accent=LB_ACCENTS["mana"], group=True,
+                       footer=f"Estimate: T4/T5 healed x {mana_per_t5()} mana, assuming all T5")
 
 
 # Per-channel short-term conversation memory for !ask follow-ups.
@@ -9205,10 +9275,10 @@ async def rss_leaderboard(ctx, season_name: str = None):
                         except Exception as e:
                             pass
             
-            leaderboard.append({"name": lord_name, "rss": total_rss})
+            leaderboard.append({"aid": lord["account_id"], "name": lord_name, "rss": total_rss})
         except Exception as e:
             log_info(f"[RSS ERROR] {lord.get('account_id')}: {e}")
-            leaderboard.append({"name": lord["name"], "rss": 0})
+            leaderboard.append({"aid": lord["account_id"], "name": lord["name"], "rss": 0})
     
     leaderboard.sort(key=lambda x: x["rss"], reverse=True)
     
@@ -9218,7 +9288,9 @@ async def rss_leaderboard(ctx, season_name: str = None):
         medal = medals[i] if i < 3 else f"{i+1}."
         output += f"{medal} {lord['name']}: {lord['rss']:,}\n"
     output += f"📅 {start_date} → {actual_end_date}```"
-    await ctx.send(output)
+    await send_lb_card(ctx, output, title="Top Resource Spenders", subtitle=f"{season_name}  ·  {start_date} → {actual_end_date}",
+                       rows=[{"aid": l["aid"], "name": l["name"], "val": l["rss"]} for l in leaderboard],
+                       accent=LB_ACCENTS["rss"], group=True, prefix="")
 
 
 async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
@@ -12311,7 +12383,8 @@ async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=2
             return await ctx.send(f"❌ None of this Discord's tracked members were found in S#{picked}'s uploaded data.")
         scope_label = f"Group {label}"
 
-    scored = [{"name": l["lord_name"], "val": l.get(stat_field, 0)} for l in lords]
+    scored = [{"name": l["lord_name"], "val": l.get(stat_field, 0), "aid": l["account_id"],
+               "hp": l.get("highest_power", 0)} for l in lords]
     scored.sort(key=lambda x: x["val"], reverse=True)
 
     date_range = ""
@@ -12343,7 +12416,13 @@ async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=2
         medal = medals[i] if i < 3 else f"{i+1}."
         lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
     lines.append("```")
-    await ctx.send("\n".join(lines))
+    _sd, _ed = lords[0].get("start_date"), lords[0].get("end_date")
+    await send_lb_card(ctx, "\n".join(lines), title=f"Top {label}",
+                       subtitle=f"S#{picked}" + (f"  ·  {_sd} → {_ed}" if _sd and _ed else ""),
+                       rows=scored, accent=LB_ACCENTS.get(stat_field, card_render.BLUE), group=group_only,
+                       skip_zero=True, max_rows=top_n,
+                       footer=("Bar color: green = requirement met, yellow = on pace, red = behind" if stat_field == "deaths" else None),
+                       level_fn=(lambda r: _deads_level(r["val"], r.get("hp"), None, _ed)) if stat_field == "deaths" else None)
 
 
 def _parse_stop_args(arg):
@@ -12480,7 +12559,7 @@ async def stopmana(ctx, *, arg: str = None):
         scope_label = "Group Mana Spent"
 
     scored = [
-        {"name": l["lord_name"],
+        {"name": l["lord_name"], "aid": l["account_id"],
          "val": l.get("t4_healed", 0) * mana_per_t4() + l.get("t5_healed", 0) * mana_per_t5()}
         for l in lords
     ]
@@ -12516,7 +12595,11 @@ async def stopmana(ctx, *, arg: str = None):
         lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
     lines.append(f"\n*(T4 Healed × {mana_per_t4()}) + (T5 Healed × {mana_per_t5()}) — exact, not an estimate*")
     lines.append("```")
-    await ctx.send("\n".join(lines))
+    _sd, _ed = lords[0].get("start_date"), lords[0].get("end_date")
+    await send_lb_card(ctx, "\n".join(lines), title=f"Top {scope_label}",
+                       subtitle=f"S#{picked}" + (f"  ·  {_sd} → {_ed}" if _sd and _ed else ""),
+                       rows=scored, accent=LB_ACCENTS["mana"], group=group_only, skip_zero=True, max_rows=top,
+                       footer=f"Exact: (T4 healed x {mana_per_t4()}) + (T5 healed x {mana_per_t5()})")
 
 @bot.command(name="stopinf")
 async def stopinf(ctx, *, arg: str = None):
