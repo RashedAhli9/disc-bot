@@ -4610,6 +4610,14 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         log_info(f"[PROGRESS] Merit ratio: {stats.get('merits_pct')}")
         log_info(f"[PROGRESS] Current T-kills: {current_t_kills}")
         
+        # Make sure this member's core stats are archived — rankings read from the archive, so a member whose
+        # daily save was missed would otherwise show no rank. (Merges, never overwrites good data.)
+        try:
+            if stats.get("merits") and not is_single_day:
+                db_save_season_progress(season_id, account_id, stats.get("lord_name", account_id), stats, end_date_used)
+        except Exception as _e:
+            log_info(f"[PROGRESS] archive save failed: {_e}")
+
         # Get rankings for all stats
         power_rank = await get_rankings_for_stat(ctx, "power_gain", start_date, end_date_used)
         merits_rank = await get_rankings_for_stat(ctx, "merits", start_date, end_date_used)
