@@ -10532,15 +10532,31 @@ async def botadmin_cmd(inter: discord.Interaction, action: app_commands.Choice[s
     await inter.response.send_message(msg, allowed_mentions=discord.AllowedMentions.none())
 
 
-@bot.tree.command(name="events", description="Owner: list upcoming events with their reminder channel and who gets pinged")
-async def events_cmd(inter: discord.Interaction):
-    if inter.user.id != OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+EVENTS_PER_PAGE = 6
+
+
+def _mention_names(guild, mention_str):
+    """'<@&123> <@456>' -> '@RoleName @Member' (readable text for the image card)."""
+    out = []
+    for kind, _id in re.findall(r"<@(&?)(\d+)>", mention_str or ""):
+        _id = int(_id)
+        if kind == "&":
+            r = guild.get_role(_id) if guild else None
+            out.append(f"@{r.name}" if r else "@role")
+        else:
+            m = guild.get_member(_id) if guild else None
+            out.append(f"@{m.display_name}" if m else "@member")
+    return " ".join(out)
+
+
+def _build_event_card_data(guild):
+    """All upcoming events as card dicts, soonest first. Repeating events are spotted by the same name
+    recurring at an even interval."""
     now = datetime.utcnow()
     tags = db_get_event_tags()
     chans = db_get_event_channels()
     default_ch = get_setting("events_channel")
-    lines = []
+    items = []
     for eid, name, dt_str, reminder in db_get_events():
         try:
             dt = datetime.fromisoformat(dt_str)
@@ -10548,22 +10564,92 @@ async def events_cmd(inter: discord.Interaction):
             continue
         if dt < now:
             continue
-        where = f"<#{chans.get(eid, default_ch)}>"
-        ping = tags.get(eid, "default role")
-        rem = f"{reminder}m before" if reminder else "no reminder"
-        lines.append(f"**{name}** — <t:{_unix_utc(dt)}:f> (<t:{_unix_utc(dt)}:R>)\n└ {rem} · {where} · {ping}")
-    if not lines:
-        return await inter.response.send_message("No upcoming events scheduled.")
-    shown, total, text = 0, len(lines), ""
-    for ln in lines:
-        if len(text) + len(ln) + 2 > 3800:
-            break
-        text += ln + "\n"
-        shown += 1
-    embed = discord.Embed(title="📅 Upcoming events", description=text, color=0x5865F2)
-    if shown < total:
-        embed.set_footer(text=f"Showing the next {shown} of {total}")
-    await inter.response.send_message(embed=embed)
+        ch = guild.get_channel(int(chans.get(eid, default_ch))) if guild and (chans.get(eid) or default_ch) else None
+        items.append({"name": name, "dt": dt, "lead": reminder or None,
+                      "channel": ch.name if ch else None,
+                      "ping": _mention_names(guild, tags.get(eid)) or "default role"})
+    by_name = {}
+    for it in items:
+        by_name.setdefault(it["name"], []).append(it)
+    for lst in by_name.values():
+        if len(lst) >= 2:
+            gaps = {round((b["dt"] - a["dt"]).total_seconds() / 60) for a, b in zip(lst, lst[1:])}
+            if len(gaps) == 1:
+                mins = gaps.pop()
+                label = "daily" if mins == 1440 else f"every {mins // 60}h" if mins % 60 == 0 else f"every {mins}m"
+                for it in lst:
+                    it["repeat"] = label
+    return now, items
+
+
+class EventsPager(discord.ui.View):
+    def __init__(self, owner_id, now, items):
+        super().__init__(timeout=300)
+        self.owner_id, self.now, self.items = owner_id, now, items
+        self.page = 0
+        self.pages = max(1, -(-len(items) // EVENTS_PER_PAGE))
+        self._sync()
+
+    def _sync(self):
+        self.prev.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.pages - 1
+        self.counter.label = f"{self.page + 1} / {self.pages}"
+
+    async def render(self):
+        chunk = self.items[self.page * EVENTS_PER_PAGE:(self.page + 1) * EVENTS_PER_PAGE]
+        png = await asyncio.to_thread(card_render.render_events_card, {
+            "now": self.now, "events": chunk, "tz_label": "Times in UTC (game time)",
+            "total": len(self.items), "page": self.page + 1, "pages": self.pages, "hero": self.page == 0})
+        return discord.File(png, filename=f"events_{self.page + 1}.png")
+
+    async def _go(self, inter, delta):
+        self.page = max(0, min(self.pages - 1, self.page + delta))
+        self._sync()
+        await inter.response.defer()
+        await inter.edit_original_response(attachments=[await self.render()], view=self)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev(self, inter: discord.Interaction, button: discord.ui.Button):
+        await self._go(inter, -1)
+
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def counter(self, inter: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, inter: discord.Interaction, button: discord.ui.Button):
+        await self._go(inter, 1)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
+    async def close(self, inter: discord.Interaction, button: discord.ui.Button):
+        if inter.user.id != self.owner_id:
+            return await inter.response.send_message("Only the person who opened this can close it.", ephemeral=True)
+        await inter.response.edit_message(view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        # buttons just stop working; the image stays
+        pass
+
+
+@bot.tree.command(name="events", description="Owner: list upcoming events with their reminder channel and who gets pinged")
+async def events_cmd(inter: discord.Interaction):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
+    await inter.response.defer()
+    now, items = _build_event_card_data(inter.guild)
+    if not items:
+        return await inter.followup.send("No upcoming events scheduled.")
+    view = EventsPager(inter.user.id, now, items)
+    try:
+        file = await view.render()
+        await inter.followup.send(file=file, view=view if view.pages > 1 else discord.utils.MISSING)
+    except Exception as e:
+        log_info(f"[EVENTS] image failed, using text: {type(e).__name__}: {e}")
+        text = "\n".join(f"**{it['name']}** — <t:{_unix_utc(it['dt'])}:f> (<t:{_unix_utc(it['dt'])}:R>)\n└ "
+                         f"{str(it['lead']) + 'm before' if it['lead'] else 'no reminder'} · #{it['channel']} · {it['ping']}"
+                         for it in items[:12])
+        await inter.followup.send(text[:1990])
 
 
 @bot.tree.command(name="eventchannel", description="Owner: move the reminders of many events to a channel at once")

@@ -553,6 +553,11 @@ def render_events_card(d):
     w = c.text_w(cnt, "b", 13) + 28
     c.rect(W - PAD - 28 - w, y + 34, w, 28, PANEL2, r=14)
     c.text(W - PAD - 28 - w / 2, y + 48, cnt, "b", 13, BLUE, anchor="mm")
+    if d.get("pages", 1) > 1:
+        pg = f"Page {d.get('page', 1)}/{d['pages']}"
+        pw = c.text_w(pg, "b", 13) + 28
+        c.rect(W - PAD - 28 - w - 10 - pw, y + 34, pw, 28, PANEL2, r=14)
+        c.text(W - PAD - 28 - w - 10 - pw / 2, y + 48, pg, "b", 13, TEXT, anchor="mm")
     y += 96 + 16
 
     if not evs:
@@ -560,28 +565,31 @@ def render_events_card(d):
         c.text(W / 2, y + 45, "Nothing scheduled", "s", 18, MUTED, anchor="mm")
         y += 106
     else:
-        # hero: next event
-        e = evs[0]
-        secs = (e["dt"] - now).total_seconds()
-        soon = secs < 3600
-        accent = ORANGE if soon else GREEN
-        hh = 132
-        c.rect(PAD, y, W - 2 * PAD, hh, PANEL)
-        c.rect(PAD, y, 6, hh, accent, r=3)
-        c.text(PAD + 30, y + 20, "NEXT UP", "s", 13, MUTED)
-        nm = _fit(c, e["name"], "b", 32, 560)
-        c.text(PAD + 30, y + 44, nm[0], "b", nm[1], TEXT)
-        c.text(W - PAD - 30, y + 24, _human_delta(secs), "b", 44, accent, anchor="ra")
-        c.text(W - PAD - 30, y + 80, "until it starts", "r", 14, MUTED, anchor="ra")
-        c.text(PAD + 30, y + 92, f"{e['dt'].strftime('%a %d %b · %H:%M')}", "s", 16, MUTED)
-        cx = PAD + 30 + c.text_w(f"{e['dt'].strftime('%a %d %b · %H:%M')}", "s", 16) + 20
-        for chip in _event_chips(e):
-            cx += _chip(c, cx, y + 88, *chip) if False else _chip(c, cx, y + 88, chip[0], chip[1])
-        y += hh + 16
+        rest = evs
+        if d.get("hero", True):
+            # hero: next event
+            e = evs[0]
+            rest = evs[1:]
+            secs = (e["dt"] - now).total_seconds()
+            soon = secs < 3600
+            accent = ORANGE if soon else GREEN
+            hh = 132
+            c.rect(PAD, y, W - 2 * PAD, hh, PANEL)
+            c.rect(PAD, y, 6, hh, accent, r=3)
+            c.text(PAD + 30, y + 20, "NEXT UP", "s", 13, MUTED)
+            nm = _fit(c, e["name"], "b", 32, 560)
+            c.text(PAD + 30, y + 44, nm[0], "b", nm[1], TEXT)
+            c.text(W - PAD - 30, y + 24, _human_delta(secs), "b", 44, accent, anchor="ra")
+            c.text(W - PAD - 30, y + 80, "until it starts", "r", 14, MUTED, anchor="ra")
+            c.text(PAD + 30, y + 92, f"{e['dt'].strftime('%a %d %b · %H:%M')}", "s", 16, MUTED)
+            cx = PAD + 30 + c.text_w(f"{e['dt'].strftime('%a %d %b · %H:%M')}", "s", 16) + 20
+            for chip in _event_chips(e):
+                cx += _chip(c, cx, y + 88, chip[0], chip[1])
+            y += hh + 16
 
         # grouped by day
         groups = {}
-        for e in evs[1:]:
+        for e in rest:
             groups.setdefault(e["dt"].date(), []).append(e)
         for day, items in groups.items():
             delta_days = (day - now.date()).days
@@ -605,7 +613,7 @@ def render_events_card(d):
                 ry += rh
             y += ph + 14
 
-    more = d.get("total", len(evs)) - len(evs)
+    more = d.get("total", len(evs)) - len(evs) if d.get("pages", 1) <= 1 else 0
     if more > 0:
         c.text(PAD + 6, y + 4, f"+ {more} more not shown", "r", 13, MUTED)
         y += 24
