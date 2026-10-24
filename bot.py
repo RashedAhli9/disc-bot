@@ -1698,6 +1698,29 @@ def _fmt_m(n):
     return f"{n / 1e6:.2f}M" if abs(n) >= 1e6 else f"{n:,.0f}"
 
 
+def embed_card_dict(embed):
+    col = None
+    if embed.color is not None and getattr(embed.color, "value", 0):
+        col = (embed.color.r, embed.color.g, embed.color.b)
+    return {
+        "title": embed.title, "description": embed.description, "color": col,
+        "fields": [{"name": f.name, "value": f.value, "inline": f.inline} for f in embed.fields],
+        "footer": embed.footer.text if embed.footer else None,
+    }
+
+
+async def send_embed_card(send, embed, **kw):
+    """Send an embed as an image card (visible to everyone no matter their embed settings). `send` is any
+    send function (ctx.send, inter.response.send_message, inter.followup.send...). Falls back to plain text."""
+    try:
+        pages = await asyncio.to_thread(card_render.render_embed_pages, embed_card_dict(embed))
+        files = [discord.File(p, filename=f"card_{i + 1}.png") for i, p in enumerate(pages)]
+    except Exception as e:
+        log_info(f"[CARD] embed->image failed, using text: {type(e).__name__}: {e}")
+        return await send(content=embed_to_text(embed), **kw)
+    return await send(files=files, **kw)
+
+
 def embed_to_text(embed):
     """Plain-text version of an embed (used as a fallback; embeds can be hidden by user settings)."""
     parts = []
@@ -3774,13 +3797,8 @@ async def check_callofstats_update():
                 if guild:
                     update_channel = guild.get_channel(get_setting("backup_channel"))
                     if update_channel:
-                        embed = discord.Embed(
-                            title="🔄 Call of Stats Update",
-                            description=f"<@{OWNER_ID}> New data for **{latest_date}** cached and ready!",
-                            color=0x00FF00
-                        )
-                        embed.set_footer(text="Cache refreshed ✅")
-                        await update_channel.send(embed=embed)
+                        await update_channel.send(f"🔄 **Call of Stats update** — new data for **{latest_date}** cached and ready! ✅",
+                                                  allowed_mentions=discord.AllowedMentions.none())
                         
                         # Also mark as notified
                         db_mark_update_notified()
@@ -4161,7 +4179,7 @@ def build_help_embed(is_owner: bool):
 @bot.tree.command(name="help", description="Show all available commands")
 async def help_cmd(inter):
     embed = build_help_embed(inter.user.id == OWNER_ID)
-    await inter.response.send_message(embed=embed, ephemeral=True)
+    await send_embed_card(inter.response.send_message, embed, ephemeral=True)
 
 
 # Autocomplete for dates
@@ -5841,7 +5859,7 @@ class GainsDateSelector(discord.ui.View):
         embed.add_field(name="🪵 Wood Spent", value=f"```{wood_spent:,}```", inline=True)
         embed.add_field(name="⛏️ Ore Spent", value=f"```{ore_spent:,}```", inline=True)
         
-        await interaction.followup.send(embed=embed)
+        await send_embed_card(interaction.followup.send, embed)
 
 
 @bot.command(name="gains")
@@ -5916,7 +5934,7 @@ async def gains(ctx, param1: str = None, param2: str = None):
         embed.add_field(name="ℹ️", value="Both dropdowns must be selected before clicking **Show Gains**", inline=False)
         
         view = GainsDateSelector(dates, account_id, season_id, start_date, ctx, all_seasons=db_get_all_seasons())
-        await ctx.send(embed=embed, view=view)
+        await send_embed_card(ctx.send, embed, view=view)
         
     except Exception as e:
         log_error(f"[GAINS] Error: {e}")
@@ -6071,7 +6089,7 @@ async def topmana(ctx, season_name: str = None):
                        accent=LB_ACCENTS["mana"], group=True)
 
 
-@bot.command(name="topdeaths")
+@bot.command(name="topdeaths", aliases=["topdeads", "topdead"])
 async def topdeaths(ctx, season_name: str = None):
     """Leaderboard for most deaths. Usage: !topdeaths (current) or !topdeaths sos1 (specific season)"""
     
@@ -6773,7 +6791,7 @@ async def cosbench(ctx, refresh: str = ""):
         embed.add_field(name=COS_BENCH_KINDS[kind]["label"], value=f"{scale}\n**Us:**\n{who}", inline=False)
     any_b = next(iter(bench.values()))
     embed.set_footer(text=f"Top 100 only (~top 2% of those servers) · {any_b['start']} → {any_b['end']} · source: callofstats.com")
-    await ctx.send(embed=embed)
+    await send_embed_card(ctx.send, embed)
 
 
 _SERVER_RANK_STATS = [
@@ -9952,8 +9970,34 @@ async def compare(ctx, user1: str = None, user2: str = None):
         output += f"  Mana: {name1} {mg1_g} | {name2} {mg2_g}\n"
         
         output += f"```"
-        
-        await msg.edit(content=output)
+
+        # Image card (visible to everyone); the text above is the fallback.
+        try:
+            n = _parse_stat_str
+            rss_sp1, rss_sp2 = gs1_val + ws1_val + os1_val + ms1_val, gs2_val + ws2_val + os2_val + ms2_val
+            rss_g1 = sum(n(stats1.get(k)) for k in ("gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"))
+            rss_g2 = sum(n(stats2.get(k)) for k in ("gold_gathered", "wood_gathered", "ore_gathered", "mana_gathered"))
+            cmp_rows = [
+                ("Highest power", power1 or 0, power2 or 0),
+                ("Merits", n(m1), n(m2)),
+                ("Kills (season)", n(k1), n(k2)),
+                ("Deads", n(d1), n(d2)),
+                ("Healed", n(h1), n(h2)),
+                ("T5 kills", t5_1, t5_2),
+                ("T4 kills", t4_1, t4_2),
+                ("Mana gathered", n(mg1), n(mg2)),
+                ("Resources spent", rss_sp1, rss_sp2),
+                ("Resources gathered", rss_g1, rss_g2),
+            ]
+            png = await asyncio.to_thread(card_render.render_compare_card, {
+                "a": {"name": name1, "tag": stats1.get("alliance_tag") or ""},
+                "b": {"name": name2, "tag": stats2.get("alliance_tag") or ""},
+                "subtitle": f"{season_name}  ·  {start_date} → {today}", "rows": cmp_rows})
+            await msg.delete()
+            await ctx.send(file=discord.File(png, filename="compare.png"))
+        except Exception as e:
+            log_info(f"[COMPARE] image failed, using text: {type(e).__name__}: {e}")
+            await msg.edit(content=output)
     except Exception as e:
         log_info(f"[COMPARE ERROR] {e}")
         import traceback
@@ -10269,7 +10313,7 @@ async def active_members(ctx):
             inactive_list = "\n".join([f"• {m['name']}" for m in inactive])
             embed.add_field(name=f"⏸️ Inactive ({len(inactive)})", value=inactive_list, inline=False)
         
-        await ctx.send(embed=embed)
+        await send_embed_card(ctx.send, embed)
     except Exception as e:
         log_error(f"Active members error: {e}")
         await ctx.send("❌ Error checking activity.")
@@ -10385,7 +10429,7 @@ async def status_cmd(inter: discord.Interaction):
                    f"blank-answer retries: {_ASK_STATS['nudged']}"),
             inline=False,
         )
-    await inter.response.send_message(embed=embed)
+    await send_embed_card(inter.response.send_message, embed)
 
 
 # ============================================================
@@ -12672,7 +12716,7 @@ async def _process_serverupdate_attachment(ctx, attachment):
     log_info(f"[SERVERUPDATE] S#{server_num}: {len(rows)} lords loaded from {attachment.filename}")
 
 
-@bot.command(name="stopdeaths")
+@bot.command(name="stopdeaths", aliases=["stopdeads", "stopdead"])
 async def stopdeaths(ctx, *, arg: str = None):
     """Top deaths on server, or one player's deaths + rank. Usage: !stopdeaths [top|player]"""
     top, player, group_only = _parse_stop_args(arg)

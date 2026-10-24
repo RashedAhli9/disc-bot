@@ -634,3 +634,173 @@ def _event_chips(e):
     if e.get("ping"):
         chips.append((e["ping"], YELLOW))
     return chips
+
+
+# ============================================================
+# GENERIC EMBED -> IMAGE (used to convert the bot's info embeds in one place)
+# ============================================================
+import re as _re
+from datetime import datetime as _dt, timezone as _tz
+
+_MAX_PAGE_H = 1900
+
+
+def _md_clean(text):
+    """Discord markdown -> plain text suitable for drawing."""
+    t = str(text or "")
+
+    def _ts(m):
+        try:
+            d = _dt.fromtimestamp(int(m.group(1)), _tz.utc)
+        except Exception:
+            return ""
+        style = m.group(2) or "f"
+        if style in ("t", "T"):
+            return d.strftime("%H:%M UTC")
+        if style in ("d", "D"):
+            return d.strftime("%d %b %Y")
+        return d.strftime("%a %d %b %Y, %H:%M UTC")
+    t = _re.sub(r"<t:(\d+)(?::([a-zA-Z]))?>", _ts, t)
+    t = _re.sub(r"<a?:\w+:\d+>", "", t)                  # custom emoji
+    t = _re.sub(r"<@&\d+>", "@role", t)
+    t = _re.sub(r"<@!?\d+>", "@user", t)
+    t = _re.sub(r"<#\d+>", "#channel", t)
+    t = t.replace("```", "")
+    t = _re.sub(r"\*\*(.+?)\*\*", r"\1", t, flags=_re.S)
+    t = _re.sub(r"__(.+?)__", r"\1", t, flags=_re.S)
+    t = _re.sub(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)", r"\1", t)
+    t = _re.sub(r"(?<![\w*])\*(?!\*)(.+?)(?<!\*)\*(?![\w*])", r"\1", t)
+    t = t.replace("`", "").replace("~~", "")
+    t = _re.sub(r"[ \t]+\n", "\n", t)
+    return t.strip()
+
+
+def _wrap(c, text, weight, size, max_w):
+    lines = []
+    for para in text.split("\n"):
+        if not para.strip():
+            lines.append("")
+            continue
+        cur = ""
+        for word in para.split(" "):
+            test = (cur + " " + word).strip() if cur else word
+            if c.text_w(test, weight, size) <= max_w or not cur:
+                cur = test
+            else:
+                lines.append(cur)
+                cur = word
+        lines.append(cur)
+    return lines
+
+
+def render_embed_pages(d):
+    """d: title, description, fields[{name, value, inline}], footer, color (rgb tuple or None).
+    Returns a list of BytesIO PNG pages (usually one)."""
+    probe = _Canvas(10)
+    accent = d.get("color") or BLUE
+    inner = W - 2 * PAD
+    LH = 21  # line height at 15px
+
+    blocks = []   # (height, draw_fn)
+
+    # ---- header
+    title = _md_clean(d.get("title") or "")
+    desc = _md_clean(d.get("description") or "")
+    dlines = _wrap(probe, desc, "r", 15, inner - 56) if desc else []
+    head_h = 28 + 40 + (len(dlines) * LH + 12 if dlines else 0) + 24
+
+    def draw_header(c, y, cont=False):
+        c.rect(PAD, y, inner, head_h, PANEL)
+        c.rect(PAD, y + 20, 5, head_h - 40, accent, r=3)
+        size = 30
+        t = title + ("  (cont.)" if cont else "")
+        while c.text_w(t, "b", size) > inner - 60 and size > 18:
+            size -= 2
+        c.text(PAD + 28, y + 22, t, "b", size, TEXT)
+        if dlines and not cont:
+            ty = y + 66
+            for ln in dlines:
+                c.text(PAD + 28, ty, ln, "r", 15, MUTED)
+                ty += LH
+        return head_h
+
+    # ---- fields: group consecutive inline ones (max 3 per row)
+    rows = []
+    cur = []
+    for f in d.get("fields") or []:
+        if f.get("inline"):
+            cur.append(f)
+            if len(cur) == 3:
+                rows.append(cur)
+                cur = []
+        else:
+            if cur:
+                rows.append(cur)
+                cur = []
+            rows.append([f])
+    if cur:
+        rows.append(cur)
+
+    for row in rows:
+        n = len(row)
+        colw = (inner - 16 * (n - 1)) // n
+        laid = []
+        max_h = 0
+        for f in row:
+            name = _md_clean(f.get("name") or "").replace("​", "").strip()
+            val_lines = _wrap(probe, _md_clean(f.get("value") or ""), "r", 15, colw - 44)
+            h = 18 + (24 if name else 0) + len(val_lines) * LH + 14
+            laid.append((name, val_lines, h))
+            max_h = max(max_h, h)
+
+        def draw_row(c, y, laid=laid, colw=colw, max_h=max_h):
+            for i, (name, vl, h) in enumerate(laid):
+                x = PAD + i * (colw + 16)
+                c.rect(x, y, colw, max_h, PANEL)
+                ty = y + 16
+                if name:
+                    nm = _fit(c, name.upper(), "s", 12, colw - 44)
+                    c.text(x + 22, ty, nm[0], "s", nm[1], accent)
+                    ty += 24
+                for ln in vl:
+                    c.text(x + 22, ty, ln, "r", 15, TEXT)
+                    ty += LH
+            return max_h
+        blocks.append((max_h, draw_row))
+
+    footer = _md_clean(d.get("footer") or "")
+    flines = _wrap(probe, footer, "r", 13, inner - 8) if footer else []
+
+    # ---- paginate
+    pages, cur_blocks, cur_h = [], [], head_h + 16
+    for h, fn in blocks:
+        if cur_blocks and cur_h + h + 16 > _MAX_PAGE_H:
+            pages.append(cur_blocks)
+            cur_blocks, cur_h = [], 76 + 16
+        cur_blocks.append((h, fn))
+        cur_h += h + 16
+    pages.append(cur_blocks)
+
+    out = []
+    for pi, pb in enumerate(pages):
+        total_h = (head_h if pi == 0 else 76) + 16 + sum(h + 16 for h, _ in pb) + (len(flines) * 19 + 16 if pi == len(pages) - 1 else 0) + PAD
+        c = _Canvas(total_h + 40)
+        y = PAD
+        if pi == 0:
+            y += draw_header(c, y) + 16
+        else:
+            c.rect(PAD, y, inner, 60, PANEL)
+            c.rect(PAD, y + 14, 5, 32, accent, r=3)
+            c.text(PAD + 28, y + 30, f"{title}  ·  page {pi + 1}/{len(pages)}", "b", 20, TEXT, anchor="lm")
+            y += 60 + 16
+        for h, fn in pb:
+            y += fn(c, y) + 16
+        if pi == len(pages) - 1:
+            for ln in flines:
+                c.text(PAD + 4, y, ln, "r", 13, MUTED)
+                y += 19
+        buf = io.BytesIO()
+        c.finish(y + PAD // 2).save(buf, "PNG", optimize=True)
+        buf.seek(0)
+        out.append(buf)
+    return out
