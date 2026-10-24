@@ -1721,6 +1721,61 @@ async def send_embed_card(send, embed, **kw):
     return await send(files=files, **kw)
 
 
+def db_get_series(season_id, account_id, field, n=10):
+    """Last n daily values (oldest first) of a season_progress column, signs kept. For trend lines."""
+    if field not in ("merits", "deads_gain", "kills_gain", "healed_gain", "power_gain"):
+        return []
+    try:
+        conn = db_connect(DB_PROGRESS)
+        rows = conn.execute(
+            f"SELECT data_date, {field} FROM season_progress WHERE season_id = ? AND account_id = ? "
+            f"ORDER BY data_date DESC LIMIT ?", (season_id, str(account_id), n)).fetchall()
+        conn.close()
+    except Exception as e:
+        log_info(f"[SERIES] {e}")
+        return []
+    out = []
+    for _d, raw in reversed(rows):
+        try:
+            out.append(int(str(raw).replace("+", "").replace(",", "").strip()))
+        except Exception:
+            pass
+    return out
+
+
+GRADE_STEPS = [(90, "S"), (75, "A"), (60, "B"), (45, "C"), (30, "D"), (0, "F")]
+
+
+async def member_grade(merits, deaths, highest_power, deads_prog):
+    """Letter grade S..F from up to three 0-100 scores (equal weight, only the ones we can compute):
+    deads pace vs the season requirement, and merits/deads as % of power vs the #25 lord of the benchmark
+    (the 7 strongest servers' top 100). Returns {letter, score, parts, text} or None."""
+    parts = {}
+    try:
+        if deads_prog and deads_prog.get("pace") is not None:
+            parts["deads pace"] = max(0.0, min(100.0, float(deads_prog["pace"])))
+        bench = await cos_bench_refresh() if highest_power else None
+        if bench and highest_power and highest_power > 0:
+            for kind, val, label in (("deads", deaths, "deads ratio"), ("merits", merits, "merits ratio")):
+                if kind not in bench:
+                    continue
+                vals = sorted((r["val"] for r in bench[kind]["rows"]), reverse=True)
+                if not vals:
+                    continue
+                cut = vals[min(len(vals), 25) - 1]
+                if cut > 0:
+                    parts[label] = max(0.0, min(100.0, (max(val, 0) / highest_power * 100) / cut * 100))
+    except Exception as e:
+        log_info(f"[GRADE] {type(e).__name__}: {e}")
+    if not parts:
+        return None
+    score = sum(parts.values()) / len(parts)
+    letter = next(l for floor, l in GRADE_STEPS if score >= floor)
+    text = " · ".join(f"{k} {v:.0f}" for k, v in parts.items())
+    return {"letter": letter, "score": score, "parts": parts,
+            "text": f"Grade {letter} ({score:.0f}/100): {text}. Ratios are scored against the #25 lord of the 7 strongest servers."}
+
+
 def embed_to_text(embed):
     """Plain-text version of an embed (used as a fallback; embeds can be hidden by user settings)."""
     parts = []
@@ -1764,7 +1819,7 @@ def deads_progress(deaths, highest_power, start_date, end_date, season_id):
         pace = deaths / (required * days / season_days) * 100 if required else 0
         done = deaths >= required
         level = "good" if (done or pace >= 100) else ("mid" if pace >= 50 else "bad")
-        return {"deaths": deaths, "required": required, "level": level, "done": done}
+        return {"deaths": deaths, "required": required, "level": level, "done": done, "pace": pace}
     except Exception as e:
         log_info(f"[DEADS PROGRESS] couldn't compute: {e}")
         return None
@@ -5190,6 +5245,10 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
 
         try:
             _pw_now, _pw_now_date = db_get_member_current_power(account_id)
+            _dprog = (deads_progress(_parse_stat_num(stats.get("deads_gain")), highest_power,
+                                     start_date, end_date_used, season_id) if stats.get("deads_gain") else None)
+            _dead_for_grade = _adv_total("t45_dead") or _parse_stat_num(stats.get("deads_gain"))
+            _grade = await member_grade(_parse_stat_num(stats.get("merits")), _dead_for_grade, highest_power, _dprog)
             card = {
                 "tag": alliance_tag, "name": lord_name, "season": season_name,
                 "start": start_date, "end": end_date_used, "account_id": account_id,
@@ -5200,9 +5259,10 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 "kills": stats.get("kills_gain"), "kills_rank": _rk(kills_rank),
                 "deads": stats.get("deads_gain"), "deads_rank": _rk(deads_rank),
                 "healed": t45_healed_val, "healed_rank": _rk(healed_rank),
-                "deads_req": (deads_progress(_parse_stat_num(stats.get("deads_gain")), highest_power,
-                                             start_date, end_date_used, season_id)
-                              if stats.get("deads_gain") else None),
+                "deads_req": _dprog,
+                "grade": _grade,
+                "merits_spark": db_get_series(season_id, account_id, "merits"),
+                "deads_spark": db_get_series(season_id, account_id, "deads_gain"),
                 "troops": [("Infantry", infantry_total, _rk(infantry_rank)),
                            ("Cavalry", cavalry_total, _rk(cavalry_rank)),
                            ("Archer", marksman_total, _rk(marksman_rank)),
@@ -5219,6 +5279,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 "pets": f"{max_pets:,}" if max_pets is not None else None,
                 "decos": str(max_decorations) if max_decorations is not None else None,
                 "notes": [n for n in (
+                    _grade["text"] if _grade else None,
                     (f"Merit breakdown as of {adv_yesterday}" if (troop_lines or other_lines) and is_current_season and not adv_is_up_to_date
                      else f"Merit breakdown final as of {adv_yesterday}" if (troop_lines or other_lines) and not is_current_season
                      else None),

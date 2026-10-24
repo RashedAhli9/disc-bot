@@ -210,5 +210,26 @@ class RankArrows(unittest.TestCase):
             c.close()
 
 
+class Grades(unittest.TestCase):
+    def test_grade_from_pace_and_benchmark(self):
+        import asyncio
+        rows = [{"val": v} for v in range(30, 0, -1)]          # 30 lords, #25 cutoff = 6 (% of power)
+        async def fake_bench(force=False):
+            return {"deads": {"rows": rows}, "merits": {"rows": rows}}
+        old = bot.cos_bench_refresh
+        bot.cos_bench_refresh = fake_bench
+        try:
+            hp = 100_000_000
+            top = asyncio.run(bot.member_grade(10_000_000, 10_000_000, hp, {"pace": 120}))   # 10% >= cutoff, pace capped 100
+            self.assertEqual(top["letter"], "S")
+            zero = asyncio.run(bot.member_grade(0, 0, hp, {"pace": 0}))
+            self.assertEqual(zero["letter"], "F")
+            neg = asyncio.run(bot.member_grade(-5, -5, hp, {"pace": 0}))      # negative numbers must not crash or score up
+            self.assertEqual(neg["letter"], "F")
+            self.assertIsNone(asyncio.run(bot.member_grade(1, 1, None, None)))
+        finally:
+            bot.cos_bench_refresh = old
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

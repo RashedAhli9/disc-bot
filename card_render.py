@@ -32,6 +32,8 @@ PURPLE = (181, 131, 255)
 ORANGE = (255, 150, 70)
 TEAL = (64, 214, 214)
 
+GRADE_COLORS = {"S": YELLOW, "A": GREEN, "B": TEAL, "C": BLUE, "D": ORANGE, "F": RED}
+
 _font_cache = {}
 _icon_cache = {}
 
@@ -171,8 +173,31 @@ class _Canvas:
         self.text(tx, y + 14, label, "b", 15, TEXT if not ic else YELLOW if rank == 1 else TEXT, anchor="lm")
         return w
 
-    def tile(self, x, y, w, h, label, value, accent, sub=None, rank=None, value_size=34, sub2=None, sub2_color=MUTED):
+    def spark(self, x, y, w, h, values, color, fill_base=PANEL):
+        """Tiny trend line with a soft area underneath and a dot on the latest value. Needs 2+ values."""
+        vals = [v for v in (values or []) if v is not None]
+        if len(vals) < 2:
+            return
+        lo, hi = min(vals), max(vals)
+        span = (hi - lo) or 1
+        pts = []
+        for i, v in enumerate(vals):
+            px = x + w * i / (len(vals) - 1)
+            py = y + h - (h * (v - lo) / span if hi != lo else h / 2)
+            pts.append((px * S, py * S))
+        poly = pts + [((x + w) * S, (y + h) * S), (x * S, (y + h) * S)]
+        soft = tuple(int(fill_base[i] * 0.78 + color[i] * 0.22) for i in range(3))
+        self.d.polygon(poly, fill=soft)
+        self.d.line(pts, fill=color, width=int(2.4 * S), joint="curve")
+        ex, ey = pts[-1]
+        r = 4 * S
+        self.d.ellipse([ex - r, ey - r, ex + r, ey + r], fill=color)
+
+    def tile(self, x, y, w, h, label, value, accent, sub=None, rank=None, value_size=34, sub2=None, sub2_color=MUTED,
+             spark=None):
         self.rect(x, y, w, h, PANEL)
+        if spark:
+            self.spark(x + w - 200, y + h - 50, 170, 32, spark, accent)
         self.rect(x, y + 16, 5, h - 32, accent, r=3)
         self.text(x + 24, y + 18, label.upper(), "s", 13, MUTED)
         self.text(x + 24, y + 40, value, "b", value_size, TEXT)
@@ -186,6 +211,21 @@ class _Canvas:
     def finish(self, height):
         im = self.im.crop((0, 0, W * S, height * S))
         return im.resize((W, height), Image.LANCZOS)
+
+
+def _wrap(c, text, weight, size, max_w):
+    """Greedy word wrap using the card's own text measuring."""
+    lines, cur = [], ""
+    for word in str(text).split():
+        trial = f"{cur} {word}".strip()
+        if cur and c.text_w(trial, weight, size) > max_w:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return lines or [""]
 
 
 def _fmt(n):
@@ -213,10 +253,19 @@ def render_progress_card(d):
     c.rect(PAD, y, W - 2 * PAD, 96, PANEL)
     title = f"{d.get('tag') or ''} {d.get('name') or 'Unknown'}".strip()
     size = 32
-    while c.text_w(title, "b", size) > W - 2 * PAD - 300 and size > 20:
+    while c.text_w(title, "b", size) > W - 2 * PAD - (400 if d.get("grade") else 300) and size > 20:
         size -= 2
     c.text(PAD + 28, y + 24, title, "b", size, TEXT)
     c.text(PAD + 28, y + 66, f"Season {d.get('season')}   ·   {d.get('start')} → {d.get('end')}", "r", 15, MUTED)
+    if d.get("grade"):
+        g = d["grade"]
+        gcol = GRADE_COLORS.get(g["letter"], MUTED)
+        cx_, cy_ = W - PAD - 28 - 150 - 44, y + 48
+        r_ = 34
+        c.d.ellipse([(cx_ - r_) * S, (cy_ - r_) * S, (cx_ + r_) * S, (cy_ + r_) * S],
+                    fill=tuple(int(PANEL[i] * 0.75 + gcol[i] * 0.25) for i in range(3)), outline=gcol, width=3 * S)
+        c.text(cx_, cy_ - 2, g["letter"], "b", 40, gcol, anchor="mm")
+        c.text(cx_, cy_ + 46, f"{g['score']:.0f}/100", "s", 12, MUTED, anchor="mm")
     c.text(W - PAD - 28, y + 28, "PROGRESS REPORT", "s", 13, MUTED, anchor="ra")
     if d.get("account_id"):
         c.text(W - PAD - 28, y + 52, f"ID {d['account_id']}", "s", 16, BLUE, anchor="ra")
@@ -248,7 +297,8 @@ def render_progress_card(d):
         c.tile(PAD, y, half, th, "Power", pv, GREEN, sub, d.get("power_rank"), sub2=sub2, sub2_color=sub2c)
     if d.get("merits"):
         sub = f"{d['merits_pct']} of power" if d.get("merits_pct") else None
-        c.tile(PAD + half + 16, y, half, th, "Merits", d["merits"].lstrip("+"), RED, sub, d.get("merits_rank"))
+        c.tile(PAD + half + 16, y, half, th, "Merits", d["merits"].lstrip("+"), RED, sub, d.get("merits_rank"),
+               spark=d.get("merits_spark"))
     y += th + 16
 
     # ---------- combat row ----------
@@ -280,6 +330,9 @@ def render_progress_card(d):
         c.text(PAD + 28, y + 42, f"{_m(dr['deaths'])} / {_m(dr['required'])}", "b", 26, TEXT)
         pct = dr["deaths"] / dr["required"] if dr["required"] else 0
         c.bar(PAD + 28, y + 84, W - 2 * PAD - 56, 14, pct, col)
+        if d.get("deads_spark"):
+            c.spark(PAD + 330, y + 30, 300, 38, d["deads_spark"], col)
+            c.text(PAD + 330, y + 18, "LAST DAYS", "s", 11, MUTED)
         y += ph + 16
 
     # ---------- troop merits ----------
@@ -345,8 +398,10 @@ def render_progress_card(d):
     # ---------- footer ----------
     notes = d.get("notes") or []
     for n in notes:
-        c.text(PAD + 4, y + 4, n, "r", 13, MUTED)
-        y += 22
+        for line in _wrap(c, n, "r", 13, W - 2 * PAD - 8):
+            c.text(PAD + 4, y + 4, line, "r", 13, MUTED)
+            y += 20
+        y += 4
     y += 12
 
     out = io.BytesIO()
