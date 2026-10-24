@@ -6067,6 +6067,199 @@ def _ask_resolve_account_id(ctx, player_input):
     return None, f"'{player_input}' doesn't have a numeric account ID role."
 
 
+
+# ============================================================
+# CALL OF STATS BENCHMARK — how the 7 strongest KvK-matchup servers perform THIS season
+# ============================================================
+# The global leaderboard on callofstats.com only shows the top 100 lords per stat, so this gives cutoffs
+# (#1, #10, #25, #50, #100), not a full percentile. The window is always season start -> today, so every
+# member is compared at the same point of the season (no pro-rating needed). Refreshed lazily (6h cache).
+COS_BENCH_SERVERS = "221%2C249%2C283%2C357%2C375%2C509%2C701"
+COS_BENCH_KINDS = {
+    "deads": {"label": "T4/T5 units dead ÷ highest power", "ratio": ("t4_t5_units_dead", "highest_power"), "pct": True},
+    "merits": {"label": "merits ÷ highest power", "ratio": ("merits", "highest_power"), "pct": True},
+    "healed": {"label": "T4/T5 resources healed", "stat": "t4_t5_units_rss_healed", "pct": False},
+}
+COS_BENCH_MAX_AGE_HOURS = 6
+
+
+def _cos_bench_url(kind, start, end):
+    k = COS_BENCH_KINDS[kind]
+    if "ratio" in k:
+        q = f"ratio_mode=true&ratio_stat_1={k['ratio'][0]}&ratio_stat_2={k['ratio'][1]}&main_stat=__ratio__"
+    else:
+        q = f"ratio_mode=false&ratio_stat_1=&ratio_stat_2=&main_stat={k['stat']}"
+    return (f"https://callofstats.com/global_leaderboard/results?{q}&lord_id=&operator_lord_id=%3E%3D&power="
+            f"&operator_power=%3E%3D&town_hall=&operator_town_hall=%3E%3D&faction=&alliance_display=&alliance="
+            f"&kvk_pool=&server={COS_BENCH_SERVERS}&operator_server=%3E%3D&order=highest&compare=true"
+            f"&start_date={start}&end_date={end}")
+
+
+def parse_cos_leaderboard(page_html):
+    """Rows of a Call of Stats global-leaderboard results page -> [{rank, lord, name, server, alliance, val}]."""
+    import html as _html
+    rows = []
+    for tr in re.findall(r"<tr>(.*?)</tr>", page_html, re.S):
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
+        if len(tds) < 6:
+            continue
+        t = [_html.unescape(re.sub(r"<[^>]+>", "", x)).strip() for x in tds]
+        try:
+            rank = int(t[0])
+            val = float(t[5].replace("+", "").replace(",", "").replace("%", "").strip())
+        except ValueError:
+            continue
+        rows.append({"rank": rank, "lord": t[1], "name": t[2], "server": t[3], "alliance": t[4], "val": val})
+    return rows
+
+
+def _cos_bench_db():
+    conn = sqlite3.connect(DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS cos_benchmark (
+        kind TEXT PRIMARY KEY, start_date TEXT, end_date TEXT, fetched_at TEXT, rows_json TEXT)""")
+    return conn
+
+
+def cos_bench_load(kind):
+    try:
+        conn = _cos_bench_db()
+        row = conn.execute("SELECT start_date, end_date, fetched_at, rows_json FROM cos_benchmark WHERE kind=?", (kind,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"start": row[0], "end": row[1], "fetched_at": datetime.fromisoformat(row[2]), "rows": json.loads(row[3])}
+    except Exception as e:
+        log_info(f"[COS BENCH] load failed: {e}")
+        return None
+
+
+def cos_bench_save(kind, start, end, rows):
+    try:
+        conn = _cos_bench_db()
+        conn.execute("INSERT OR REPLACE INTO cos_benchmark VALUES (?,?,?,?,?)",
+                     (kind, start, end, datetime.utcnow().isoformat(), json.dumps(rows)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_info(f"[COS BENCH] save failed: {e}")
+
+
+async def cos_bench_refresh(force=False):
+    """Make sure this season's benchmark pages are cached (fetching only the stale ones). Returns {kind: bench}."""
+    out = {}
+    season = db_get_current_season()
+    if not season:
+        return out
+    start = str(season[2])[:10]
+    today = datetime.utcnow().date()
+    session = None
+    for kind in COS_BENCH_KINDS:
+        cached = cos_bench_load(kind)
+        fresh = (cached and cached["start"] == start
+                 and (datetime.utcnow() - cached["fetched_at"]) < timedelta(hours=COS_BENCH_MAX_AGE_HOURS))
+        if fresh and not force:
+            out[kind] = cached
+            continue
+        rows, used_end = [], None
+        try:
+            if session is None:
+                session = await get_callofstats_session()
+            if session:
+                for end in (today, today - timedelta(days=1)):
+                    if end.isoformat() < start:
+                        continue
+                    async with session.get(_cos_bench_url(kind, start, end.isoformat()), allow_redirects=True) as resp:
+                        page = await resp.text()
+                    rows = parse_cos_leaderboard(page)
+                    if rows:
+                        used_end = end.isoformat()
+                        break
+        except Exception as e:
+            log_info(f"[COS BENCH] fetch {kind} failed: {type(e).__name__}: {e}")
+        if rows:
+            cos_bench_save(kind, start, used_end, rows)
+            out[kind] = {"start": start, "end": used_end, "fetched_at": datetime.utcnow(), "rows": rows}
+        elif cached and cached["start"] == start:
+            out[kind] = cached  # stale beats nothing
+    return out
+
+
+def _fmt_bench(kind, v):
+    return f"{v:.2f}%" if COS_BENCH_KINDS[kind]["pct"] else _fmt_m(v)
+
+
+def cos_bench_line(kind, value, bench):
+    """One sentence placing `value` against the benchmark's top-100 cutoffs, for the AI to use."""
+    try:
+        vals = sorted((r["val"] for r in bench["rows"]), reverse=True)
+        n = len(vals)
+        if not n or value is None:
+            return None
+        label = COS_BENCH_KINDS[kind]["label"]
+        pts = {k: vals[min(n, k) - 1] for k in (1, 10, 25, 50, 100) if k <= n}
+        scale = ", ".join(f"#{k} {_fmt_bench(kind, v)}" for k, v in pts.items())
+        above = sum(1 for v in vals if v > value)
+        if above == 0:
+            where = "higher than the #1 lord in the benchmark"
+        elif above < n:
+            where = f"would sit around #{above + 1} of the benchmark's top {n}"
+        else:
+            where = (f"outside the top {n} — at {value / vals[-1] * 100:.0f}% of the #{n} cutoff "
+                     f"(that's still not weak: the top {n} is only ~2% of those servers' lords)")
+        return (f"BENCHMARK {label}: this member {_fmt_bench(kind, value)} → {where}. "
+                f"Top-100 scale across the 7 strongest servers, {bench['start']} to {bench['end']}: {scale}.")
+    except Exception as e:
+        log_info(f"[COS BENCH] line failed: {e}")
+        return None
+
+
+async def cos_bench_for_member(stats, hp):
+    """BENCHMARK lines for one member's season stats (dict from the progress DB) + highest power (int)."""
+    try:
+        bench = await cos_bench_refresh()
+        if not bench:
+            return ""
+        lines = []
+        dead = _parse_stat_num_global(stats.get("t45_dead")) or _parse_stat_num_global(stats.get("deads_gain"))
+        merits = _parse_stat_num_global(stats.get("merits"))
+        healed = _parse_stat_num_global(stats.get("t45_healed"))
+        if hp and hp > 0:
+            if "deads" in bench:
+                lines.append(cos_bench_line("deads", dead / hp * 100, bench["deads"]))
+            if "merits" in bench:
+                lines.append(cos_bench_line("merits", merits / hp * 100, bench["merits"]))
+        if "healed" in bench and healed:
+            lines.append(cos_bench_line("healed", healed, bench["healed"]))
+        lines = [l for l in lines if l]
+        return (" " + " ".join(lines)) if lines else ""
+    except Exception as e:
+        log_info(f"[COS BENCH] member lines failed: {e}")
+        return ""
+
+
+@bot.command(name="cosbench")
+async def cosbench(ctx, refresh: str = ""):
+    """Ratio leaderboard cutoffs for the 7 strongest servers this season, plus where our group sits."""
+    async with ctx.typing():
+        bench = await cos_bench_refresh(force=(refresh.lower() == "refresh" and ctx.author.id == OWNER_ID))
+    if not bench:
+        return await ctx.send("❌ Couldn't load the Call of Stats benchmark (login or page problem).")
+    try:
+        group_ids = {str(l["account_id"]) for l in get_all_lords_from_guild(ctx.guild)}
+    except Exception:
+        group_ids = set()
+    embed = discord.Embed(title="📊 Season benchmark — 7 strongest servers", color=0x5865F2)
+    for kind, b in bench.items():
+        vals = sorted((r["val"] for r in b["rows"]), reverse=True)
+        scale = " · ".join(f"#{k} **{_fmt_bench(kind, vals[min(len(vals), k) - 1])}**" for k in (1, 10, 25, 50, 100) if k <= len(vals))
+        mine = [r for r in b["rows"] if r["lord"] in group_ids or "[MFD]" in r["alliance"]]
+        who = "\n".join(f"#{r['rank']} {r['name']} — {_fmt_bench(kind, r['val'])}" for r in mine[:8]) or "nobody in the top 100 yet"
+        embed.add_field(name=COS_BENCH_KINDS[kind]["label"], value=f"{scale}\n**Us:**\n{who}", inline=False)
+    any_b = next(iter(bench.values()))
+    embed.set_footer(text=f"Top 100 only (~top 2% of those servers) · {any_b['start']} → {any_b['end']} · source: callofstats.com")
+    await ctx.send(embed=embed)
+
+
 _SERVER_RANK_STATS = [
     ("deaths", "Deaths"), ("t5_deaths", "T5 deaths"), ("total_merits", "Merits"),
     ("enemy_merits", "Enemy merits"), ("healing", "Healing"), ("current_power", "Current power"),
@@ -6916,6 +7109,8 @@ async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
         if _hpv:
             _extras.append(f"highest power={_hpv:,}")
         _extra_txt = (" EXTRA DETAIL: " + "; ".join(_extras) + ".") if _extras else ""
+        if is_current:  # the benchmark window is this season, so only compare current-season stats
+            _extra_txt += await cos_bench_for_member(stats, _hpv)
         return (
             f"EXACT VERIFIED DATA (copy these numbers precisely, do not alter or round them) "
             f"for {stats.get('lord_name', account_id)}, season {season_name} "
@@ -8172,6 +8367,12 @@ async def _ask_impl(ctx, *, query: str = None):
         "— and the 2-3 numbers that decided it, including the weak spot (e.g. deaths well behind "
         "pace = scared to fight). If the server data isn't uploaded, say so and rate from the "
         "tracked data only.\n\n"
+        "BENCHMARK — get_player_stats can include BENCHMARK lines comparing a member's deaths/power, "
+        "merits/power and healing to the top 100 lords across the 7 strongest servers for the SAME part "
+        "of the season. Top 100 is only about the top 2% of those lords, so showing up in it is elite and "
+        "being under the cutoff is NOT bad — judge by how close they are (e.g. 70% of the #100 cutoff is "
+        "still strong). Use it as the outside yardstick next to their rank on our own server; mention at "
+        "most one benchmark number in the verdict.\n\n"
         "RATING FAIRNESS — judge by where someone actually sits in the pool, not by how they "
         "compare to the very best. Use percentiles (top X% = rank divided by total): top 10% = "
         "elite, top 25% = strong, top 50% = solid or above average, 50-75% = below average, bottom "
