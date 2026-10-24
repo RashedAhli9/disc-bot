@@ -9047,6 +9047,17 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
     return True
 
 
+def _groupchart_dates(season_id, account_id):
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        rows = conn.execute("SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=?",
+                            (season_id, account_id)).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
 @bot.command(name="groupchart")
 async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     """
@@ -9092,6 +9103,7 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     color_cycle = plt.cm.tab10.colors
     plotted_any = False
     skipped = []
+    row_counts = []
 
     conn = sqlite3.connect(DB_PROGRESS)
     c = conn.cursor()
@@ -9112,6 +9124,7 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
                 lord_name = name
         log_info(f"[GROUPCHART] {lord['name']}: {len(dates)} usable (non-null {stat_key}) data points")
 
+        row_counts.append(f"{lord_name}: {len(rows)} rows, {len(dates)} with {stat_key}")
         if len(dates) < 2:
             skipped.append(lord_name)
             continue
@@ -9123,7 +9136,14 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
 
     if not plotted_any:
         plt.close(fig)
-        await ctx.send(f"❌ No member has enough archived data yet for {season_name_display} (season #{season_id}).")
+        _all_dates = sorted({d for l in lords for d in _groupchart_dates(season_id, l["account_id"])})
+        await ctx.send(
+            f"❌ No member has enough archived data yet for {season_name_display} (season #{season_id}). "
+            f"Archived days for this season: {', '.join(_all_dates) or 'none'}.\n"
+            f"```\n" + "\n".join(row_counts[:12]) + "\n```"
+            f"A chart needs 2+ archived days per member — `!forcefetch` saves today's and yesterday's data."
+        )
+        log_info(f"[GROUPCHART] nothing to plot: season_id={season_id} dates={_all_dates} counts={row_counts}")
         return False
 
     stat_label = stat.replace("_", " ").title()
