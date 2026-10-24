@@ -49,6 +49,7 @@ matplotlib.use("Agg")  # headless backend — no display needed on a server
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import aiohttp
+import card_render
 import openpyxl
 import io
 
@@ -84,6 +85,24 @@ DB_PROGRESS = "/data/season_progress.db"  # Separate database for seasonal data
 # Ensure the data directory exists so sqlite3.connect() doesn't crash-loop
 # if the persistent volume was momentarily unmounted or missing.
 os.makedirs(os.path.dirname(DB), exist_ok=True)
+
+_wal_done = set()
+
+
+def db_connect(path):
+    """Open a SQLite connection that waits for locks instead of failing, with WAL enabled so the
+    daily archive, chart rendering and commands can read/write at the same time."""
+    conn = sqlite3.connect(path, timeout=20)
+    try:
+        if path not in _wal_done:
+            conn.execute("PRAGMA journal_mode=WAL")
+            _wal_done.add(path)
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=20000")
+    except Exception:
+        pass
+    return conn
+
 
 # Anthropic API — powers !ask's natural-language understanding when set.
 # Falls back to keyword-only routing if this env var isn't configured on Railway.
@@ -157,7 +176,7 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # ============================================================
 
 def _bot_admins_db():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     conn.execute("CREATE TABLE IF NOT EXISTS bot_admins (user_id TEXT PRIMARY KEY, added_at TEXT, added_by TEXT)")
     return conn
 
@@ -991,7 +1010,7 @@ def set_cached_stats(account_id, start_date, end_date, stats):
 # ============================================================
 
 def init_db():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS events (
@@ -1101,7 +1120,7 @@ def init_db():
 
 def init_db_progress():
     """Initialize separate database for season progress tracking"""
-    conn = sqlite3.connect(DB_PROGRESS)
+    conn = db_connect(DB_PROGRESS)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS season_progress (
@@ -1199,7 +1218,7 @@ def migrate_db_progress():
         ("alliance_help", "TEXT"),
     ]
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute("PRAGMA table_info(season_progress)")
         existing = {row[1] for row in c.fetchall()}
@@ -1222,7 +1241,7 @@ def migrate_db_events():
     with db_get_event_tags().
     """
     try:
-        conn = sqlite3.connect(DB)
+        conn = db_connect(DB)
         c = conn.cursor()
         c.execute("PRAGMA table_info(events)")
         existing = {row[1] for row in c.fetchall()}
@@ -1259,7 +1278,7 @@ def migrate_db_events():
         log_error(f"[DB MIGRATE EVENTS] Error: {e}")
 
 def db_add_event(name, dt, reminder, tag_mentions=None, backup=True, channel_id=None, at_start=False):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "INSERT INTO events (name, datetime, reminder, tag_mentions, channel_id, at_start) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1273,7 +1292,7 @@ def db_add_event(name, dt, reminder, tag_mentions=None, backup=True, channel_id=
 
 def db_get_event_tags():
     """Return {event_id: mention_string} for events that have a custom tag set."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, tag_mentions FROM events WHERE tag_mentions IS NOT NULL AND tag_mentions != ''")
     rows = c.fetchall()
@@ -1282,7 +1301,7 @@ def db_get_event_tags():
 
 def db_get_event_channels():
     """Return {event_id: channel_id} for events whose reminder goes to a specific channel."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, channel_id FROM events WHERE channel_id IS NOT NULL")
     rows = c.fetchall()
@@ -1291,7 +1310,7 @@ def db_get_event_channels():
 
 def db_set_event_channel(event_id, channel_id):
     """Set an event's reminder channel. Pass None to go back to the default events channel."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE events SET channel_id=? WHERE id=?", (channel_id or None, event_id))
     conn.commit()
@@ -1300,7 +1319,7 @@ def db_set_event_channel(event_id, channel_id):
 
 def db_get_at_start_pending():
     """Return the set of event ids that still owe a ping at their exact start time."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id FROM events WHERE at_start = 1")
     ids = {row[0] for row in c.fetchall()}
@@ -1308,7 +1327,7 @@ def db_get_at_start_pending():
     return ids
 
 def db_mark_at_start_done(event_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE events SET at_start=2 WHERE id=?", (event_id,))
     conn.commit()
@@ -1316,7 +1335,7 @@ def db_mark_at_start_done(event_id):
 
 def db_events_snapshot():
     """Every events row with all columns (for !ask undo). Returns (column_names, rows)."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT * FROM events ORDER BY id")
     cols = [d[0] for d in c.description]
@@ -1326,7 +1345,7 @@ def db_events_snapshot():
 
 def db_events_restore(cols, rows):
     """Replace the whole events table with a snapshot taken by db_events_snapshot()."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM events")
     if rows:
@@ -1338,7 +1357,7 @@ def db_events_restore(cols, rows):
 
 def db_get_reminded_ids():
     """Return the set of event ids whose reminder has already been sent."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id FROM events WHERE reminded = 1")
     ids = {row[0] for row in c.fetchall()}
@@ -1346,7 +1365,7 @@ def db_get_reminded_ids():
     return ids
 
 def db_mark_event_reminded(event_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE events SET reminded=1 WHERE id=?", (event_id,))
     conn.commit()
@@ -1354,7 +1373,7 @@ def db_mark_event_reminded(event_id):
 
 def db_set_event_tag(event_id, tag_mentions):
     """Set an event's tag. Pass None/'' to reset it to the default announcement role."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE events SET tag_mentions=? WHERE id=?", (tag_mentions or None, event_id))
     conn.commit()
@@ -1362,7 +1381,7 @@ def db_set_event_tag(event_id, tag_mentions):
     silent_backup()
 
 def db_get_events():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "SELECT id, name, datetime, reminder FROM events ORDER BY datetime ASC"
@@ -1372,7 +1391,7 @@ def db_get_events():
     return rows
 
 def db_update_event(event_id, name=None, dt=None, reminder=None):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
 
     if name is not None:
@@ -1393,7 +1412,7 @@ def db_update_event(event_id, name=None, dt=None, reminder=None):
     silent_backup()
 
 def db_delete_event(event_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM events WHERE id=?", (event_id,))
     conn.commit()
@@ -1664,6 +1683,55 @@ def _fmt_m(n):
     return f"{n / 1e6:.2f}M" if abs(n) >= 1e6 else f"{n:,.0f}"
 
 
+def embed_to_text(embed):
+    """Plain-text version of an embed (used as a fallback; embeds can be hidden by user settings)."""
+    parts = []
+    if embed.title:
+        parts.append(f"**{embed.title}**")
+    if embed.author and embed.author.name:
+        parts.append(embed.author.name)
+    if embed.description:
+        parts.append(embed.description)
+    for f in embed.fields:
+        name = (f.name or "").replace("​", "").strip()
+        parts.append((f"**{name}**\n" if name else "") + (f.value or ""))
+    if embed.footer and embed.footer.text:
+        parts.append(f"_{embed.footer.text}_")
+    text = "\n\n".join(p for p in parts if p)
+    return text[:1990]
+
+
+def deads_progress(deaths, highest_power, start_date, end_date, season_id):
+    """Structured deads-requirement progress for the image card:
+    {deaths, required, level('good'|'mid'|'bad'), done} or None if unknown."""
+    try:
+        if not highest_power or highest_power <= 0:
+            return None
+        try:
+            tiers = _parse_deads_tiers(get_setting("deads_requirement"))
+        except Exception:
+            tiers = _parse_deads_tiers(SETTINGS_SCHEMA["deads_requirement"]["default"])
+        hp_m = highest_power / 1e6
+        chosen = None
+        for power_m, deads_m in tiers:
+            if hp_m >= power_m:
+                chosen = (power_m, deads_m)
+        required = int(chosen[1] * 1e6) if chosen else int(highest_power * (tiers[0][1] / tiers[0][0]))
+        deaths = max(0, int(deaths or 0))
+        start = date.fromisoformat(str(start_date)[:10])
+        days = (date.fromisoformat(str(end_date)[:10]) - start).days + 1
+        end = db_get_season_end_date(season_id)
+        season_days = ((date.fromisoformat(str(end)[:10]) - start).days + 1) if end else int(get_setting("season_length_days"))
+        days = max(1, min(days, season_days))
+        pace = deaths / (required * days / season_days) * 100 if required else 0
+        done = deaths >= required
+        level = "good" if (done or pace >= 100) else ("mid" if pace >= 50 else "bad")
+        return {"deaths": deaths, "required": required, "level": level, "done": done}
+    except Exception as e:
+        log_info(f"[DEADS PROGRESS] couldn't compute: {e}")
+        return None
+
+
 def deads_card_line(deaths, highest_power, start_date, end_date, season_id):
     """One compact line for the !progress card: a status dot (by pace), a 10-block bar toward the full
     season deads requirement, the numbers, and how many more deads are still needed. None if unknown."""
@@ -1706,7 +1774,7 @@ def deads_card_line(deaths, highest_power, start_date, end_date, season_id):
 def init_settings():
     """Create the settings table (if needed) and load saved values into memory."""
     try:
-        conn = sqlite3.connect(DB)
+        conn = db_connect(DB)
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS bot_settings (
@@ -1741,7 +1809,7 @@ def get_setting(key):
 def set_setting(key, value, user_id=None):
     """Save a setting (already validated by coerce_setting_value) and apply it immediately."""
     SETTINGS_SCHEMA[key]  # KeyError on typos instead of silently saving junk
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "INSERT OR REPLACE INTO bot_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
@@ -1756,7 +1824,7 @@ def set_setting(key, value, user_id=None):
 def reset_setting(key):
     """Put a setting back to its built-in default."""
     SETTINGS_SCHEMA[key]
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM bot_settings WHERE key=?", (key,))
     conn.commit()
@@ -1869,7 +1937,7 @@ _CHAT_URL_RE = re.compile(r"https?://\S+")
 
 def init_chat_samples():
     try:
-        conn = sqlite3.connect(DB)
+        conn = db_connect(DB)
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS chat_samples (
@@ -1904,7 +1972,7 @@ def clean_chat_text(raw):
 
 def db_save_chat_sample(msg_id, user_id, name, content, created_at=None):
     """Store one message (ignored if already stored) and trim that member to the newest N."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "INSERT OR IGNORE INTO chat_samples (msg_id, user_id, name, content, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1925,7 +1993,7 @@ def db_save_chat_sample(msg_id, user_id, name, content, created_at=None):
 def db_chat_member_samples(user_id=None, name_like=None, limit=60):
     """Newest-first messages for one member. Match by Discord user id, or by (part of) a stored name.
     Returns (display_name, [messages]) — messages in chronological order."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     if user_id is None:
         c.execute(
@@ -1951,7 +2019,7 @@ def db_chat_member_samples(user_id=None, name_like=None, limit=60):
 
 def db_chat_group_sample(per_user=5, max_total=40):
     """A few recent messages from each member, for a feel of how the whole server talks."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT DISTINCT user_id FROM chat_samples")
     users = [r[0] for r in c.fetchall()]
@@ -1971,7 +2039,7 @@ def db_chat_group_sample(per_user=5, max_total=40):
 def db_save_chat_batch(rows):
     """Bulk version for the backfill: rows = [(msg_id, user_id, name, content, created_at_iso)].
     One connection, then trim every touched member to the newest N. Returns how many were new."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     before = conn.total_changes
     c.executemany(
@@ -1992,7 +2060,7 @@ def db_save_chat_batch(rows):
 
 def db_chat_counts():
     """(members_with_samples, total_messages)."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT COUNT(DISTINCT user_id), COUNT(*) FROM chat_samples")
     row = c.fetchone()
@@ -2001,7 +2069,7 @@ def db_chat_counts():
 
 
 def db_chat_clear():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM chat_samples")
     n = c.rowcount
@@ -2016,7 +2084,7 @@ init_chat_samples()
 
 def db_save_kvk_matchup(nickname, num_zones, zones_data, team1_zones, team2_zones, team1_totals, team2_totals):
     import json
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "INSERT INTO kvk_matchups (nickname, created_at, num_zones, zones_json, team1_zones, team2_zones, team1_json, team2_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2036,7 +2104,7 @@ def db_save_kvk_matchup(nickname, num_zones, zones_data, team1_zones, team2_zone
     log_info(f"[KVK] Saved matchup: {nickname}")
 
 def db_get_kvk_matchups():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, nickname, created_at, num_zones, team1_zones, team2_zones, team1_json, team2_json FROM kvk_matchups ORDER BY id DESC")
     rows = c.fetchall()
@@ -2045,7 +2113,7 @@ def db_get_kvk_matchups():
 
 def db_get_kvk_matchup(matchup_id):
     import json
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, nickname, created_at, num_zones, zones_json, team1_zones, team2_zones, team1_json, team2_json FROM kvk_matchups WHERE id = ?", (matchup_id,))
     row = c.fetchone()
@@ -2063,7 +2131,7 @@ def db_get_kvk_matchup(matchup_id):
     }
 
 def db_delete_kvk_matchup(matchup_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM kvk_matchups WHERE id = ?", (matchup_id,))
     conn.commit()
@@ -2071,7 +2139,7 @@ def db_delete_kvk_matchup(matchup_id):
 
 
 def db_get_server_pick():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT server_num FROM server_config ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
@@ -2079,7 +2147,7 @@ def db_get_server_pick():
     return row[0] if row else None
 
 def db_set_server_pick(server_num):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM server_config")
     c.execute("INSERT INTO server_config (server_num, set_at) VALUES (?, ?)",
@@ -2089,7 +2157,7 @@ def db_set_server_pick(server_num):
 
 def db_replace_server_lord_stats(server_num, rows, start_date, end_date):
     """Delete all existing rows for this server, then insert the new upload."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM server_lord_stats WHERE server_num = ?", (server_num,))
     now = datetime.utcnow().isoformat()
@@ -2116,7 +2184,7 @@ def db_replace_server_lord_stats(server_num, rows, start_date, end_date):
     conn.close()
 
 def db_get_server_lord_stats(server_num):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("""
         SELECT account_id, lord_name, current_power, highest_power, deaths, total_merits,
@@ -2139,7 +2207,7 @@ migrate_db_progress()
 # ============================================================
 
 def db_queue_task(tool_name, tool_input, description, scheduled_time_iso, created_by, channel_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "INSERT INTO queued_tasks (tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, created_at) "
@@ -2152,7 +2220,7 @@ def db_queue_task(tool_name, tool_input, description, scheduled_time_iso, create
     return task_id
 
 def db_get_queued_tasks(status="pending"):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     if status:
         c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, result FROM queued_tasks WHERE status=? ORDER BY scheduled_time ASC", (status,))
@@ -2164,7 +2232,7 @@ def db_get_queued_tasks(status="pending"):
 
 def db_get_due_tasks():
     now = datetime.utcnow().isoformat()
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, channel_id FROM queued_tasks WHERE status='pending' AND scheduled_time<=?", (now,))
     rows = c.fetchall()
@@ -2172,7 +2240,7 @@ def db_get_due_tasks():
     return rows
 
 def db_get_queued_task(task_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, result FROM queued_tasks WHERE id=?", (task_id,))
     row = c.fetchone()
@@ -2180,14 +2248,14 @@ def db_get_queued_task(task_id):
     return row
 
 def db_set_task_status(task_id, status, result=None):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE queued_tasks SET status=?, result=? WHERE id=?", (status, result, task_id))
     conn.commit()
     conn.close()
 
 def db_update_task_time(task_id, new_scheduled_time_iso):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE queued_tasks SET scheduled_time=? WHERE id=? AND status='pending'", (new_scheduled_time_iso, task_id))
     changed = c.rowcount
@@ -2196,7 +2264,7 @@ def db_update_task_time(task_id, new_scheduled_time_iso):
     return changed > 0
 
 def db_add_season(season_name, start_date):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     created_at = datetime.utcnow().isoformat()
     c.execute(
@@ -2210,7 +2278,7 @@ def db_add_season(season_name, start_date):
 def count_season_data_dates(season_id, account_id):
     """Count unique dates with data for account in season"""
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute(
             "SELECT COUNT(DISTINCT data_date) FROM season_progress WHERE season_id = ? AND account_id = ?",
@@ -2225,7 +2293,7 @@ def count_season_data_dates(season_id, account_id):
 
 
 
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at DESC LIMIT 1")
     row = c.fetchone()
@@ -2233,7 +2301,7 @@ def count_season_data_dates(season_id, account_id):
     return row
 
 def db_get_current_season():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at DESC LIMIT 1")
     row = c.fetchone()
@@ -2242,7 +2310,7 @@ def db_get_current_season():
 
 def db_get_season_by_name(season_name):
     """Get season by name (case-insensitive)"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons WHERE LOWER(season_name) = LOWER(?) LIMIT 1", (season_name,))
     row = c.fetchone()
@@ -2251,7 +2319,7 @@ def db_get_season_by_name(season_name):
 
 def db_get_season_by_id(season_id):
     """Get season by its numeric ID"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons WHERE id = ? LIMIT 1", (season_id,))
     row = c.fetchone()
@@ -2276,7 +2344,7 @@ def resolve_season_input(season_input):
 
 def db_get_season_end_date(season_id):
     """Get the end_date for a season, or None if still active/ongoing."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT end_date FROM seasons WHERE id = ?", (season_id,))
     row = c.fetchone()
@@ -2297,7 +2365,7 @@ def resolve_leaderboard_end_date(season_id):
     return db_get_season_end_date(season_id) or date.today().isoformat()
 
 def db_set_season_end_date(season_id, end_date):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE seasons SET end_date = ? WHERE id = ?", (end_date, season_id))
     conn.commit()
@@ -2320,7 +2388,7 @@ def db_end_previous_active_season(new_season_start_date):
 
 def db_update_season(season_id, season_name=None, start_date=None, end_date=None):
     """Update one or more fields of a season. Pass None to leave a field unchanged."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     if season_name is not None:
         c.execute("UPDATE seasons SET season_name = ? WHERE id = ?", (season_name, season_id))
@@ -2333,7 +2401,7 @@ def db_update_season(season_id, season_name=None, start_date=None, end_date=None
 
 def db_get_all_seasons():
     """Get all seasons ordered by creation date"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, season_name, start_date, created_at FROM seasons ORDER BY created_at ASC")
     rows = c.fetchall()
@@ -2341,7 +2409,7 @@ def db_get_all_seasons():
     return rows
 
 def db_add_lord(lord_name, account_id):
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
         "INSERT INTO lords (lord_name, account_id) VALUES (?, ?)",
@@ -2352,7 +2420,7 @@ def db_add_lord(lord_name, account_id):
     silent_backup()
 
 def db_get_all_lords():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT id, lord_name, account_id FROM lords ORDER BY lord_name ASC")
     rows = c.fetchall()
@@ -2365,7 +2433,7 @@ def db_get_all_lords():
 
 def db_get_last_known_data_date():
     """Get the last known Call of Stats data date"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT latest_data_date FROM callofstats_update ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
@@ -2374,7 +2442,7 @@ def db_get_last_known_data_date():
 
 def db_get_bot_status():
     """Get current bot status config: (mode, custom_text). mode is 'default' or 'custom'."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT mode, custom_text FROM bot_status_config ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
@@ -2385,7 +2453,7 @@ def db_get_bot_status():
 
 def db_set_bot_status(mode, custom_text=None):
     """Set bot status config. mode is 'default' or 'custom'."""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM bot_status_config")
     c.execute(
@@ -2397,7 +2465,7 @@ def db_set_bot_status(mode, custom_text=None):
 
 def db_update_data_date(new_date):
     """Update the latest data date and reset notified flag"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
     
@@ -2413,7 +2481,7 @@ def db_update_data_date(new_date):
 
 def db_mark_update_notified():
     """Mark that we've sent the notification"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("UPDATE callofstats_update SET notified=1 WHERE id=(SELECT id FROM callofstats_update ORDER BY id DESC LIMIT 1)")
     conn.commit()
@@ -2421,7 +2489,7 @@ def db_mark_update_notified():
 
 def db_is_update_notified():
     """Check if we've already notified about this update"""
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.execute("SELECT notified FROM callofstats_update ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
@@ -2431,7 +2499,7 @@ def db_is_update_notified():
 def db_snapshot_exists(season_id, account_id, data_date):
     """Check if a snapshot already exists for a given date"""
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute(
             "SELECT id FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
@@ -2492,7 +2560,7 @@ def db_save_season_progress(season_id, account_id, lord_name, stats, data_date=N
             s = str(v).strip()
             return s not in ("", "+0", "-0", "0")
 
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         try:
             c = conn.cursor()
             now = datetime.utcnow().isoformat()
@@ -2547,7 +2615,7 @@ def db_save_advanced_stats(season_id, account_id, data_date, adv_stats, lord_nam
         return s not in ("", "+0", "-0", "0")
 
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute(f"SELECT {', '.join(adv_fields)} FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
                    (season_id, account_id, data_date))
@@ -2590,7 +2658,7 @@ def db_get_latest_advanced_snapshot(season_id, account_id):
     Returns a dict with the 7 advanced fields + data_date, or None.
     """
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute("""
             SELECT data_date, infantry_merits, cavalry_merits, mage_merits, marksman_merits,
@@ -2646,7 +2714,7 @@ def db_save_extra_stats(season_id, account_id, data_date, highest_power=None, ex
         return s not in ("", "+0", "-0", "0")
 
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         fields = list(updates.keys())
         c.execute(f"SELECT {', '.join(fields)} FROM season_progress WHERE season_id=? AND account_id=? AND data_date=?",
@@ -2688,7 +2756,7 @@ def db_get_latest_field_value(season_id, account_id, field_name):
                            "highest_power", "exchange_coins_spent", "max_pets"):
         return None
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute(f"""
             SELECT {field_name} FROM season_progress
@@ -2709,7 +2777,7 @@ def db_get_season_progress(season_id, account_id, data_date=None):
         if not data_date:
             data_date = date.today().isoformat()
         
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         try:
             c = conn.cursor()
             c.execute("""
@@ -2769,7 +2837,7 @@ def db_get_season_progress(season_id, account_id, data_date=None):
 def db_get_latest_season_progress(season_id, account_id):
     """Get the latest (most recent date) progress for a member in a season"""
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         try:
             c = conn.cursor()
             c.execute("""
@@ -2829,7 +2897,7 @@ def db_get_latest_season_progress(season_id, account_id):
 
 def db_get_lord(account_id):
     try:
-        conn = sqlite3.connect(DB)
+        conn = db_connect(DB)
         try:
             c = conn.cursor()
             c.execute("SELECT id, lord_name, account_id FROM lords WHERE account_id=?", (account_id,))
@@ -3656,7 +3724,7 @@ def preload_cache_from_db():
         
         season_id, season_name, start_date, created_at = season
         
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         
         # Get all unique account_ids and dates in the current season
@@ -3704,6 +3772,57 @@ async def update_bot_presence():
         log_info(f"[PRESENCE] Failed to update: {e}")
 
 
+_commands_synced = False
+
+
+# ============================================================
+# GLOBAL ERROR HANDLERS — users always get a reply, you get the traceback in the logs
+# ============================================================
+import traceback as _traceback
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CommandInvokeError):
+        error = error.original
+    if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument, commands.TooManyArguments)):
+        usage = f"{ctx.prefix}{ctx.command.qualified_name} {ctx.command.signature}".strip() if ctx.command else ""
+        return await ctx.send(f"❌ That doesn't look right. Usage: `{usage}`")
+    if isinstance(error, commands.CommandOnCooldown):
+        return await ctx.send(f"⏳ Slow down, try again in {error.retry_after:.0f}s.")
+    if isinstance(error, (commands.CheckFailure, commands.MissingPermissions)):
+        return await ctx.send("❌ You can't use that command.")
+    name = ctx.command.qualified_name if ctx.command else "?"
+    log_error(f"[CMD ERROR] !{name} by {ctx.author}: {type(error).__name__}: {error}\n"
+              + "".join(_traceback.format_exception(type(error), error, error.__traceback__))[-1500:])
+    try:
+        await ctx.send(f"💥 `!{name}` crashed ({type(error).__name__}). It's been logged, try again in a minute.")
+    except Exception:
+        pass
+
+
+@bot.tree.error
+async def on_app_command_error(inter: discord.Interaction, error):
+    if isinstance(error, app_commands.CommandInvokeError):
+        error = error.original
+    if isinstance(error, app_commands.CheckFailure):
+        msg = "❌ You can't use that command."
+    else:
+        cmd = inter.command.qualified_name if inter.command else "?"
+        log_error(f"[SLASH ERROR] /{cmd} by {inter.user}: {type(error).__name__}: {error}\n"
+                  + "".join(_traceback.format_exception(type(error), error, error.__traceback__))[-1500:])
+        msg = f"💥 `/{cmd}` crashed ({type(error).__name__}). It's been logged, try again in a minute."
+    try:
+        if inter.response.is_done():
+            await inter.followup.send(msg, ephemeral=True)
+        else:
+            await inter.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -3711,13 +3830,17 @@ async def on_ready():
     # Set bot status/activity
     await update_bot_presence()
 
-    # Sync commands once
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} commands")
-    except Exception as e:
-        print(f"❌ Command sync failed: {e}")
-    
+    # Sync commands once per process (on_ready also fires on every reconnect, and Discord
+    # rate-limits command syncing).
+    global _commands_synced
+    if not _commands_synced:
+        try:
+            synced = await bot.tree.sync()
+            _commands_synced = True
+            print(f"✅ Synced {len(synced)} commands")
+        except Exception as e:
+            print(f"❌ Command sync failed: {e}")
+
     await sync_app_emojis()
 
     # Pre-load cache from database on startup (so commands work immediately)
@@ -3728,7 +3851,7 @@ async def on_ready():
         season = db_get_current_season()
         if season:
             season_id, season_name, start_date, created_at = season
-            conn = sqlite3.connect(DB_PROGRESS)
+            conn = db_connect(DB_PROGRESS)
             c = conn.cursor()
             c.execute("DELETE FROM season_progress WHERE data_date < ?", (start_date,))
             deleted = c.rowcount
@@ -3955,7 +4078,7 @@ async def date_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     """Autocomplete dates from database"""
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute("SELECT DISTINCT data_date FROM season_progress ORDER BY data_date DESC")
         all_dates = [row[0] for row in c.fetchall()]
@@ -4080,7 +4203,7 @@ async def editseason(inter: discord.Interaction):
                     if end_date_val:
                         datetime.strptime(end_date_val, "%Y-%m-%d")
 
-                    conn = sqlite3.connect(DB)
+                    conn = db_connect(DB)
                     c = conn.cursor()
                     c.execute(
                         "UPDATE seasons SET season_name=?, start_date=?, end_date=? WHERE id=?",
@@ -4158,7 +4281,7 @@ async def editseason_text(ctx):
                     if end_date_val:
                         datetime.strptime(end_date_val, "%Y-%m-%d")
 
-                    conn = sqlite3.connect(DB)
+                    conn = db_connect(DB)
                     c = conn.cursor()
                     c.execute(
                         "UPDATE seasons SET season_name=?, start_date=?, end_date=? WHERE id=?",
@@ -4221,7 +4344,7 @@ async def deleteseason(inter: discord.Interaction):
         async def confirm_cb(confirm_inter: discord.Interaction):
             try:
                 # Delete season progress data
-                conn_p = sqlite3.connect(DB_PROGRESS)
+                conn_p = db_connect(DB_PROGRESS)
                 c_p = conn_p.cursor()
                 c_p.execute("DELETE FROM season_progress WHERE season_id=?", (season_id,))
                 deleted_rows = c_p.rowcount
@@ -4229,7 +4352,7 @@ async def deleteseason(inter: discord.Interaction):
                 conn_p.close()
 
                 # Delete season record
-                conn = sqlite3.connect(DB)
+                conn = db_connect(DB)
                 c = conn.cursor()
                 c.execute("DELETE FROM seasons WHERE id=?", (season_id,))
                 conn.commit()
@@ -4288,14 +4411,14 @@ async def removeseason(inter: discord.Interaction):
 
         async def confirm_cb(confirm_inter: discord.Interaction):
             try:
-                conn_p = sqlite3.connect(DB_PROGRESS)
+                conn_p = db_connect(DB_PROGRESS)
                 c_p = conn_p.cursor()
                 c_p.execute("DELETE FROM season_progress WHERE season_id=?", (season_id,))
                 deleted_rows = c_p.rowcount
                 conn_p.commit()
                 conn_p.close()
 
-                conn = sqlite3.connect(DB)
+                conn = db_connect(DB)
                 c = conn.cursor()
                 c.execute("DELETE FROM seasons WHERE id=?", (season_id,))
                 conn.commit()
@@ -4418,7 +4541,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             today = stored_end
         else:
             # Legacy season with no stored end_date — fall back to last known data date
-            conn = sqlite3.connect(DB_PROGRESS)
+            conn = db_connect(DB_PROGRESS)
             c = conn.cursor()
             c.execute("SELECT MAX(data_date) FROM season_progress WHERE season_id = ?", (season_id,))
             row = c.fetchone()
@@ -4897,8 +5020,52 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         footer_parts.append(f"Tip: !progress {account_id} sos2 (or a season ID) for another season")
         embed.set_footer(text="  •  ".join(footer_parts))
 
-        await msg.edit(content=None, embed=embed)
-        
+        # Send as an IMAGE card (visible to everyone regardless of their embed settings).
+        # If rendering fails for any reason, fall back to the same info as plain text — never an embed.
+        def _rk(rank_map):
+            return rank_map[account_id][0] if account_id in rank_map else None
+
+        try:
+            card = {
+                "tag": alliance_tag, "name": lord_name, "season": season_name,
+                "start": start_date, "end": end_date_used, "account_id": account_id,
+                "single_day": is_single_day,
+                "power": highest_power or None, "power_gain": power_gain or None, "power_rank": _rk(power_rank),
+                "merits": stats.get("merits"), "merits_pct": stats.get("merits_pct"), "merits_rank": _rk(merits_rank),
+                "kills": stats.get("kills_gain"), "kills_rank": _rk(kills_rank),
+                "deads": stats.get("deads_gain"), "deads_rank": _rk(deads_rank),
+                "healed": t45_healed_val, "healed_rank": _rk(healed_rank),
+                "deads_req": (deads_progress(_parse_stat_num(stats.get("deads_gain")), highest_power,
+                                             start_date, end_date_used, season_id)
+                              if stats.get("deads_gain") else None),
+                "troops": [("Infantry", infantry_total, _rk(infantry_rank)),
+                           ("Cavalry", cavalry_total, _rk(cavalry_rank)),
+                           ("Archer", marksman_total, _rk(marksman_rank)),
+                           ("Magic", mage_total, _rk(mage_rank))],
+                "others": ([("Other", other_total, _rk(other_rank))] if other_total else [])
+                          + ([("T4/T5 Dead", t45_dead_total, None)] if t45_dead_total else []),
+                "rss": [(lab, stats[k]) for lab, k in (("Gold", "gold_gathered"), ("Wood", "wood_gathered"),
+                                                       ("Ore", "ore_gathered"), ("Mana", "mana_gathered"))
+                        if stats.get(k)],
+                "rss_total": total_gathered,
+                "mana_est": (mana_source * mana_per_t5()) if mana_source else None,
+                "coins": (f"{exchange_coins_spent:,}" + (f" (+{exchange_coins_gain:,})" if exchange_coins_gain else ""))
+                         if exchange_coins_spent is not None else None,
+                "pets": f"{max_pets:,}" if max_pets is not None else None,
+                "decos": str(max_decorations) if max_decorations is not None else None,
+                "notes": [n for n in (
+                    (f"Merit breakdown as of {adv_yesterday}" if (troop_lines or other_lines) and is_current_season and not adv_is_up_to_date
+                     else f"Merit breakdown final as of {adv_yesterday}" if (troop_lines or other_lines) and not is_current_season
+                     else None),
+                    f"Tip: !progress {account_id} sos2 (or a season ID) for another season") if n],
+            }
+            png = await asyncio.to_thread(card_render.render_progress_card, card)
+            await msg.delete()
+            await ctx.send(file=discord.File(png, filename=f"progress_{account_id}.png"))
+        except Exception as e:
+            log_info(f"[PROGRESS] image card failed, using text fallback: {type(e).__name__}: {e}")
+            await msg.edit(content=embed_to_text(embed), embed=None)
+
     except Exception as e:
         log_info(f"[PROGRESS ERROR] {e}")
         await msg.edit(content=f"❌ Error: {str(e)}")
@@ -4927,7 +5094,7 @@ def _archive_missing_accounts(season_id, account_ids, since_iso):
     """Account IDs with NO archived merits row for this season on/after since_iso."""
     have = set()
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         rows = conn.execute(
             "SELECT DISTINCT account_id FROM season_progress WHERE season_id=? AND data_date>=? AND merits IS NOT NULL",
             (season_id, since_iso)).fetchall()
@@ -4987,7 +5154,7 @@ async def backfill_cmd(ctx):
     for lord in lords:
         acct = lord["account_id"]
         try:
-            conn = sqlite3.connect(DB_PROGRESS)
+            conn = db_connect(DB_PROGRESS)
             have = {r[0] for r in conn.execute(
                 "SELECT data_date FROM season_progress WHERE season_id=? AND account_id=? AND merits IS NOT NULL",
                 (season_id, acct)).fetchall()}
@@ -5194,7 +5361,7 @@ async def seasonhistory(ctx):
     Show all seasons with their ID, start date and end date (or ongoing if active).
     """
     try:
-        conn = sqlite3.connect(DB)
+        conn = db_connect(DB)
         c = conn.cursor()
         c.execute("SELECT id, season_name, start_date, created_at, end_date FROM seasons ORDER BY created_at ASC")
         seasons = c.fetchall()
@@ -5223,7 +5390,7 @@ async def seasonhistory(ctx):
                 status = "🔴 ACTIVE"
             else:
                 # Legacy season with no end_date recorded: fall back to last day with data
-                conn = sqlite3.connect(DB_PROGRESS)
+                conn = db_connect(DB_PROGRESS)
                 c = conn.cursor()
                 c.execute(
                     "SELECT MAX(data_date) FROM season_progress WHERE season_id = ?",
@@ -5258,7 +5425,7 @@ async def datahistory(ctx):
         return await ctx.send("❌ Owner only.")
     
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         
         # Get oldest and newest dates
@@ -5341,7 +5508,7 @@ class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
                 mode_display = mode
                 delete_mode = mode
             
-            conn = sqlite3.connect(DB_PROGRESS)
+            conn = db_connect(DB_PROGRESS)
             c = conn.cursor()
             
             if delete_mode == "before":
@@ -5475,7 +5642,7 @@ class GainsDateSelector(discord.ui.View):
         self.selected_start = None
         self.selected_end = None
 
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         c.execute(
             "SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
@@ -5626,7 +5793,7 @@ async def gains(ctx, param1: str = None, param2: str = None):
         
         season_id, season_name, start_date, created_at = season
         
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         
         # Show specific season data only
@@ -6294,7 +6461,7 @@ def parse_cos_leaderboard(page_html):
 
 
 def _cos_bench_db():
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     conn.execute("""CREATE TABLE IF NOT EXISTS cos_benchmark (
         kind TEXT PRIMARY KEY, start_date TEXT, end_date TEXT, fetched_at TEXT, rows_json TEXT)""")
     return conn
@@ -8255,6 +8422,8 @@ async def clearlearned(ctx):
 
 
 _ask_inflight = set()  # (channel_id, user_id, query) currently being processed
+ASK_RATE_MAX = 20      # asks per rolling hour for non-admins
+_ask_rate = {}         # user_id -> [timestamps of recent asks]
 _ASK_STATS = {"count": 0, "errors": 0, "capped": 0, "nudged": 0, "secs": []}  # secs = last 100 durations (shown in /status)
 
 ASK_MAIN_MODEL = "claude-sonnet-5"
@@ -8292,6 +8461,17 @@ async def ask(ctx, *, query: str = None):
         except Exception:
             pass
         return
+    # Rate limit (each !ask costs API money): bot admins/owner are exempt, everyone else gets
+    # ASK_RATE_MAX asks per rolling hour.
+    if not is_bot_admin(ctx.author.id):
+        now_ts = datetime.utcnow().timestamp()
+        hits = [t for t in _ask_rate.get(ctx.author.id, []) if now_ts - t < 3600]
+        if len(hits) >= ASK_RATE_MAX:
+            wait_min = max(1, int((3600 - (now_ts - hits[0])) / 60))
+            _ask_rate[ctx.author.id] = hits
+            return await ctx.send(f"⏳ {ctx.author.display_name}, you've used your {ASK_RATE_MAX} asks for this hour. Try again in ~{wait_min} min.")
+        hits.append(now_ts)
+        _ask_rate[ctx.author.id] = hits
     _ask_inflight.add(key)
     started = datetime.utcnow()
     outcome = "ok"
@@ -9058,7 +9238,7 @@ async def get_rankings_for_stat(ctx, stat_key, start_date, end_date):
         
         # Get stats from database for all members (use latest data per account)
         stats_list = []
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         c = conn.cursor()
         
         for account_id in checked_accounts:
@@ -9201,7 +9381,7 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
             return False
     season_id, season_name_display, start_date, _ = season
 
-    conn = sqlite3.connect(DB_PROGRESS)
+    conn = db_connect(DB_PROGRESS)
     c = conn.cursor()
     c.execute(
         f"SELECT data_date, {stat_key}, lord_name FROM season_progress WHERE season_id=? AND account_id=? ORDER BY data_date ASC",
@@ -9247,11 +9427,8 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
         ax.set_xticks(range(0, len(dates), step))
         ax.set_xticklabels([dates[i] for i in range(0, len(dates), step)])
 
-    fig.tight_layout()
-
     chart_path = f"/tmp/chart_{account_id}_{stat_key}_{season_id}.png"
-    fig.savefig(chart_path, dpi=110, facecolor=fig.get_facecolor())
-    plt.close(fig)
+    await asyncio.to_thread(_save_fig, fig, chart_path)
 
     await ctx.send(file=discord.File(chart_path))
     try:
@@ -9264,7 +9441,7 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
 
 def _groupchart_dates(season_id, account_id):
     try:
-        conn = sqlite3.connect(DB_PROGRESS)
+        conn = db_connect(DB_PROGRESS)
         rows = conn.execute("SELECT DISTINCT data_date FROM season_progress WHERE season_id=? AND account_id=?",
                             (season_id, account_id)).fetchall()
         conn.close()
@@ -9320,7 +9497,7 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     skipped = []
     row_counts = []
 
-    conn = sqlite3.connect(DB_PROGRESS)
+    conn = db_connect(DB_PROGRESS)
     c = conn.cursor()
     for i, lord in enumerate(lords):
         c.execute(
@@ -9369,11 +9546,9 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     ax.grid(True, alpha=0.2)
     ax.legend(loc="upper left", fontsize=9, framealpha=0.3)
     fig.autofmt_xdate(rotation=45)
-    fig.tight_layout()
 
     chart_path = f"/tmp/groupchart_{season_id}_{stat_key}.png"
-    fig.savefig(chart_path, dpi=110, facecolor=fig.get_facecolor())
-    plt.close(fig)
+    await asyncio.to_thread(_save_fig, fig, chart_path)
 
     await ctx.send(file=discord.File(chart_path))
     try:
@@ -9810,7 +9985,7 @@ async def active_members(ctx):
                 if not stats_yesterday:
                     log_info(f"[ACTIVE] No yesterday data found, searching for earlier data before {actual_today_date}")
                     try:
-                        conn = sqlite3.connect(DB_PROGRESS)
+                        conn = db_connect(DB_PROGRESS)
                         c = conn.cursor()
                         c.execute("""
                             SELECT power_gain, merits, kills_gain, deads_gain, healed_gain,
@@ -10325,7 +10500,7 @@ async def eventchannel_cmd(inter: discord.Interaction, channel: discord.TextChan
         hits.append(eid)
     if not hits:
         return await inter.response.send_message("No upcoming events matched.", ephemeral=True)
-    conn = sqlite3.connect(DB)
+    conn = db_connect(DB)
     c = conn.cursor()
     c.executemany("UPDATE events SET channel_id=? WHERE id=?", [(None if reset else channel.id, e) for e in hits])
     conn.commit()
@@ -11922,6 +12097,15 @@ def _parse_stat_str(raw):
         return 0
 
 
+def _save_fig(fig, path):
+    """Layout + render + save a matplotlib figure. Runs in a worker thread so the bot stays responsive."""
+    try:
+        fig.tight_layout()
+        fig.savefig(path, dpi=110, facecolor=fig.get_facecolor())
+    finally:
+        plt.close(fig)
+
+
 def parse_server_excel(file_bytes):
     """
     Parse an uploaded server stats Excel file. Supports both the newer COS export
@@ -12208,7 +12392,7 @@ async def _process_serverupdate_attachment(ctx, attachment):
     except Exception as e:
         return await msg.edit(content=f"❌ Failed to download file: {e}")
 
-    rows, error = parse_server_excel(file_bytes)
+    rows, error = await asyncio.to_thread(parse_server_excel, file_bytes)
     if error or not rows:
         return await msg.edit(content=f"❌ Failed to parse Excel: {error or 'No rows found'}")
 
