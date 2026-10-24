@@ -3,8 +3,10 @@ no matter their Discord embed settings.
 
 Everything is drawn at 2x and scaled down so edges are smooth. Fonts live in assets/fonts,
 medal icons in emoji_assets (the same files uploaded as bot emojis)."""
+import functools
 import io
 import os
+import unicodedata
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -34,19 +36,74 @@ _font_cache = {}
 _icon_cache = {}
 
 
-def _font(weight, size):
-    key = (weight, size)
+def _mpl_font_dir():
+    try:
+        import matplotlib
+        return os.path.join(matplotlib.get_data_path(), "fonts", "ttf")
+    except Exception:
+        return ""
+
+
+_MPL = _mpl_font_dir()
+
+# Per weight: primary font first, then fallbacks that cover more of Unicode (symbols, math, Greek, Cyrillic...)
+_CHAINS = {
+    "r": [os.path.join(FONT_DIR, "Inter-Regular.otf"), os.path.join(_MPL, "DejaVuSans.ttf"),
+          os.path.join(_MPL, "STIXGeneral.ttf")],
+    "s": [os.path.join(FONT_DIR, "Inter-SemiBold.otf"), os.path.join(_MPL, "DejaVuSans-Bold.ttf"),
+          os.path.join(_MPL, "STIXGeneralBol.ttf")],
+    "b": [os.path.join(FONT_DIR, "Inter-Bold.otf"), os.path.join(_MPL, "DejaVuSans-Bold.ttf"),
+          os.path.join(_MPL, "STIXGeneralBol.ttf")],
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _cmap(path):
+    try:
+        from fontTools.ttLib import TTFont
+        return frozenset(TTFont(path, lazy=True).getBestCmap().keys())
+    except Exception:
+        return frozenset()
+
+
+def _font_at(path, size):
+    key = (path, size)
     if key not in _font_cache:
-        name = {"r": "Inter-Regular.otf", "s": "Inter-SemiBold.otf", "b": "Inter-Bold.otf"}[weight]
-        path = os.path.join(FONT_DIR, name)
         try:
             _font_cache[key] = ImageFont.truetype(path, size * S)
         except Exception:
-            try:
-                _font_cache[key] = ImageFont.truetype("DejaVuSans.ttf", size * S)
-            except Exception:
-                _font_cache[key] = ImageFont.load_default()
+            _font_cache[key] = ImageFont.load_default()
     return _font_cache[key]
+
+
+def _font(weight, size):
+    return _font_at(_CHAINS[weight][0], size)
+
+
+def _runs(text, weight):
+    """Clean a string and split it into [(text, font_path)] runs, using the first font in the chain that has
+    each character. Characters no font has (or invisible/private-use ones) are dropped instead of drawn as boxes."""
+    text = unicodedata.normalize("NFKC", str(text))   # fancy styled letters -> plain letters where possible
+    chain = _CHAINS[weight]
+    out = []
+    for ch in text:
+        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn") or ch == "\ufe0f":
+            continue
+        if ch == " ":
+            path = out[-1][1] if out else chain[0]
+        else:
+            path = next((fp for fp in chain if ord(ch) in _cmap(fp)), None)
+            if path is None:
+                continue
+        if out and out[-1][1] == path:
+            out[-1] = (out[-1][0] + ch, path)
+        else:
+            out.append((ch, path))
+    if out:
+        out[0] = (out[0][0].lstrip(), out[0][1])
+        out[-1] = (out[-1][0].rstrip(), out[-1][1])
+        out = [r for r in out if r[0]]
+    return out
 
 
 def _icon(name, size):
@@ -71,10 +128,26 @@ class _Canvas:
                                  outline=outline, width=S if outline else 0)
 
     def text(self, x, y, s, weight="r", size=16, fill=TEXT, anchor="la"):
-        self.d.text((x * S, y * S), str(s), font=_font(weight, size), fill=fill, anchor=anchor)
+        runs = _runs(s, weight)
+        if not runs:
+            return
+        if len(runs) == 1:
+            self.d.text((x * S, y * S), runs[0][0], font=_font_at(runs[0][1], size), fill=fill, anchor=anchor)
+            return
+        # mixed fonts: lay the runs out left to right on a shared baseline
+        total = sum(self.d.textlength(t, font=_font_at(fp, size)) for t, fp in runs)
+        h, v = anchor[0], anchor[1]
+        px = x * S
+        px -= total if h == "r" else total / 2 if h == "m" else 0
+        asc, desc = _font(weight, size).getmetrics()
+        base = y * S + (asc if v == "a" else (asc - desc) / 2 if v == "m" else 0)
+        for t, fp in runs:
+            f = _font_at(fp, size)
+            self.d.text((px, base), t, font=f, fill=fill, anchor="ls")
+            px += self.d.textlength(t, font=f)
 
     def text_w(self, s, weight="r", size=16):
-        return self.d.textlength(str(s), font=_font(weight, size)) / S
+        return sum(self.d.textlength(t, font=_font_at(fp, size)) for t, fp in _runs(s, weight)) / S
 
     def bar(self, x, y, w, h, frac, color):
         self.rect(x, y, w, h, TRACK, r=h // 2)
