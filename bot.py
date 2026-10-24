@@ -1403,6 +1403,7 @@ SETTING_GROUPS = [
     ("alerts", "🚨 Alerts"),
     ("clock", "🕒 Clock channel"),
     ("ask", "🧠 !ask AI"),
+    ("game", "⚔️ Game numbers"),
 ]
 
 SETTINGS_SCHEMA = {
@@ -1476,6 +1477,14 @@ SETTINGS_SCHEMA = {
         "group": "ask", "label": "Messages to read", "type": "int",
         "min": 50, "max": 5000, "default": 3000,
         "desc": "How many recent messages to read from a channel when learning (!learnchat and the setting above).",
+    },
+    "heal_mana_t5": {
+        "group": "game", "label": "Mana per T5 unit healed", "type": "int", "min": 1, "max": 1000, "default": 69,
+        "desc": "Mana cost of healing one T5 unit. Used for the Mana Spent numbers on !progress and the mana leaderboards.",
+    },
+    "heal_mana_t4": {
+        "group": "game", "label": "Mana per T4 unit healed", "type": "int", "min": 1, "max": 1000, "default": 18,
+        "desc": "Mana cost of healing one T4 unit. Used for the mana leaderboards (the !progress estimate assumes T5).",
     },
     "season_length_days": {
         "group": "ask", "label": "Season length (days)", "type": "int", "min": 7, "max": 120, "default": 30,
@@ -4732,7 +4741,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         # computed exactly here, only estimated using the real T5 rate as a conservative guess.
         mana_source = _parse_stat_num(t45_healed_val)
         if mana_source:
-            mana_spent_est = mana_source * MANA_PER_T5_HEAL
+            mana_spent_est = mana_source * mana_per_t5()
             embed.add_field(
                 name="💧 Mana Spent (est.)",
                 value=f"+{mana_spent_est:,} _(assuming its T5)_",
@@ -6002,7 +6011,7 @@ async def topspent(ctx, season_name: str = None):
                 lord_name = resolved_name or lord["name"]
         except Exception as e:
             log_info(f"[TOPMANASPENT ERROR] {lord['account_id']}: {e}")
-        leaderboard.append({"name": lord_name, "val": healed_num * MANA_PER_T5_HEAL})
+        leaderboard.append({"name": lord_name, "val": healed_num * mana_per_t5()})
 
     leaderboard.sort(key=lambda x: x["val"], reverse=True)
 
@@ -11807,8 +11816,14 @@ async def stopheal(ctx, *, arg: str = None):
     top, player, group_only = _parse_stop_args(arg)
     await _server_leaderboard(ctx, None, "healing", "❤️", "Healing", top, player, group_only)
 
-MANA_PER_T5_HEAL = 78  # real mana cost per T5 unit healed
-MANA_PER_T4_HEAL = 20  # real mana cost per T4 unit healed
+def mana_per_t5():
+    """Mana cost per T5 unit healed (a /settings value)."""
+    return int(get_setting("heal_mana_t5"))
+
+
+def mana_per_t4():
+    """Mana cost per T4 unit healed (a /settings value)."""
+    return int(get_setting("heal_mana_t4"))
 
 @bot.command(name="stopmana")
 async def stopmana(ctx, *, arg: str = None):
@@ -11839,7 +11854,7 @@ async def stopmana(ctx, *, arg: str = None):
 
     scored = [
         {"name": l["lord_name"],
-         "val": l.get("t4_healed", 0) * MANA_PER_T4_HEAL + l.get("t5_healed", 0) * MANA_PER_T5_HEAL}
+         "val": l.get("t4_healed", 0) * mana_per_t4() + l.get("t5_healed", 0) * mana_per_t5()}
         for l in lords
     ]
     scored.sort(key=lambda x: x["val"], reverse=True)
@@ -11855,7 +11870,7 @@ async def stopmana(ctx, *, arg: str = None):
             return await ctx.send(f"❌ {e}")
         if not match:
             return await ctx.send(f"❌ No player matching '{player}' found{' in this group' if group_only else ''} on S#{picked}.")
-        val = match.get("t4_healed", 0) * MANA_PER_T4_HEAL + match.get("t5_healed", 0) * MANA_PER_T5_HEAL
+        val = match.get("t4_healed", 0) * mana_per_t4() + match.get("t5_healed", 0) * mana_per_t5()
         rank = next((i + 1 for i, s in enumerate(scored) if s["name"] == match["lord_name"] and s["val"] == val), None)
         rank_str = f" (#{rank})" if rank else ""
         return await ctx.send(f"```💧 {scope_label} — S#{picked}{date_range}\n{match['lord_name']}: +{val:,}{rank_str}```")
@@ -11872,7 +11887,7 @@ async def stopmana(ctx, *, arg: str = None):
             continue
         medal = medals[i] if i < 3 else f"{i+1}."
         lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
-    lines.append(f"\n*(T4 Healed × {MANA_PER_T4_HEAL}) + (T5 Healed × {MANA_PER_T5_HEAL}) — exact, not an estimate*")
+    lines.append(f"\n*(T4 Healed × {mana_per_t4()}) + (T5 Healed × {mana_per_t5()}) — exact, not an estimate*")
     lines.append("```")
     await ctx.send("\n".join(lines))
 
