@@ -2183,6 +2183,21 @@ def db_replace_server_lord_stats(server_num, rows, start_date, end_date):
     conn.commit()
     conn.close()
 
+def db_get_member_current_power(account_id):
+    """Latest current power for an account from the newest !serverupdate Excel that includes them.
+    Returns (current_power:int, end_date:str) or (None, None)."""
+    try:
+        conn = db_connect(DB)
+        row = conn.execute(
+            "SELECT current_power, end_date FROM server_lord_stats WHERE account_id = ? AND current_power > 0 "
+            "ORDER BY uploaded_at DESC LIMIT 1", (str(account_id),)).fetchone()
+        conn.close()
+        return (int(row[0]), row[1]) if row else (None, None)
+    except Exception as e:
+        log_info(f"[CURRENT POWER] lookup failed: {e}")
+        return (None, None)
+
+
 def db_get_server_lord_stats(server_num):
     conn = db_connect(DB)
     c = conn.cursor()
@@ -5026,11 +5041,13 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             return rank_map[account_id][0] if account_id in rank_map else None
 
         try:
+            _pw_now, _pw_now_date = db_get_member_current_power(account_id)
             card = {
                 "tag": alliance_tag, "name": lord_name, "season": season_name,
                 "start": start_date, "end": end_date_used, "account_id": account_id,
                 "single_day": is_single_day,
                 "power": highest_power or None, "power_gain": power_gain or None, "power_rank": _rk(power_rank),
+                "power_now": _pw_now, "power_now_date": _pw_now_date,
                 "merits": stats.get("merits"), "merits_pct": stats.get("merits_pct"), "merits_rank": _rk(merits_rank),
                 "kills": stats.get("kills_gain"), "kills_rank": _rk(kills_rank),
                 "deads": stats.get("deads_gain"), "deads_rank": _rk(deads_rank),

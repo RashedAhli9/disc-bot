@@ -98,13 +98,15 @@ class _Canvas:
         self.text(tx, y + 14, label, "b", 15, TEXT if not ic else YELLOW if rank == 1 else TEXT, anchor="lm")
         return w
 
-    def tile(self, x, y, w, h, label, value, accent, sub=None, rank=None, value_size=34):
+    def tile(self, x, y, w, h, label, value, accent, sub=None, rank=None, value_size=34, sub2=None, sub2_color=MUTED):
         self.rect(x, y, w, h, PANEL)
         self.rect(x, y + 16, 5, h - 32, accent, r=3)
         self.text(x + 24, y + 18, label.upper(), "s", 13, MUTED)
         self.text(x + 24, y + 40, value, "b", value_size, TEXT)
         if sub:
-            self.text(x + 24, y + h - 30, sub, "r", 14, accent)
+            self.text(x + 24, y + h - (52 if sub2 else 30), sub, "r", 14, accent)
+        if sub2:
+            self.text(x + 24, y + h - 30, sub2, "s", 14, sub2_color)
         if rank:
             self.rank_pill(x + w - 16, y + 14, rank)
 
@@ -154,7 +156,7 @@ def render_progress_card(d):
 
     # ---------- hero tiles: power + merits ----------
     half = (W - 2 * PAD - 16) // 2
-    th = 124
+    th = 140 if (d.get('power_now') and d.get('power')) else 124
     if d.get("power") or d.get("power_gain"):
         pv = _fmt(d["power"]) if d.get("power") else f"+{_fmt(d.get('power_gain'))}"
         if d.get("power") and d.get("power_gain"):
@@ -163,7 +165,14 @@ def render_progress_card(d):
             sub = "no new peak this season"
         else:
             sub = None
-        c.tile(PAD, y, half, th, "Power", pv, GREEN if d.get("power_gain") else MUTED, sub, d.get("power_rank"))
+        sub2, sub2c = None, MUTED
+        now, peak = d.get("power_now"), d.get("power")
+        if now and peak:
+            diff = now - peak
+            when = f" · as of {d['power_now_date']}" if d.get("power_now_date") else ""
+            sub2 = f"Now {_fmt(now)} ({'+' if diff >= 0 else '−'}{_fmt(abs(diff))} vs peak){when}"
+            sub2c = RED if diff < 0 else GREEN
+        c.tile(PAD, y, half, th, "Power", pv, GREEN, sub, d.get("power_rank"), sub2=sub2, sub2_color=sub2c)
     if d.get("merits"):
         sub = f"{d['merits_pct']} of power" if d.get("merits_pct") else None
         c.tile(PAD + half + 16, y, half, th, "Merits", d["merits"].lstrip("+"), RED, sub, d.get("merits_rank"))
