@@ -156,10 +156,32 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # REQUIRED HELPERS (FIXES ALL CRASHES)
 # ============================================================
 
+def _bot_admins_db():
+    conn = sqlite3.connect(DB)
+    conn.execute("CREATE TABLE IF NOT EXISTS bot_admins (user_id TEXT PRIMARY KEY, added_at TEXT, added_by TEXT)")
+    return conn
+
+
+def bot_admin_ids():
+    """Discord user IDs (ints) the owner picked as bot admins (not including the owner)."""
+    try:
+        conn = _bot_admins_db()
+        rows = conn.execute("SELECT user_id FROM bot_admins").fetchall()
+        conn.close()
+        return {int(r[0]) for r in rows}
+    except Exception as e:
+        log_error(f"[BOT ADMINS] read failed: {e}")
+        return set()
+
+
+def is_bot_admin(user_id):
+    """Admin = the owner, or someone the owner added with /botadmin. Discord's own Administrator permission
+    no longer counts."""
+    return user_id == OWNER_ID or user_id in bot_admin_ids()
+
+
 def has_admin(inter):
-    if inter.user.id == OWNER_ID:
-        return True
-    return any(r.permissions.administrator for r in inter.user.roles)
+    return is_bot_admin(inter.user.id)
 
 def parse_datetime(input_str):
     input_str = input_str.strip()
@@ -3966,9 +3988,8 @@ async def newseason(inter: discord.Interaction):
 # ============================================================
 
 @bot.tree.command(name="editseason", description="Edit an existing season's name or start date")
-@app_commands.default_permissions(administrator=True)
 async def editseason(inter: discord.Interaction):
-    if not inter.user.guild_permissions.administrator and inter.user.id != OWNER_ID:
+    if not is_bot_admin(inter.user.id):
         return await inter.response.send_message("❌ Admin only.", ephemeral=True)
 
     seasons = db_get_all_seasons()
@@ -4045,9 +4066,7 @@ async def editseason(inter: discord.Interaction):
 @bot.command(name="editseason")
 async def editseason_text(ctx):
     """[ADMIN ONLY] Edit a season's name, start date, or end date. Shows a season picker."""
-    is_admin = ctx.author.id == OWNER_ID or (
-        ctx.guild and ctx.author.guild_permissions.administrator
-    )
+    is_admin = is_bot_admin(ctx.author.id)
     if not is_admin:
         return await ctx.send("❌ Admin only.")
 
@@ -4127,9 +4146,8 @@ async def editseason_text(ctx):
 # ============================================================
 
 @bot.tree.command(name="deleteseason", description="Delete a season and all its progress data")
-@app_commands.default_permissions(administrator=True)
 async def deleteseason(inter: discord.Interaction):
-    if not inter.user.guild_permissions.administrator and inter.user.id != OWNER_ID:
+    if not is_bot_admin(inter.user.id):
         return await inter.response.send_message("❌ Admin only.", ephemeral=True)
 
     seasons = db_get_all_seasons()
@@ -4197,9 +4215,8 @@ async def deleteseason(inter: discord.Interaction):
 
 
 @bot.tree.command(name="removeseason", description="Delete a season and all its progress data (alias of /deleteseason)")
-@app_commands.default_permissions(administrator=True)
 async def removeseason(inter: discord.Interaction):
-    if not inter.user.guild_permissions.administrator and inter.user.id != OWNER_ID:
+    if not is_bot_admin(inter.user.id):
         return await inter.response.send_message("❌ Admin only.", ephemeral=True)
 
     seasons = db_get_all_seasons()
@@ -5309,10 +5326,9 @@ class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
 
 
 @bot.tree.command(name="cleandata", description="Delete data before or after a specific date")
-@app_commands.default_permissions(administrator=True)
 async def cleandata_slash(interaction: discord.Interaction):
     """Delete data - Admin only"""
-    if not interaction.user.guild_permissions.administrator:
+    if not is_bot_admin(interaction.user.id):
         return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     
     modal = CleanupModal()
@@ -5322,7 +5338,7 @@ async def cleandata_slash(interaction: discord.Interaction):
 @bot.command(name="cleandata")
 async def cleandata_text(ctx):
     """[ADMIN ONLY] Use /cleandata slash command instead"""
-    if not ctx.author.guild_permissions.administrator:
+    if not is_bot_admin(ctx.author.id):
         return await ctx.send("❌ Admin only.")
     await ctx.send("Use the slash command `/cleandata` instead!")
 
@@ -7016,7 +7032,7 @@ def _ask_safe_calculate(expression):
 
 
 def _ask_is_admin(ctx):
-    return ctx.author.id == OWNER_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
+    return is_bot_admin(ctx.author.id)
 
 
 def _ask_parse_event_selector(tool_input):
@@ -8406,6 +8422,15 @@ async def _ask_impl(ctx, *, query: str = None):
         "as an exact ISO datetime instead of leaving it out, and the action will be queued "
         "rather than run right away. Use list_queued_tasks to show what's queued, "
         "cancel_queued_task to cancel one by ID, and edit_queued_task_time to reschedule one.\n\n"
+        "CREATING EVENTS / REMINDERS — ASK FOR WHAT'S MISSING: when a bot admin asks to create an event or "
+        "reminder and details are missing, don't guess and don't call the tool yet. Ask ONE message with a short "
+        "numbered list of ONLY the missing questions, each with its default in brackets so they can answer "
+        "'default'. The possible questions: (1) name, (2) date, (3) time in UTC, (4) how many minutes before to "
+        "remind, or 'at the exact time' [at the exact time], (5) which channel [the events channel; 'here' = this "
+        "channel], (6) who to ping [the default role; or 'me', a person or a role], (7) does it repeat, and if so "
+        "every how many hours and until when. If they already gave something, don't ask it again. When they "
+        "answer, create it straight away and confirm in one line what was set. If the person is NOT a bot admin, "
+        "tell them only bot admins can add events and to ask Rekz to add them with /botadmin.\n\n"
         "REPEATING EVENTS: for anything that repeats on a fixed interval ('every 84 hours', "
         "'every 3.5 days', 'daily at 13 UTC') use add_recurring_event ONCE — never loop add_event. "
         "If it should run until another event on the list ('until the kvk summary'), pass that "
@@ -8416,7 +8441,7 @@ async def _ask_impl(ctx, *, query: str = None):
         "new_channel_id / reset_channel to post an event's reminder in a specific channel instead "
         "of the default events channel. 'in this channel' / 'here' = pass channel_id 'here'; a "
         "#channel mention <#123> gives its ID. For a quick personal reminder ('create a reminder "
-        "for me in this channel at 14 UTC') don't interrogate the user: name it 'Reminder' unless "
+        "for me in this channel at 14 UTC') name it 'Reminder' unless "
         "they gave a name, use today's date (or tomorrow if that time already passed), set "
         "ping_at_start true (reminder_minutes 0) so it pings exactly at that time, "
         "ping the asker with tag_user_id (their user ID) if they said 'me', and just do it. "
@@ -8808,7 +8833,7 @@ async def _ask_bulk_add_events(ctx, raw_text):
     year if the date has already passed this year). Defaults to 12:00 UTC and no
     reminder since only dates are given, not times.
     """
-    if ctx.author.id != OWNER_ID and not (ctx.guild and ctx.author.guild_permissions.administrator):
+    if not is_bot_admin(ctx.author.id):
         return await ctx.send("❌ Only admins can bulk-add events.")
 
     import re as _re_ev
@@ -9972,6 +9997,40 @@ async def status_cmd(inter: discord.Interaction):
     await inter.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="botadmin", description="Owner: choose who counts as a bot admin (add / remove / list)")
+@app_commands.describe(action="What to do", user="The member (for add / remove)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+    app_commands.Choice(name="list", value="list"),
+])
+async def botadmin_cmd(inter: discord.Interaction, action: app_commands.Choice[str], user: discord.Member = None):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Only the owner can change who the bot admins are.", ephemeral=True)
+    act = action.value
+    if act == "list":
+        ids = sorted(bot_admin_ids())
+        body = "\n".join(f"<@{i}>" for i in ids) or "nobody yet"
+        return await inter.response.send_message(f"🛡️ Bot admins (besides you):\n{body}", ephemeral=True,
+                                                 allowed_mentions=discord.AllowedMentions.none())
+    if user is None:
+        return await inter.response.send_message("❌ Pick a member in the `user` field.", ephemeral=True)
+    if user.bot or user.id == OWNER_ID:
+        return await inter.response.send_message("❌ Pick a regular member (you're already the owner).", ephemeral=True)
+    conn = _bot_admins_db()
+    if act == "add":
+        conn.execute("INSERT OR REPLACE INTO bot_admins VALUES (?,?,?)",
+                     (str(user.id), datetime.utcnow().isoformat(), str(inter.user.id)))
+        msg = f"✅ {user.mention} is now a bot admin: they can create and manage events/reminders and use the admin commands."
+    else:
+        conn.execute("DELETE FROM bot_admins WHERE user_id=?", (str(user.id),))
+        msg = f"✅ {user.mention} is no longer a bot admin."
+    conn.commit()
+    conn.close()
+    silent_backup()
+    await inter.response.send_message(msg, allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.tree.command(name="events", description="List upcoming events with their reminder channel and who gets pinged")
 async def events_cmd(inter: discord.Interaction):
     now = datetime.utcnow()
@@ -10008,7 +10067,7 @@ async def events_cmd(inter: discord.Interaction):
 @app_commands.describe(channel="Channel the reminders should post in", name_contains="Only events whose name contains this (blank = all upcoming)",
                        reset="Send them back to the default events channel instead")
 async def eventchannel_cmd(inter: discord.Interaction, channel: discord.TextChannel, name_contains: str = "", reset: bool = False):
-    if not (inter.user.id == OWNER_ID or inter.user.guild_permissions.administrator):
+    if not is_bot_admin(inter.user.id):
         return await inter.response.send_message("❌ Admins only.", ephemeral=True)
     perms = channel.permissions_for(inter.guild.me)
     if not reset and not (perms.view_channel and perms.send_messages):
@@ -11005,7 +11064,6 @@ class SettingValueModal(discord.ui.Modal):
 
 
 @bot.tree.command(name="settings", description="View and change the bot's settings (admin only)")
-@app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 async def settings_command(inter: discord.Interaction):
     if not has_admin(inter):
@@ -11881,9 +11939,7 @@ async def serverupdate(ctx):
     Expected filename format: {server_num}_{start_date}_{end_date}.xlsx
     Admin only.
     """
-    is_admin = ctx.author.id == OWNER_ID or (
-        ctx.guild and ctx.author.guild_permissions.administrator
-    )
+    is_admin = is_bot_admin(ctx.author.id)
     if not is_admin:
         return await ctx.send("❌ Only admins can update server data.")
 
