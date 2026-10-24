@@ -10440,12 +10440,7 @@ class AddEventModal(Modal, title="➕ Add Event"):
                 ephemeral=True
             )
 
-@bot.tree.command(name="addevent", description="Add a custom event")
-async def addevent(inter: discord.Interaction):
-    if inter.user.id != OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
-
-    await inter.response.send_modal(AddEventModal())
+# (the old modal-based /addevent was replaced by the form version above)
 
 
 # ============================================================
