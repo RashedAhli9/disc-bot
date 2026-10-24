@@ -932,3 +932,71 @@ def render_scoreboard_card(d):
     c.finish(max(y, 200)).save(out, "PNG", optimize=True)
     out.seek(0)
     return out
+
+
+# ============================================================
+# TABLE CARD (e.g. !servertop) - splits into several images when long
+# ============================================================
+def render_table_pages(d, per_page=25):
+    """d: title, subtitle, columns: [(header, 'l'|'r', x_offset_px)], rows: [tuple of strings],
+    bar_col (index into row of a numeric string to draw as a bar, optional), accent.
+    Returns a list of BytesIO PNGs (one per `per_page` rows)."""
+    rows = d["rows"]
+    accent = d.get("accent") or BLUE
+    pages = [rows[i:i + per_page] for i in range(0, len(rows), per_page)] or [[]]
+    bar_col = d.get("bar_col")
+    nums = []
+    if bar_col is not None:
+        for r in rows:
+            try:
+                nums.append(float(str(r[bar_col]).replace(",", "")))
+            except Exception:
+                nums.append(0.0)
+    top = max(nums) if nums else 1.0
+    outs = []
+    for pi, chunk in enumerate(pages):
+        c = _Canvas(300 + len(chunk) * 46 + 200)
+        y = PAD
+        c.rect(PAD, y, W - 2 * PAD, 96, PANEL)
+        c.rect(PAD, y + 20, 5, 56, accent, r=3)
+        c.text(PAD + 28, y + 22, d.get("title", ""), "b", 28, TEXT)
+        c.text(PAD + 28, y + 62, d.get("subtitle", ""), "r", 15, MUTED)
+        if len(pages) > 1:
+            pg = f"Page {pi + 1}/{len(pages)}"
+            pw = c.text_w(pg, "b", 13) + 28
+            c.rect(W - PAD - 28 - pw, y + 34, pw, 28, PANEL2, r=14)
+            c.text(W - PAD - 28 - pw / 2, y + 48, pg, "b", 13, TEXT, anchor="mm")
+        y += 96 + 16
+        rh = 46
+        ph = 56 + len(chunk) * rh + 8
+        c.rect(PAD, y, W - 2 * PAD, ph, PANEL)
+        for header, align, x in d["columns"]:
+            c.text(PAD + x, y + 28, header.upper(), "s", 12, MUTED, anchor="lm" if align == "l" else "rm")
+        ry = y + 50
+        for k, row in enumerate(chunk):
+            idx = pi * per_page + k
+            if k % 2 == 1:
+                c.rect(PAD + 10, ry - 2, W - 2 * PAD - 20, rh - 4, (27, 31, 44), r=10)
+            for (header, align, x), cell in zip(d["columns"], row):
+                txt = str(cell)
+                weight, size, col = ("b", 16, TEXT) if header.lower() in ("name", "alliance") else ("s", 16, TEXT)
+                if header.lower() == "rank":
+                    col = MUTED
+                if align == "l":
+                    nm = _fit(c, txt, weight, size, 300) if header.lower() in ("name", "alliance") else (txt, size)
+                    c.text(PAD + x, ry + 20, nm[0], weight, nm[1], col, anchor="lm")
+                else:
+                    c.text(PAD + x, ry + 20, txt, weight, size, col, anchor="rm")
+            if bar_col is not None:
+                c.bar(PAD + d.get("bar_x", 560), ry + 14, d.get("bar_w", 120), 12, nums[idx] / top if top else 0, accent)
+            ry += rh
+        y += ph + 16
+        if d.get("footer"):
+            c.text(PAD + 4, y + 2, d["footer"], "r", 13, MUTED)
+            y += 24
+        y += 10
+        out = io.BytesIO()
+        c.finish(max(y, 200)).save(out, "PNG", optimize=True)
+        out.seek(0)
+        outs.append(out)
+    return outs

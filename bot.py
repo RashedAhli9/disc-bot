@@ -5459,7 +5459,7 @@ async def forcefetch(ctx):
     embed.add_field(name="💾 Cache", value=f"All data cached for 3 days", inline=False)
     embed.set_footer(text=f"Fetched: {start_date} → {today}")
     
-    await ctx.send(embed=embed)
+    await send_embed_card(ctx.send, embed)
 
     # Also check whether the bot's status/presence date needs updating, since forcefetch
     # is often run specifically because someone noticed new data is out but the status
@@ -5581,7 +5581,7 @@ async def loadhistory(ctx, mode: str = None):
     embed.add_field(name="✅ Status", value="Complete database created!\n\n🎯 You can now use `!gains` with dates from this entire range!", inline=False)
     embed.set_footer(text="!gains is now fully powered with all available historical data")
     
-    await ctx.send(embed=embed)
+    await send_embed_card(ctx.send, embed)
     log_info(f"[LOADHISTORY] Complete! Mode={load_mode}, Saved {saved_count}, Skipped {skipped_count} from {start.isoformat()} to {today.isoformat()}")
 
 
@@ -5684,7 +5684,7 @@ async def datahistory(ctx):
         )
         embed.set_footer(text="You can use any date within this range with !gains command")
         
-        await ctx.send(embed=embed)
+        await send_embed_card(ctx.send, embed)
         log_info(f"[DATAHISTORY] {oldest_date} → {newest_date} ({total_snapshots} snapshots)")
         
     except Exception as e:
@@ -5759,7 +5759,7 @@ class CleanupModal(discord.ui.Modal, title="🗑️ Delete Data"):
             embed.add_field(name="🎯 Mode", value=mode.capitalize(), inline=True)
             embed.add_field(name="🗑️ Rows Deleted", value=str(deleted_count), inline=True)
             
-            await interaction.followup.send(embed=embed)
+            await send_embed_card(interaction.followup.send, embed)
             log_info(f"[CLEANUP] Deleted {deleted_count} snapshots {mode_display}")
             
         except Exception as e:
@@ -12117,6 +12117,20 @@ async def cmd_servertop(message, n):
 
     title = f"🏆 Top {n} Servers by Highest Power (Gen-2 Pool)"
     table_body = "\n".join(table_lines)
+
+    # Image card(s), 25 rows each; the code-block text below is the fallback.
+    try:
+        pngs = await asyncio.to_thread(card_render.render_table_pages, {
+            "title": f"Top {n} Servers by Highest Power", "subtitle": "Gen-2 Pool  ·  source: callofstats.com",
+            "columns": [("Rank", "l", 28), ("Server", "l", 110), ("Alliance", "l", 230), ("Lords", "r", 560), ("Power", "r", 900)],
+            "rows": [(f"#{rk}", sv, al, lo, pw.strip()) for rk, sv, al, lo, pw in processed],
+            "bar_col": 4, "bar_x": 600, "bar_w": 150, "accent": card_render.BLUE})
+        files = [discord.File(b, filename=f"servertop_{i + 1}.png") for i, b in enumerate(pngs)]
+        await message.channel.send(files=files[:10])
+        log_info(f"[SERVERTOP] Displayed top {n} servers (image)")
+        return
+    except Exception as e:
+        log_info(f"[SERVERTOP] image failed, using text: {type(e).__name__}: {e}")
 
     # Wrap in code block for monospace alignment
     full_msg = f"{title}\n```\n{table_body}\n```"
