@@ -9998,6 +9998,180 @@ async def status_cmd(inter: discord.Interaction):
     await inter.response.send_message(embed=embed)
 
 
+# ============================================================
+# /addevent FORM + RIGHT-CLICK MENUS (newer Discord features)
+# ============================================================
+ADD_EVENT_LEADS = [
+    ("At the exact time", "start"), ("No reminder", "none"), ("5 minutes before", "5"),
+    ("10 minutes before", "10"), ("15 minutes before", "15"), ("30 minutes before", "30"),
+    ("1 hour before", "60"), ("1 day before", "1440"),
+]
+
+
+class AddEventView(discord.ui.View):
+    """Second step of /addevent: pick the channel, who to ping and when to remind, then press Create."""
+
+    def __init__(self, owner_id, name, first_dt, repeat_hours, until_dt):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.name = name
+        self.first_dt = first_dt          # naive UTC
+        self.repeat_hours = repeat_hours  # float or None
+        self.until_dt = until_dt          # naive UTC or None
+        self.channel_id = None
+        self.tag = None
+        self.lead = "start"
+        lead_select = self.lead_select
+        lead_select.options = [discord.SelectOption(label=l, value=v, default=(v == "start")) for l, v in ADD_EVENT_LEADS]
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.owner_id:
+            await inter.response.send_message("This form belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text], min_values=0, max_values=1,
+                       placeholder="Channel for the reminder (default: events channel)", row=0)
+    async def pick_channel(self, inter: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.channel_id = select.values[0].id if select.values else None
+        await inter.response.defer()
+
+    @discord.ui.select(cls=discord.ui.MentionableSelect, min_values=0, max_values=5,
+                       placeholder="Who to ping (default: the usual role)", row=1)
+    async def pick_ping(self, inter: discord.Interaction, select: discord.ui.MentionableSelect):
+        roles = [f"<@&{v.id}>" for v in select.values if isinstance(v, discord.Role)]
+        users = [f"<@{v.id}>" for v in select.values if not isinstance(v, discord.Role)]
+        self.tag = " ".join(roles + users) or None
+        await inter.response.defer()
+
+    @discord.ui.select(placeholder="When to remind", row=2, options=[discord.SelectOption(label="x", value="x")])
+    async def lead_select(self, inter: discord.Interaction, select: discord.ui.Select):
+        self.lead = select.values[0]
+        for opt in select.options:
+            opt.default = (opt.value == self.lead)
+        await inter.response.edit_message(view=self)
+
+    @discord.ui.button(label="Create", style=discord.ButtonStyle.success, row=3)
+    async def create(self, inter: discord.Interaction, button: discord.ui.Button):
+        if not is_bot_admin(inter.user.id):
+            return await inter.response.send_message("❌ Only bot admins can create events.", ephemeral=True)
+        ch = None
+        if self.channel_id:
+            ch = inter.guild.get_channel(self.channel_id)
+            perms = ch.permissions_for(inter.guild.me) if ch else None
+            if not ch or not (perms.view_channel and perms.send_messages):
+                return await inter.response.send_message(
+                    "❌ I can't post in that channel — give me View Channel + Send Messages there, or pick another.",
+                    ephemeral=True)
+        occurrences = []
+        if self.repeat_hours:
+            if not self.until_dt:
+                return await inter.response.send_message("❌ You set it to repeat, but no `until` time — run /addevent again with `until`.", ephemeral=True)
+            cur = self.first_dt
+            while cur <= self.until_dt and len(occurrences) <= 60:
+                occurrences.append(cur)
+                cur += timedelta(hours=self.repeat_hours)
+            if len(occurrences) > 60:
+                return await inter.response.send_message("❌ That's more than 60 events — shorten the `until` time.", ephemeral=True)
+        else:
+            occurrences = [self.first_dt]
+        reminder = int(self.lead) if self.lead.isdigit() else 0
+        at_start = self.lead == "start"
+        existing = {(r[1].strip().lower(), r[2]) for r in db_get_events()}
+        snap = db_events_snapshot()
+        added = 0
+        for occ in occurrences:
+            if (self.name.strip().lower(), occ.isoformat()) in existing:
+                continue
+            db_add_event(self.name, occ.isoformat(), reminder, self.tag, backup=False,
+                         channel_id=ch.id if ch else None, at_start=at_start)
+            added += 1
+        if added:
+            _ask_undo_stack.append({"cols": snap[0], "rows": snap[1], "tool": "/addevent", "who": inter.user.display_name})
+            del _ask_undo_stack[:-ASK_UNDO_KEEP]
+            silent_backup()
+        for child in self.children:
+            child.disabled = True
+        first = occurrences[0]
+        lead_txt = dict((v, l) for l, v in ADD_EVENT_LEADS).get(self.lead, self.lead).lower()
+        where = f"<#{ch.id}>" if ch else "the events channel"
+        rep = f" · repeats every {self.repeat_hours:g}h until <t:{_unix_utc(self.until_dt)}:f>" if self.repeat_hours else ""
+        await inter.response.edit_message(
+            content=(f"✅ Added **{added}** × **{self.name}** — first <t:{_unix_utc(first)}:F>{rep}\n"
+                     f"Reminder: {lead_txt} · posts in {where} · pings {self.tag or 'the usual role'}"
+                     + (f"\n({len(occurrences) - added} already existed and were skipped.)" if added != len(occurrences) else "")),
+            view=self)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    async def cancel(self, inter: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await inter.response.edit_message(content="Cancelled — nothing was added.", view=self)
+        self.stop()
+
+
+@bot.tree.command(name="addevent", description="Create an event or reminder with a form (bot admins)")
+@app_commands.describe(
+    name="What the event is called",
+    when="When it starts — type @time and pick it (shows in everyone's own timezone)",
+    repeat_hours="Repeat every N hours (optional)",
+    until="Last time it should repeat — type @time (needed if you set repeat_hours)",
+)
+async def addevent_cmd(inter: discord.Interaction, name: str, when: app_commands.Timestamp,
+                       repeat_hours: app_commands.Range[float, 1, 720] = None,
+                       until: app_commands.Timestamp = None):
+    if not is_bot_admin(inter.user.id):
+        return await inter.response.send_message("❌ Only bot admins can create events. Ask Rekz to add you with /botadmin.", ephemeral=True)
+    first = when.astimezone(timezone.utc).replace(tzinfo=None)
+    until_dt = until.astimezone(timezone.utc).replace(tzinfo=None) if until else None
+    if first < datetime.utcnow():
+        return await inter.response.send_message("❌ That time already passed — pick a future time.", ephemeral=True)
+    if repeat_hours and not until_dt:
+        return await inter.response.send_message("❌ You set repeat_hours but no `until` — add `until` (type @time).", ephemeral=True)
+    view = AddEventView(inter.user.id, name.strip(), first, repeat_hours, until_dt)
+    await inter.response.send_message(
+        f"📅 **{name.strip()}** — <t:{_unix_utc(first)}:F> (<t:{_unix_utc(first)}:R>)\n"
+        f"Pick the channel, who to ping and when to remind (all optional), then press **Create**.",
+        view=view, ephemeral=True)
+
+
+def _member_account_id(member):
+    for role in getattr(member, "roles", []):
+        if role.name.isdigit():
+            return role.name
+    return None
+
+
+@bot.tree.context_menu(name="Progress card")
+async def menu_progress_card(inter: discord.Interaction, member: discord.Member):
+    acct = _member_account_id(member)
+    if not acct:
+        return await inter.response.send_message(f"❌ {member.display_name} doesn't have a numeric account-ID role.", ephemeral=True)
+    await inter.response.defer()
+    try:
+        ctx = await commands.Context.from_interaction(inter)
+        await progress.callback(ctx, user_input=acct)
+    except Exception as e:
+        log_info(f"[MENU] progress card failed: {type(e).__name__}: {e}")
+        await inter.followup.send(f"❌ Couldn't build the card: {e}", ephemeral=True)
+
+
+@bot.tree.context_menu(name="Rate this lord")
+async def menu_rate_lord(inter: discord.Interaction, member: discord.Member):
+    if inter.user.id == member.id:
+        query = "rate my stats this season"
+    else:
+        query = f"rate {member.display_name}'s stats this season (their Discord mention is <@{member.id}>)"
+    await inter.response.defer()
+    try:
+        ctx = await commands.Context.from_interaction(inter)
+        await ask.callback(ctx, query=query)
+    except Exception as e:
+        log_info(f"[MENU] rate failed: {type(e).__name__}: {e}")
+        await inter.followup.send(f"❌ Couldn't rate them: {e}", ephemeral=True)
+
+
 @bot.tree.command(name="botadmin", description="Owner: choose who counts as a bot admin (add / remove / list)")
 @app_commands.describe(action="What to do", user="The member (for add / remove)")
 @app_commands.choices(action=[
