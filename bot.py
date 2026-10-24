@@ -9712,15 +9712,17 @@ async def chart_command(ctx, player: str = None, stat: str = None, season_name: 
 
     stat_label = stat.replace("_", " ").title()
 
-    plt.style.use("dark_background")
+    card_render.apply_chart_theme()
+    _cc = card_render.chart_colors()
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(dates, values, marker="o", linewidth=2.5, color="#5865F2", markersize=5)
-    ax.fill_between(range(len(dates)), values, alpha=0.15, color="#5865F2")
-    ax.set_title(f"{lord_name} — {stat_label} — {season_name_display}", fontsize=14, fontweight="bold", pad=15)
-    ax.set_xlabel("Date")
-    ax.set_ylabel(stat_label)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{int(x):,}"))
-    ax.grid(True, alpha=0.2)
+    ax.plot(dates, values, linewidth=2.8, color=_cc[0])
+    ax.fill_between(range(len(dates)), values, alpha=0.14, color=_cc[0])
+    ax.scatter([len(dates) - 1], [values[-1]], s=60, color=_cc[0], zorder=5)
+    ax.annotate(f"{values[-1]:,}", (len(dates) - 1, values[-1]), textcoords="offset points", xytext=(-6, 10),
+                ha="right", fontsize=11, fontweight="bold", color=card_render._hex(card_render.TEXT))
+    ax.set_title(f"{card_render.chart_safe(lord_name)}  ·  {stat_label}", fontsize=16, fontweight="bold", loc="left", pad=26)
+    ax.text(0, 1.03, season_name_display, transform=ax.transAxes, fontsize=10, color=card_render._hex(card_render.MUTED))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(card_render.compact_number))
     fig.autofmt_xdate(rotation=45)
 
     # Thin out x-axis labels if there are a lot of data points, so they don't overlap
@@ -9792,9 +9794,9 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
 
     log_info(f"[GROUPCHART] stat={stat_key} season_id={season_id} ({season_name_display}) checking {len(lords)} lords")
 
-    plt.style.use("dark_background")
+    card_render.apply_chart_theme()
     fig, ax = plt.subplots(figsize=(11, 7))
-    color_cycle = plt.cm.tab10.colors
+    color_cycle = card_render.chart_colors()
     plotted_any = False
     skipped = []
     row_counts = []
@@ -9823,8 +9825,8 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
             skipped.append(lord_name)
             continue
 
-        ax.plot(dates, values, marker="o", linewidth=2, markersize=3,
-                color=color_cycle[i % len(color_cycle)], label=lord_name)
+        ax.plot(dates, values, linewidth=2.4, color=color_cycle[i % len(color_cycle)], label=card_render.chart_safe(lord_name))
+        ax.scatter([len(dates) - 1], [values[-1]], s=36, color=color_cycle[i % len(color_cycle)], zorder=5)
         plotted_any = True
     conn.close()
 
@@ -9841,12 +9843,10 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
         return False
 
     stat_label = stat.replace("_", " ").title()
-    ax.set_title(f"Group {stat_label} — {season_name_display}", fontsize=14, fontweight="bold", pad=15)
-    ax.set_xlabel("Date")
-    ax.set_ylabel(stat_label)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{int(x):,}"))
-    ax.grid(True, alpha=0.2)
-    ax.legend(loc="upper left", fontsize=9, framealpha=0.3)
+    ax.set_title(f"Group {stat_label}", fontsize=16, fontweight="bold", loc="left", pad=26)
+    ax.text(0, 1.03, season_name_display, transform=ax.transAxes, fontsize=10, color=card_render._hex(card_render.MUTED))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(card_render.compact_number))
+    ax.legend(loc="upper left", ncols=2 if len(lords) > 5 else 1)
     fig.autofmt_xdate(rotation=45)
 
     chart_path = f"/tmp/groupchart_{season_id}_{stat_key}.png"

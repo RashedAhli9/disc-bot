@@ -1000,3 +1000,67 @@ def render_table_pages(d, per_page=25):
         out.seek(0)
         outs.append(out)
     return outs
+
+
+# ============================================================
+# CHART THEME (matplotlib) - same colors and font as the cards
+# ============================================================
+CHART_PALETTE = [BLUE, ORANGE, GREEN, PURPLE, YELLOW, TEAL, RED, (255, 125, 200), (160, 170, 255)]
+
+
+def _hex(c):
+    return "#%02x%02x%02x" % tuple(c)
+
+
+def chart_colors():
+    return [_hex(c) for c in CHART_PALETTE]
+
+
+def compact_number(x, _pos=None):
+    """1_250_000 -> '1.25M', 3_900_000_000 -> '3.9B' for chart axes."""
+    a = abs(x)
+    if a >= 1e9:
+        return f"{x / 1e9:.1f}".rstrip("0").rstrip(".") + "B"
+    if a >= 1e6:
+        return f"{x / 1e6:.2f}".rstrip("0").rstrip(".") + "M"
+    if a >= 1e3:
+        return f"{x / 1e3:.0f}K"
+    return f"{x:,.0f}"
+
+
+def chart_safe(text):
+    """Name text for matplotlib: plain letters where possible, and characters the chart fonts lack are dropped
+    (matplotlib would draw empty boxes)."""
+    chain = _CHAINS["r"][:2]  # Inter + DejaVu are the chart fonts
+    out = []
+    for ch in unicodedata.normalize("NFKC", str(text)):
+        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
+            continue
+        if ch == " " or any(ord(ch) in _cmap(fp) for fp in chain):
+            out.append(ch)
+    return "".join(out).strip() or "?"
+
+
+def apply_chart_theme():
+    """Set matplotlib's look to match the image cards (call before creating a figure)."""
+    import matplotlib
+    from matplotlib import font_manager
+    for w in ("Inter-Regular.otf", "Inter-SemiBold.otf", "Inter-Bold.otf"):
+        try:
+            font_manager.fontManager.addfont(os.path.join(FONT_DIR, w))
+        except Exception:
+            pass
+    matplotlib.rcParams.update({
+        "font.family": ["Inter", "DejaVu Sans"],
+        "figure.facecolor": _hex(BG), "savefig.facecolor": _hex(BG),
+        "axes.facecolor": _hex(PANEL), "axes.edgecolor": _hex(TRACK), "axes.linewidth": 1.0,
+        "axes.spines.top": False, "axes.spines.right": False, "axes.spines.left": False,
+        "axes.labelcolor": _hex(MUTED), "axes.titlecolor": _hex(TEXT),
+        "axes.prop_cycle": matplotlib.cycler(color=chart_colors()),
+        "text.color": _hex(TEXT), "xtick.color": _hex(MUTED), "ytick.color": _hex(MUTED),
+        "xtick.labelsize": 10, "ytick.labelsize": 10,
+        "axes.grid": True, "axes.grid.axis": "y", "grid.color": _hex(TRACK), "grid.alpha": 0.7, "grid.linewidth": 0.8,
+        "legend.frameon": True, "legend.facecolor": _hex(PANEL2), "legend.edgecolor": _hex(TRACK),
+        "legend.labelcolor": _hex(TEXT), "legend.fontsize": 10,
+        "lines.solid_capstyle": "round",
+    })
