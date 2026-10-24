@@ -859,3 +859,76 @@ def render_embed_pages(d):
         buf.seek(0)
         out.append(buf)
     return out
+
+
+# ============================================================
+# SCOREBOARD CARD (whole group, graded)
+# ============================================================
+def render_scoreboard_card(d):
+    """d: title, subtitle, footer, rows: [{name, grade{letter,score}|None, power, merits, deads, healed,
+    deads_pct(0-1+)|None, level('good'|'mid'|'bad'|None), me(bool)}] already sorted best first."""
+    rows = d.get("rows") or []
+    c = _Canvas(2600)
+    y = PAD
+    c.rect(PAD, y, W - 2 * PAD, 96, PANEL)
+    c.rect(PAD, y + 20, 5, 56, YELLOW, r=3)
+    c.text(PAD + 28, y + 22, d.get("title", "Group Scoreboard"), "b", 30, TEXT)
+    c.text(PAD + 28, y + 62, d.get("subtitle", ""), "r", 15, MUTED)
+    letters = [r["grade"]["letter"] for r in rows if r.get("grade")]
+    if letters:
+        best = min(letters, key=lambda l: "SABCDF".index(l))
+        c.text(W - PAD - 28, y + 26, "TOP GRADE", "s", 12, MUTED, anchor="ra")
+        c.text(W - PAD - 28, y + 46, best, "b", 34, GRADE_COLORS.get(best, TEXT), anchor="ra")
+    y += 96 + 16
+
+    rh = 66
+    ph = 54 + len(rows) * rh + 10
+    c.rect(PAD, y, W - 2 * PAD, ph, PANEL)
+    cols = {"merits": 520, "deads": 690, "healed": 850}
+    c.text(PAD + 150, y + 26, "LORD", "s", 12, MUTED, anchor="lm")
+    c.text(cols["merits"], y + 26, "MERITS", "s", 12, MUTED, anchor="rm")
+    c.text(cols["deads"], y + 26, "DEADS", "s", 12, MUTED, anchor="rm")
+    c.text(cols["healed"], y + 26, "HEALED", "s", 12, MUTED, anchor="rm")
+    ry = y + 48
+    for i, r in enumerate(rows):
+        if r.get("me"):
+            c.rect(PAD + 10, ry - 2, W - 2 * PAD - 20, rh - 4, PANEL2, r=12)
+        rank = i + 1
+        medal = _icon(f"medal_{rank}", 28) if rank <= 3 else None
+        if medal:
+            c.im.paste(medal, (int((PAD + 22) * S), int((ry + 15) * S)), medal)
+        else:
+            c.text(PAD + 36, ry + 30, str(rank), "b", 15, MUTED, anchor="mm")
+        g = r.get("grade")
+        gx, gy = PAD + 92, ry + 30
+        if g:
+            gcol = GRADE_COLORS.get(g["letter"], MUTED)
+            rr = 20
+            c.d.ellipse([(gx - rr) * S, (gy - rr) * S, (gx + rr) * S, (gy + rr) * S],
+                        fill=tuple(int(PANEL[k] * 0.75 + gcol[k] * 0.25) for k in range(3)), outline=gcol, width=2 * S)
+            c.text(gx, gy - 1, g["letter"], "b", 22, gcol, anchor="mm")
+        else:
+            c.text(gx, gy, "–", "b", 20, MUTED, anchor="mm")
+        nm = _fit(c, r["name"], "b", 18, 210)
+        c.text(PAD + 150, ry + 24, nm[0], "b", nm[1], TEXT, anchor="lm")
+        if g:
+            c.text(PAD + 150, ry + 46, f"score {g['score']:.0f}", "r", 12, MUTED, anchor="lm")
+        c.text(cols["merits"], ry + 24, _fmt(r.get("merits", 0)), "b", 17, TEXT, anchor="rm")
+        c.text(cols["deads"], ry + 24, _fmt(r.get("deads", 0)), "b", 17, TEXT, anchor="rm")
+        c.text(cols["healed"], ry + 24, _fmt(r.get("healed", 0)), "b", 17, TEXT, anchor="rm")
+        if r.get("deads_pct") is not None:
+            col = {"good": GREEN, "mid": YELLOW, "bad": RED}.get(r.get("level"), MUTED)
+            c.bar(cols["deads"] - 100, ry + 42, 100, 8, r["deads_pct"], col)
+            c.text(W - PAD - 28, ry + 24, f"{min(r['deads_pct'], 9.99) * 100:.0f}%", "b", 15, col, anchor="rm")
+            c.text(W - PAD - 28, ry + 44, "of deads req", "r", 11, MUTED, anchor="rm")
+        ry += rh
+    y += ph + 16
+    if d.get("footer"):
+        for line in _wrap(c, d["footer"], "r", 13, W - 2 * PAD - 8):
+            c.text(PAD + 4, y + 2, line, "r", 13, MUTED)
+            y += 20
+    y += 14
+    out = io.BytesIO()
+    c.finish(max(y, 200)).save(out, "PNG", optimize=True)
+    out.seek(0)
+    return out

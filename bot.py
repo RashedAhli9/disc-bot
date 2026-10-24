@@ -9864,6 +9864,70 @@ async def group_chart_command(ctx, stat: str = None, season_name: str = None):
     return True
 
 
+def _signed_stat(raw):
+    """'+1,234' / '-500' / None -> int, keeping the sign (unlike _parse_stat_str, which drops it)."""
+    try:
+        return int(str(raw).replace("+", "").replace(",", "").strip())
+    except Exception:
+        return 0
+
+
+@bot.command(name="scoreboard", aliases=["sb", "grades"])
+async def scoreboard(ctx):
+    """Everyone in the group graded S-F on one image. Usage: !scoreboard"""
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No season active. Use `/newseason` to start one.")
+    season_id, season_name, start_date, _c = season
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+    async with ctx.typing():
+        my_aid = _member_account_id(ctx.author)
+        rows, latest = [], ""
+
+        async def one(lord):
+            aid = lord["account_id"]
+            conn = db_connect(DB_PROGRESS)
+            row = conn.execute("SELECT MAX(data_date) FROM season_progress WHERE season_id = ? AND account_id = ?",
+                               (season_id, aid)).fetchone()
+            conn.close()
+            dd = row[0] if row else None
+            stats = db_get_season_progress(season_id, aid, dd) if dd else None
+            if not stats:
+                return {"name": lord["name"], "grade": None, "merits": 0, "deads": 0, "healed": 0, "aid": aid, "dd": None}
+            hp = _parse_stat_num_global(db_get_latest_field_value(season_id, aid, "highest_power")) or None
+            merits = _signed_stat(stats.get("merits"))
+            deaths = _signed_stat(stats.get("deads_gain"))
+            healed = _signed_stat(stats.get("t45_healed")) or _signed_stat(stats.get("healed_gain"))
+            prog = deads_progress(deaths, hp, start_date, dd, season_id) if hp else None
+            dead_g = _signed_stat(stats.get("t45_dead")) or deaths
+            grade = await member_grade(merits, dead_g, hp, prog)
+            return {"name": stats.get("lord_name") or lord["name"], "grade": grade, "merits": merits, "deads": deaths,
+                    "healed": healed, "aid": aid, "dd": dd,
+                    "deads_pct": (prog["deaths"] / prog["required"]) if prog and prog["required"] else None,
+                    "level": prog["level"] if prog else None}
+
+        rows = await asyncio.gather(*[one(l) for l in lords])
+        rows = list(rows)
+        for r in rows:
+            r["me"] = bool(my_aid and r["aid"] == my_aid)
+        rows.sort(key=lambda r: (r["grade"]["score"] if r["grade"] else -1, r["merits"]), reverse=True)
+        latest = max((r["dd"] for r in rows if r["dd"]), default=start_date)
+        try:
+            png = await asyncio.to_thread(card_render.render_scoreboard_card, {
+                "title": "Group Scoreboard", "subtitle": f"{season_name}  ·  {start_date} → {latest}",
+                "rows": rows,
+                "footer": "Grade = average of deads pace vs the season requirement and merits/deads as % of power vs the "
+                          "#25 lord of the 7 strongest servers. S 90+, A 75+, B 60+, C 45+, D 30+, F below."})
+        except Exception as e:
+            log_info(f"[SCOREBOARD] image failed: {type(e).__name__}: {e}")
+            text = "\n".join(f"{i + 1}. {r['name']}: {r['grade']['letter'] if r['grade'] else '-'} "
+                             f"(merits {r['merits']:,}, deads {r['deads']:,})" for i, r in enumerate(rows))
+            return await ctx.send(f"```Group Scoreboard — {season_name}\n{text}```")
+    await ctx.send(file=discord.File(png, filename="scoreboard.png"))
+
+
 @bot.command(name="compare")
 async def compare(ctx, user1: str = None, user2: str = None):
     """Compare two lords side by side. Usage: !compare truvix rekz (or !compare 16322115 12345678)"""
