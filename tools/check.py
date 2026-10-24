@@ -57,5 +57,12 @@ if r.returncode != 0:
 else:
     print(r.stdout.strip().splitlines()[-1])
 
+# 5. parser tests
+r = subprocess.run([sys.executable, "tests/test_parsers.py"], capture_output=True, text=True, env=env, timeout=180, cwd=ROOT)
+if r.returncode != 0:
+    bad("tests failed:\n" + (r.stderr or r.stdout)[-1500:])
+else:
+    print("tests: OK")
+
 print("RESULT:", "FAILED" if fail else "OK")
 sys.exit(1 if fail else 0)
