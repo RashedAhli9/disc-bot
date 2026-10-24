@@ -6889,6 +6889,33 @@ async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
             stats, actual_end = await fetch_stats_with_fallback(account_id, start_date, end_ref)
         if not stats:
             return None
+        # highest_power isn't part of the per-date row — look it up so the deads requirement tier is known
+        if not stats.get("highest_power"):
+            try:
+                _hp = db_get_latest_field_value(season_id, account_id, "highest_power")
+                if _hp:
+                    stats["highest_power"] = _hp
+            except Exception:
+                pass
+        _extras = []
+        _splits = [(k, _parse_stat_num_global(stats.get(f"{k}_merits"))) for k in
+                   ("infantry", "cavalry", "mage", "marksman", "other")]
+        if any(v for _, v in _splits):
+            _extras.append("merit split " + "/".join(f"{k} {v:,}" for k, v in _splits if v))
+        if _parse_stat_num_global(stats.get("t45_dead")):
+            _extras.append(f"T4/T5 units dead={_parse_stat_num_global(stats.get('t45_dead')):,}")
+        if _parse_stat_num_global(stats.get("t45_healed")):
+            _extras.append(f"T4/T5 units healed={_parse_stat_num_global(stats.get('t45_healed')):,}")
+        _tiers = [(t, _parse_stat_num_global(stats.get(f"{t}_gain"))) for t in ("t5", "t4", "t3")]
+        if any(v for _, v in _tiers):
+            _extras.append("kills by tier " + "/".join(f"{t.upper()} {v:,}" for t, v in _tiers if v))
+        _spent = [(r, _parse_stat_num_global(stats.get(f"{r}_spent"))) for r in ("gold", "wood", "ore", "mana")]
+        if any(v for _, v in _spent):
+            _extras.append("resources spent " + "/".join(f"{r} {abs(v):,}" for r, v in _spent if v))
+        _hpv = _parse_stat_num_global(stats.get("highest_power"))
+        if _hpv:
+            _extras.append(f"highest power={_hpv:,}")
+        _extra_txt = (" EXTRA DETAIL: " + "; ".join(_extras) + ".") if _extras else ""
         return (
             f"EXACT VERIFIED DATA (copy these numbers precisely, do not alter or round them) "
             f"for {stats.get('lord_name', account_id)}, season {season_name} "
@@ -6899,7 +6926,7 @@ async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
             f"healed={_parse_stat_num_global(stats.get('healed_gain')):,}, "
             f"gathered(gold/wood/ore/mana)={_parse_stat_num_global(stats.get('gold_gathered')):,}/"
             f"{_parse_stat_num_global(stats.get('wood_gathered')):,}/{_parse_stat_num_global(stats.get('ore_gathered')):,}/"
-            f"{_parse_stat_num_global(stats.get('mana_gathered')):,}. "
+            f"{_parse_stat_num_global(stats.get('mana_gathered')):,}.{_extra_txt} "
             f"{_ask_deads_line(stats, start_date, actual_end, season_id, is_current)} "
             f"If the user wants a rating, roast, analysis, or advice, use ONLY these exact numbers — "
             f"never substitute a different or rounded figure."
