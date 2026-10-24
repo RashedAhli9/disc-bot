@@ -6437,8 +6437,31 @@ def _ask_server_ranks(ctx, player_input):
         window = f" (server data covers {sd} to {ed}, {win_days} days)"
     except Exception:
         pass
-    lines.append(deads_requirement_line(lord.get("deaths") or 0, lord.get("highest_power") or 0, window,
-                                        win_days, int(get_setting("season_length_days")) if win_days else None))
+    # Does the uploaded server data actually cover THIS season? If it starts before the season did, its totals
+    # include last season, so its deaths/merits can't be compared with this season's requirement.
+    stale = False
+    try:
+        season = db_get_current_season()
+        if season and win_days:
+            season_start = date.fromisoformat(str(season[2])[:10])
+            season_day = (date.today() - season_start).days + 1
+            if sd < season_start - timedelta(days=1) or abs(win_days - season_day) > 2:
+                stale = True
+                lines.insert(1, (
+                    f"WARNING — MISMATCHED DATA: this !stop upload covers {sd} to {ed} ({win_days} days), but the current "
+                    f"season started {season_start} and we're only on day {season_day}. These totals include earlier days / "
+                    f"another season, so they are NOT this season's numbers. Do NOT use them for deads pace or the "
+                    f"requirement, and don't say '{win_days} days in'. Use get_player_stats for this season's pace; use "
+                    f"these ranks only as rough all-time-ish context, and tell the user the server upload is outdated "
+                    f"(an admin should re-run !serverupdate with a fresh Excel)."))
+    except Exception:
+        pass
+    if stale:
+        lines.append("DEADS REQUIREMENT: not computed from this upload (data window doesn't match the season) — use the "
+                     "DEADS REQUIREMENT line from get_player_stats.")
+    else:
+        lines.append(deads_requirement_line(lord.get("deaths") or 0, lord.get("highest_power") or 0, window,
+                                            win_days, int(get_setting("season_length_days")) if win_days else None))
     return "\n".join(lines), None
 
 
