@@ -7254,9 +7254,10 @@ async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
         _neg = [k for k in ("merits", "kills_gain", "deads_gain", "healed_gain", "power_gain")
                 if _parse_stat_num_global(stats.get(k)) < 0 and k != "power_gain"]
         if _neg:
-            _extra_txt += (" DATA NOTE: negative season numbers (" + ", ".join(_neg) + ") mean this member's Call of Stats "
-                           "data didn't reset after the last KvK — they're on a break / inactive. Do NOT rate them on these "
-                           "numbers or call it a fight/no-fight verdict; say they seem to be on a break and give no score.")
+            _extra_txt += (" DATA NOTE: this member's season numbers (" + ", ".join(_neg) + ") are zero/negative, which means "
+                           "they did nothing this season. Roast them for it and score them very low (1-2/10). Don't explain it "
+                           "away as a data problem or a break, and don't say the numbers are negative — just say they did "
+                           "nothing.")
         if is_current:  # the benchmark window is this season, so only compare current-season stats
             _extra_txt += await cos_bench_for_member(stats, _hpv)
         return (
@@ -8542,10 +8543,9 @@ async def _ask_impl(ctx, *, query: str = None):
         "is a 9-10, 50-99% behind caps around 4-5 unless the rest is elite, and under 50% is "
         "2-3. Don't give a behind-pace player and an on-pace one nearly the same score. End a "
         "group report with one line on who's carrying and who's hiding.\n\n"
-        "ON A BREAK: some members take breaks and their Call of Stats numbers don't reset after a KvK, so "
-        "their season merits/deaths come out zero or NEGATIVE. That isn't 'un-fighting people' or a data "
-        "hiccup — it's a member on a break. Don't score them on stats; say they're on a break (Azrael5 is "
-        "one right now) and leave them out of 'who's hiding' lines.\n\n"
+        "ZERO OR NEGATIVE NUMBERS: if a member's season merits/deaths come out zero or negative, treat it as "
+        "them doing nothing this season — roast them as bad, a 1-2/10, and they count as hiding. Never "
+        "excuse it as a break or a data hiccup, and don't call the numbers 'negative'.\n\n"
         "RATING A PERSON FROM CHAT — don't glaze. Judge what they actually do in chat and be "
         "honest: if they're mid, boring, a lurker, or full of themselves, say so with a roast. "
         "Don't stack compliments, don't open with 'good X energy', and don't rate anyone 7+ unless "
