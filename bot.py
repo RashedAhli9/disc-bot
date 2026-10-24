@@ -7112,6 +7112,39 @@ ASK_TOOLS = [
         "input_schema": {"type": "object", "properties": {}}
     },
     {
+        "name": "show_scoreboard",
+        "description": ("Post the GROUP SCOREBOARD image: everyone in the group graded S-F with merits, deads, healed "
+                         "and a deads-requirement bar. Use for 'grade everyone', 'who's doing best/worst', "
+                         "'scoreboard', 'group report', 'how is the group doing'. Renders its own message."),
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "show_benchmark",
+        "description": ("Post the season BENCHMARK card: the ratio cutoffs (#1/#10/#25/#50/#100) of the 7 strongest "
+                         "servers for deads, merits and healed, and where our group sits. Renders its own message."),
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "show_server_top",
+        "description": ("Post the top servers/alliances by highest power (Gen-2 Pool) from Call of Stats as table "
+                         "images. Renders its own message."),
+        "input_schema": {"type": "object", "properties": {
+            "n": {"type": "integer", "description": "How many servers, 1-100, default 10"}}}
+    },
+    {
+        "name": "show_events_card",
+        "description": ("Post the upcoming-events image (timeline with a Next Up box, reminder lead time, channel, "
+                         "who gets pinged, and Prev/Next page buttons). Bot admins only; for anyone else use "
+                         "get_upcoming_events. Renders its own message."),
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "show_help",
+        "description": ("Post the command list (image). Use when someone asks what commands/features exist, "
+                         "'what can you do', 'how do I ...' for a bot feature, or says they forgot a command."),
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
         "name": "get_upcoming_events",
         "description": ("Get the list of upcoming scheduled events with their dates. Each event comes with "
                          "ready-made Discord timestamp markup like <t:1792245600:F> — when you list events, "
@@ -7887,6 +7920,34 @@ async def _ask_execute_tool_inner(ctx, tool_name, tool_input, bypass_permission=
                 task_id = db_queue_task(tool_name, clean_input, description, scheduled_dt.isoformat(), ctx.author.id, ctx.channel.id)
                 return False, f"Queued task #{task_id}: {description} — scheduled for {scheduled_dt.strftime('%Y-%m-%d %H:%M UTC')}."
             # scheduled_time is in the past/now — fall through and run immediately
+
+        if tool_name == "show_scoreboard":
+            await scoreboard.callback(ctx)
+            return True, None
+
+        if tool_name == "show_benchmark":
+            await cosbench.callback(ctx)
+            return True, None
+
+        if tool_name == "show_server_top":
+            import types as _types
+            n = max(1, min(100, int(tool_input.get("n") or 10)))
+            await cmd_servertop(_types.SimpleNamespace(channel=ctx.channel), n)
+            return True, None
+
+        if tool_name == "show_events_card":
+            if not is_bot_admin(ctx.author.id):
+                return False, "The full schedule card is for bot admins. Use get_upcoming_events and list them instead."
+            now, items = _build_event_card_data(ctx.guild)
+            if not items:
+                return False, "No upcoming events scheduled."
+            view = EventsPager(ctx.author.id, now, items)
+            await ctx.send(file=await view.render(), view=view if view.pages > 1 else discord.utils.MISSING)
+            return True, None
+
+        if tool_name == "show_help":
+            await send_embed_card(ctx.send, build_help_embed(ctx.author.id == OWNER_ID))
+            return True, None
 
         if tool_name == "run_leaderboard":
             action_map = {
@@ -8877,6 +8938,16 @@ async def _ask_impl(ctx, *, query: str = None):
         "forcing a data refresh, a composite activity-ranking tool (get_activity_rankings) "
         "for open-ended comparisons across the whole group ('who is slacking', 'who's the "
         "best player', 'rank everyone'), and a calculate tool for exact math.\n\n"
+        "WHAT YOU CAN SHOW (people forget the commands, so pick the right one for them): group "
+        "leaderboards -> run_leaderboard; server-wide or 'just us' on the uploaded data -> "
+        "run_server_leaderboard; one player's card -> show_player_progress; two players head to "
+        "head -> compare_players; everyone graded S-F -> show_scoreboard; trend lines -> show_chart / "
+        "show_group_chart; the strongest-servers ratio cutoffs -> show_benchmark; top servers by power "
+        "-> show_server_top; the event schedule image -> show_events_card (bot admins) or "
+        "get_upcoming_events; active/inactive members -> show_active_members; the command list -> "
+        "show_help. These all post images themselves, so after calling one add at most one short line "
+        "of your own. If someone asks what you can do or which command to use, call show_help and "
+        "point at the 2-3 most relevant things for what they said.\n\n"
         "CHAINING: you can call multiple tools in sequence across turns to fully answer a "
         "request — you're not limited to one tool call. If someone references a relative "
         "season ('last season', 'the season before this one', 'two seasons ago'), use "

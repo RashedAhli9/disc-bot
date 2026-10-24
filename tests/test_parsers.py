@@ -231,5 +231,48 @@ class Grades(unittest.TestCase):
             bot.cos_bench_refresh = old
 
 
+class AskCardTools(unittest.TestCase):
+    """The new !ask tools post images through ctx.send (or refuse politely)."""
+
+    def _ctx(self, user_id=1):
+        class A:
+            id = user_id
+            display_name = "T"
+            roles = []
+        class Ch:
+            id = 5
+            async def send(self, *a, **k):
+                sent.append((a, k))
+        class Ctx:
+            author = A()
+            channel = Ch()
+            guild = None
+            async def send(self, *a, **k):
+                sent.append((a, k))
+        sent = []
+        c = Ctx()
+        c.sent = sent
+        return c
+
+    def test_help_posts_an_image(self):
+        import asyncio
+        ctx = self._ctx(bot.OWNER_ID)
+        rendered, _ = asyncio.run(bot._ask_execute_tool_inner(ctx, "show_help", {}))
+        self.assertTrue(rendered)
+        self.assertTrue(ctx.sent and "files" in ctx.sent[0][1])
+
+    def test_events_card_refuses_non_admins(self):
+        import asyncio
+        ctx = self._ctx(123456789)
+        rendered, msg = asyncio.run(bot._ask_execute_tool_inner(ctx, "show_events_card", {}))
+        self.assertFalse(rendered)
+        self.assertIn("bot admins", msg)
+
+    def test_every_new_tool_is_defined_and_dispatched(self):
+        names = {t["name"] for t in bot.ASK_TOOLS}
+        for n in ("show_scoreboard", "show_benchmark", "show_server_top", "show_events_card", "show_help"):
+            self.assertIn(n, names)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
