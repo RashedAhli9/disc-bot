@@ -3519,6 +3519,13 @@ async def check_callofstats_update():
             # Update database
             db_update_data_date(latest_date)
 
+            # New Call of Stats data is out — refresh the 7-server benchmark now instead of waiting for its cache.
+            try:
+                await cos_bench_refresh(force=True)
+                log_info("[COS BENCH] refreshed after Call of Stats update")
+            except Exception as _e:
+                log_info(f"[COS BENCH] refresh after update failed: {_e}")
+
             # Refresh bot status/presence to reflect new date (only affects "default" mode)
             await update_bot_presence()
 
