@@ -311,58 +311,30 @@ def render_leaderboard_card(d):
         c.text(W - PAD - 28 - w / 2, y + 48, "GROUP", "b", 13, accent, anchor="mm")
     y += 96 + 16
 
-    # podium: 2nd | 1st | 3rd
-    pod = rows[:3]
-    if pod:
-        gap = 16
-        tw = (W - 2 * PAD - 2 * gap) // 3
-        order = [1, 0, 2]
-        heights = {0: 190, 1: 160, 2: 160}
-        base = max(heights[i] for i in range(len(pod)))
-        for slot, idx in enumerate(order):
-            if idx >= len(pod):
-                continue
-            r = pod[idx]
-            h = heights[idx]
-            x = PAD + slot * (tw + gap)
-            ty = y + (base - h)
-            hl = r.get("me")
-            c.rect(x, ty, tw, h, PANEL, outline=accent if hl else None)
-            if idx == 0:
-                c.rect(x, ty, tw, 5, YELLOW, r=3)
-            medal = _icon(f"medal_{idx + 1}", 44 if idx == 0 else 38)
-            if medal:
-                c.im.paste(medal, (int((x + 20) * S), int((ty + 22) * S)), medal)
-            c.text(x + tw - 20, ty + 26, f"#{idx + 1}", "b", 15, MUTED, anchor="ra")
-            nm = _fit(c, r["name"], "b", 22 if idx == 0 else 19, tw - 40)
-            c.text(x + 20, ty + (84 if idx == 0 else 74), nm[0], "b", nm[1], TEXT)
-            val = f"{d.get('unit_prefix', '+')}{_fmt(r['val'])}"
-            vs = 30 if idx == 0 else 25
-            c.text(x + 20, ty + (118 if idx == 0 else 106), val, "b", vs, accent)
-            if r.get("delta"):
-                _delta(c, x + tw - 20, ty + h - 34, r["delta"])
-        y += base + 16
-
-    # remaining rows
-    rest = rows[3:]
+    # one list, medals for the top 3
+    rest = rows
     if rest:
-        rh = 50
+        rh = 54
         panel_h = 20 + len(rest) * rh + 10 + (64 if d.get("me_row") else 0)
         c.rect(PAD, y, W - 2 * PAD, panel_h, PANEL)
         top = rows[0]["val"] or 1
         ry = y + 20
         for i, r in enumerate(rest):
-            rank = i + 4
+            rank = i + 1
             if r.get("me"):
                 c.rect(PAD + 10, ry - 4, W - 2 * PAD - 20, rh - 4, PANEL2, r=12, outline=accent)
-            c.text(PAD + 40, ry + 20, f"{rank}", "b", 16, MUTED, anchor="mm")
-            nm = _fit(c, r["name"], "s", 17, 230)
-            c.text(PAD + 72, ry + 20, nm[0], "s", nm[1], TEXT, anchor="lm")
+            medal = _icon(f"medal_{rank}", 30) if rank <= 3 else None
+            if medal:
+                c.im.paste(medal, (int((PAD + 25) * S), int((ry + 5) * S)), medal)
+            else:
+                c.text(PAD + 40, ry + 21, f"{rank}", "b", 16, MUTED, anchor="mm")
+            nm = _fit(c, r["name"], "b" if rank <= 3 else "s", 19 if rank <= 3 else 17, 230)
+            c.text(PAD + 80, ry + 21, nm[0], "b" if rank <= 3 else "s", nm[1], TEXT, anchor="lm")
             col = {"good": GREEN, "mid": YELLOW, "bad": RED}.get(r.get("level"), accent)
-            c.bar(PAD + 320, ry + 13, 340, 14, r["val"] / top, col)
-            c.text(PAD + 690, ry + 20, f"{d.get('unit_prefix', '+')}{_fmt(r['val'])}", "b", 17, TEXT, anchor="lm")
+            c.bar(PAD + 330, ry + 14, 330, 14, r["val"] / top, col)
+            c.text(PAD + 690, ry + 21, f"{d.get('unit_prefix', '+')}{_fmt(r['val'])}", "b", 18 if rank <= 3 else 17, TEXT, anchor="lm")
             if r.get("delta"):
-                _delta(c, W - PAD - 28, ry + 8, r["delta"])
+                _delta(c, W - PAD - 28, ry + 9, r["delta"])
             ry += rh
         if d.get("me_row"):
             m = d["me_row"]
@@ -370,7 +342,7 @@ def render_leaderboard_card(d):
             ry += 14
             c.rect(PAD + 10, ry, W - 2 * PAD - 20, 44, PANEL2, r=12, outline=accent)
             c.text(PAD + 40, ry + 22, f"{m['rank']}", "b", 16, accent, anchor="mm")
-            c.text(PAD + 72, ry + 22, f"{m['name']}  (you)", "s", 17, TEXT, anchor="lm")
+            c.text(PAD + 80, ry + 22, f"{m['name']}  (you)", "s", 17, TEXT, anchor="lm")
             c.text(PAD + 690, ry + 22, f"{d.get('unit_prefix', '+')}{_fmt(m['val'])}", "b", 17, TEXT, anchor="lm")
         y += panel_h + 16
 
