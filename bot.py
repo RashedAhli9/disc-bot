@@ -1206,6 +1206,10 @@ def migrate_db_events():
         if "tag_mentions" not in existing:
             c.execute("ALTER TABLE events ADD COLUMN tag_mentions TEXT")
             log_info("[DB MIGRATE] Added column: events.tag_mentions")
+        if "at_start" not in existing:
+            # 1 = also ping exactly when the event starts (pending), 2 = that start ping was sent.
+            c.execute("ALTER TABLE events ADD COLUMN at_start INTEGER DEFAULT 0")
+            log_info("[DB MIGRATE] Added column: events.at_start")
         if "channel_id" not in existing:
             # Optional per-event channel for the reminder; NULL = the default events channel.
             c.execute("ALTER TABLE events ADD COLUMN channel_id INTEGER")
@@ -1231,12 +1235,12 @@ def migrate_db_events():
     except Exception as e:
         log_error(f"[DB MIGRATE EVENTS] Error: {e}")
 
-def db_add_event(name, dt, reminder, tag_mentions=None, backup=True, channel_id=None):
+def db_add_event(name, dt, reminder, tag_mentions=None, backup=True, channel_id=None, at_start=False):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO events (name, datetime, reminder, tag_mentions, channel_id) VALUES (?, ?, ?, ?, ?)",
-        (name, dt, reminder, tag_mentions or None, channel_id or None)
+        "INSERT INTO events (name, datetime, reminder, tag_mentions, channel_id, at_start) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, dt, reminder, tag_mentions or None, channel_id or None, 1 if at_start else 0)
     )
     log_info(f"[DB ADD EVENT] writing to: {DB}")
     conn.commit()
@@ -1267,6 +1271,44 @@ def db_set_event_channel(event_id, channel_id):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("UPDATE events SET channel_id=? WHERE id=?", (channel_id or None, event_id))
+    conn.commit()
+    conn.close()
+    silent_backup()
+
+def db_get_at_start_pending():
+    """Return the set of event ids that still owe a ping at their exact start time."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id FROM events WHERE at_start = 1")
+    ids = {row[0] for row in c.fetchall()}
+    conn.close()
+    return ids
+
+def db_mark_at_start_done(event_id):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("UPDATE events SET at_start=2 WHERE id=?", (event_id,))
+    conn.commit()
+    conn.close()
+
+def db_events_snapshot():
+    """Every events row with all columns (for !ask undo). Returns (column_names, rows)."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT * FROM events ORDER BY id")
+    cols = [d[0] for d in c.description]
+    rows = c.fetchall()
+    conn.close()
+    return cols, rows
+
+def db_events_restore(cols, rows):
+    """Replace the whole events table with a snapshot taken by db_events_snapshot()."""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM events")
+    if rows:
+        marks = ",".join("?" * len(cols))
+        c.executemany(f"INSERT INTO events ({','.join(cols)}) VALUES ({marks})", rows)
     conn.commit()
     conn.close()
     silent_backup()
@@ -1320,6 +1362,8 @@ def db_update_event(event_id, name=None, dt=None, reminder=None):
         # The time or lead-time changed, so a reminder that already fired is stale —
         # let the event remind again at its new reminder time.
         c.execute("UPDATE events SET reminded=0 WHERE id=?", (event_id,))
+    if dt is not None:
+        c.execute("UPDATE events SET at_start=1 WHERE id=? AND at_start=2", (event_id,))
 
     conn.commit()
     conn.close()
@@ -6255,6 +6299,7 @@ ASK_TOOLS = [
                 "tag_user_id": {"type": "string", "description": "Discord USER ID to ping in this event's reminder (digits only; a <@123> mention in the message gives the ID). Omit to use the default role."},
                 "tag_role_id": {"type": "string", "description": "Discord ROLE ID to ping in this event's reminder (digits only; a <@&123> mention in the message gives the ID). Can be combined with tag_user_id. Omit both to use the default role."},
                 "channel_id": {"type": "string", "description": "Post this event's reminder in a specific text channel instead of the default events channel: 'here' for the channel the user is typing in, or a channel ID / <#123> mention / channel name. Omit for the default channel."},
+                "ping_at_start": {"type": "boolean", "description": "true = ping exactly when the event starts ('it's time!') instead of N minutes before. Use this for 'remind me at 14:00'-style requests (reminder_minutes then stays 0)."},
                 "scheduled_time": {"type": "string", "description": "ISO 8601 UTC datetime to run this action later instead of immediately. Omit to run immediately."}
             },
             "required": ["name", "date"]
@@ -6283,10 +6328,21 @@ ASK_TOOLS = [
                 "reminder_minutes": {"type": "integer", "description": "Minutes before each event to remind, default 0 (no reminder)"},
                 "tag_user_id": {"type": "string", "description": "Discord USER ID to ping in each reminder (digits only)."},
                 "tag_role_id": {"type": "string", "description": "Discord ROLE ID to ping in each reminder (digits only)."},
-                "channel_id": {"type": "string", "description": "Post this event's reminder in a specific text channel instead of the default events channel: 'here' for the channel the user is typing in, or a channel ID / <#123> mention / channel name. Omit for the default channel."}
+                "channel_id": {"type": "string", "description": "Post this event's reminder in a specific text channel instead of the default events channel: 'here' for the channel the user is typing in, or a channel ID / <#123> mention / channel name. Omit for the default channel."},
+                "ping_at_start": {"type": "boolean", "description": "true = ping exactly when the event starts ('it's time!') instead of N minutes before. Use this for 'remind me at 14:00'-style requests (reminder_minutes then stays 0)."}
             },
             "required": ["name", "first_date", "every_hours"]
         }
+    },
+    {
+        "name": "undo_last_event_change",
+        "description": (
+            "Undo the most recent change made to the event list through !ask (an add, edit, bulk edit or "
+            "delete) by putting the events back exactly as they were before it. Use when the user says "
+            "'undo that', 'revert', 'put it back', 'that was wrong'. Admin only. Only remembers the last "
+            "few changes since the bot last restarted."
+        ),
+        "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "edit_event",
@@ -6857,7 +6913,57 @@ SCHEDULABLE_TOOLS = {"add_event", "edit_event", "bulk_edit_event_times", "delete
                      "edit_season", "create_season", "force_fetch_all"}
 
 
+ASK_CONFIRM_OVER = 5  # bulk event changes touching more than this many events need a 👍 first
+_EVENT_MUTATING_TOOLS = {"add_event", "add_recurring_event", "edit_event", "bulk_edit_event_times", "delete_event"}
+_ask_undo_stack = []  # newest last; in-memory only, so it resets when the bot restarts
+ASK_UNDO_KEEP = 5
+
+
+async def _ask_confirm(ctx, text, timeout=60):
+    """Ask the person to confirm a bulk change with a 👍 / ❌ reaction. True only if THEY react 👍 in time."""
+    try:
+        msg = await ctx.send(f"⚠️ {text}\nReact 👍 to confirm or ❌ to cancel (60s).")
+        await msg.add_reaction("👍")
+        await msg.add_reaction("❌")
+
+        def _check(reaction, user):
+            return user.id == ctx.author.id and reaction.message.id == msg.id and str(reaction.emoji) in ("👍", "❌")
+
+        reaction, _ = await bot.wait_for("reaction_add", timeout=timeout, check=_check)
+        return str(reaction.emoji) == "👍"
+    except asyncio.TimeoutError:
+        try:
+            await ctx.send("⌛ No answer — cancelled.")
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        log_info(f"[ASK] confirm failed: {e}")
+        return False
+
+
 async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False):
+    """Wrapper: remembers the event list before any event-changing tool runs, so 'undo that' can
+    restore it; the snapshot is dropped again if nothing actually changed."""
+    snap = None
+    if tool_name in _EVENT_MUTATING_TOOLS:
+        try:
+            snap = db_events_snapshot()
+        except Exception as e:
+            log_info(f"[ASK] undo snapshot failed: {e}")
+    result = await _ask_execute_tool_inner(ctx, tool_name, tool_input, bypass_permission)
+    if snap is not None:
+        try:
+            if db_events_snapshot() != snap:
+                _ask_undo_stack.append({"cols": snap[0], "rows": snap[1], "tool": tool_name,
+                                        "who": ctx.author.display_name})
+                del _ask_undo_stack[:-ASK_UNDO_KEEP]
+        except Exception as e:
+            log_info(f"[ASK] undo compare failed: {e}")
+    return result
+
+
+async def _ask_execute_tool_inner(ctx, tool_name, tool_input, bypass_permission=False):
     """
     Execute a tool call. Returns (rendered_directly: bool, result_for_claude: str|None).
     rendered_directly=True means the tool already sent its own Discord message/embed
@@ -7062,13 +7168,16 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                    for r in db_get_events()):
                 return False, (f"Event '{tool_input['name']}' at {dt.strftime('%Y-%m-%d %H:%M UTC')} "
                                f"already exists — nothing added.")
+            at_start = bool(tool_input.get("ping_at_start"))
             db_add_event(tool_input["name"], dt.isoformat(), reminder, tag_mentions,
-                         channel_id=rem_ch.id if rem_ch else None)
+                         channel_id=rem_ch.id if rem_ch else None, at_start=at_start)
             ts = _unix_utc(dt)
             tag_note = f" Reminders will ping {tag_mentions}." if tag_mentions else ""
             if rem_ch:
                 tag_note += f" The reminder will post in <#{rem_ch.id}>."
-            if tag_mentions and not reminder:
+            if at_start:
+                tag_note += " It pings exactly when the time arrives."
+            if tag_mentions and not reminder and not at_start:
                 tag_note += " (No reminder is set, so nothing will be pinged until a reminder time is added.)"
             return False, (
                 f"Added event '{tool_input['name']}' on <t:{ts}:F> ({dt.strftime('%Y-%m-%d %H:%M UTC')})."
@@ -7127,13 +7236,21 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                 return False, f"Events NOT added — {ch_err}"
             existing = {(r[1].strip().lower(), r[2]) for r in db_get_events()}
             name = tool_input["name"]
+            at_start = bool(tool_input.get("ping_at_start"))
+            to_add = [o for o in occurrences if (name.strip().lower(), o.isoformat()) not in existing]
+            if len(to_add) > ASK_CONFIRM_OVER and not bypass_permission:
+                ok = await _ask_confirm(
+                    ctx, f"This will add **{len(to_add)}** '{name}' events "
+                         f"({to_add[0].strftime('%b %d %H:%M')} → {to_add[-1].strftime('%b %d %H:%M')} UTC).")
+                if not ok:
+                    return False, "The user did not confirm, so NOTHING was added. Tell them it was cancelled."
             added, skipped = [], 0
             for occ in occurrences:
                 if (name.strip().lower(), occ.isoformat()) in existing:
                     skipped += 1
                     continue
                 db_add_event(name, occ.isoformat(), reminder, tag_mentions, backup=False,
-                             channel_id=rem_ch.id if rem_ch else None)
+                             channel_id=rem_ch.id if rem_ch else None, at_start=at_start)
                 added.append(occ)
             if added:
                 silent_backup()
@@ -7224,7 +7341,7 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
             month_filter = tool_input.get("month", "").lower()
             name_filter = tool_input.get("name_contains", "").lower()
 
-            changed = []
+            plan = []
             for event_id, name, dt_str, reminder in events:
                 try:
                     dt = datetime.fromisoformat(dt_str)
@@ -7241,12 +7358,29 @@ async def _ask_execute_tool(ctx, tool_name, tool_input, bypass_permission=False)
                     new_dt = dt.replace(hour=new_hour, minute=new_min)
                 except Exception:
                     continue
+                plan.append((event_id, name, dt, new_dt))
+            if len(plan) > ASK_CONFIRM_OVER and not bypass_permission:
+                ok = await _ask_confirm(ctx, f"This will move **{len(plan)}** events to {new_time} UTC.")
+                if not ok:
+                    return False, "The user did not confirm, so NOTHING was changed. Tell them it was cancelled."
+            changed = []
+            for event_id, name, dt, new_dt in plan:
                 db_update_event(event_id, dt=new_dt.isoformat())
                 changed.append(f"{name} ({dt.strftime('%Y-%m-%d')})")
 
             if not changed:
                 return False, "No events matched those filters — nothing was changed."
             return False, f"Changed the time to {new_time} UTC for {len(changed)} events: " + ", ".join(changed)
+
+        if tool_name == "undo_last_event_change":
+            if not bypass_permission and not _ask_is_admin(ctx):
+                return False, "Only admins can undo event changes."
+            if not _ask_undo_stack:
+                return False, "Nothing to undo — I only remember event changes made through !ask since my last restart."
+            entry = _ask_undo_stack.pop()
+            db_events_restore(entry["cols"], entry["rows"])
+            return False, (f"Undid the last event change ({entry['tool']} by {entry['who']}). The event list is back to "
+                           f"how it was before — {len(entry['rows'])} events.")
 
         if tool_name == "delete_event":
             if not bypass_permission and not _ask_is_admin(ctx):
@@ -7689,6 +7823,7 @@ async def clearlearned(ctx):
 
 
 _ask_inflight = set()  # (channel_id, user_id, query) currently being processed
+_ASK_STATS = {"count": 0, "errors": 0, "capped": 0, "nudged": 0, "secs": []}  # secs = last 100 durations (shown in /status)
 
 ASK_MAIN_MODEL = "claude-sonnet-5"
 ASK_FAST_MODEL = "claude-haiku-5-5"
@@ -7738,6 +7873,11 @@ async def ask(ctx, *, query: str = None):
         _ask_inflight.discard(key)
         meta = getattr(ctx, "_ask_meta", {})
         secs = (datetime.utcnow() - started).total_seconds()
+        _ASK_STATS["count"] += 1
+        _ASK_STATS["errors"] += 1 if outcome == "error" else 0
+        _ASK_STATS["capped"] += 1 if meta.get("capped") else 0
+        _ASK_STATS["nudged"] += 1 if meta.get("nudged") else 0
+        _ASK_STATS["secs"] = (_ASK_STATS["secs"] + [secs])[-100:]
         log_info(
             f"[ASK] {outcome} {secs:.1f}s user={ctx.author.display_name} ch={ctx.channel.id} "
             f"model={meta.get('model', '-')} rounds={meta.get('rounds', 0)} "
@@ -7907,8 +8047,9 @@ async def _ask_impl(ctx, *, query: str = None):
         "#channel mention <#123> gives its ID. For a quick personal reminder ('create a reminder "
         "for me in this channel at 14 UTC') don't interrogate the user: name it 'Reminder' unless "
         "they gave a name, use today's date (or tomorrow if that time already passed), set "
-        "reminder_minutes to 1 so it actually fires (reminders only fire when reminder_minutes > 0), "
-        "ping the asker with tag_user_id (their user ID) if they said 'me', and just do it.\n\n"
+        "ping_at_start true (reminder_minutes 0) so it pings exactly at that time, "
+        "ping the asker with tag_user_id (their user ID) if they said 'me', and just do it. "
+        "If the user says 'undo that' / 'revert' / 'put it back', call undo_last_event_change.\n\n"
         "EVENT TAGGING: add_event takes optional tag_user_id and/or tag_role_id, and edit_event "
         "takes new_tag_user_id / new_tag_role_id / reset_tag, to choose who an event's reminder "
         "pings (default is the usual announcement role). When a message contains a mention like "
@@ -8162,6 +8303,7 @@ async def _ask_impl(ctx, *, query: str = None):
                 if not final_text and ctx._ask_meta["tools"] and empty_retries < 2:
                     # The AI fetched data but wrote no answer — nudge it to actually reply instead of showing "Done."
                     empty_retries += 1
+                    ctx._ask_meta["nudged"] = True
                     log_info(f"[ASK] empty reply after tools {ctx._ask_meta['tools']} (stop={response.stop_reason}); nudging")
                     if response.content:
                         messages.append({"role": "assistant", "content": response.content})
@@ -8191,6 +8333,7 @@ async def _ask_impl(ctx, *, query: str = None):
             # progress) or is done, in which case the next response will have no tool_use.
 
         if not finished:
+            ctx._ask_meta["capped"] = True
             # Ran out of tool round-trips before the AI wrote a final answer — say so instead of going silent.
             final_text = ((final_text or "") + "\n\n" if final_text else "") + (
                 "⚠️ That took more steps than I'm allowed in one go, so I stopped partway. "
@@ -9414,7 +9557,84 @@ async def status_cmd(inter: discord.Interaction):
         value=f"{msgs} messages from {members} member(s) — learning {'on' if get_setting('ask_learn_chat') else 'off'}",
         inline=False,
     )
+    _n = _ASK_STATS["count"]
+    if _n:
+        _secs = sorted(_ASK_STATS["secs"])
+        _p50 = _secs[len(_secs) // 2]
+        _p90 = _secs[min(len(_secs) - 1, int(len(_secs) * 0.9))]
+        embed.add_field(
+            name="!ask since restart",
+            value=(f"{_n} asks · typical {_p50:.0f}s · slowest 10% over {_p90:.0f}s\n"
+                   f"hit the step cap: {_ASK_STATS['capped']} · errors: {_ASK_STATS['errors']} · "
+                   f"blank-answer retries: {_ASK_STATS['nudged']}"),
+            inline=False,
+        )
     await inter.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="events", description="List upcoming events with their reminder channel and who gets pinged")
+async def events_cmd(inter: discord.Interaction):
+    now = datetime.utcnow()
+    tags = db_get_event_tags()
+    chans = db_get_event_channels()
+    default_ch = get_setting("events_channel")
+    lines = []
+    for eid, name, dt_str, reminder in db_get_events():
+        try:
+            dt = datetime.fromisoformat(dt_str)
+        except Exception:
+            continue
+        if dt < now:
+            continue
+        where = f"<#{chans.get(eid, default_ch)}>"
+        ping = tags.get(eid, "default role")
+        rem = f"{reminder}m before" if reminder else "no reminder"
+        lines.append(f"**{name}** — <t:{_unix_utc(dt)}:f> (<t:{_unix_utc(dt)}:R>)\n└ {rem} · {where} · {ping}")
+    if not lines:
+        return await inter.response.send_message("No upcoming events scheduled.")
+    shown, total, text = 0, len(lines), ""
+    for ln in lines:
+        if len(text) + len(ln) + 2 > 3800:
+            break
+        text += ln + "\n"
+        shown += 1
+    embed = discord.Embed(title="📅 Upcoming events", description=text, color=0x5865F2)
+    if shown < total:
+        embed.set_footer(text=f"Showing the next {shown} of {total}")
+    await inter.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="eventchannel", description="Admin: move the reminders of many events to a channel at once")
+@app_commands.describe(channel="Channel the reminders should post in", name_contains="Only events whose name contains this (blank = all upcoming)",
+                       reset="Send them back to the default events channel instead")
+async def eventchannel_cmd(inter: discord.Interaction, channel: discord.TextChannel, name_contains: str = "", reset: bool = False):
+    if not (inter.user.id == OWNER_ID or inter.user.guild_permissions.administrator):
+        return await inter.response.send_message("❌ Admins only.", ephemeral=True)
+    perms = channel.permissions_for(inter.guild.me)
+    if not reset and not (perms.view_channel and perms.send_messages):
+        return await inter.response.send_message(
+            f"❌ I can't post in {channel.mention} — give me View Channel + Send Messages there first.", ephemeral=True)
+    now = datetime.utcnow()
+    hits = []
+    for eid, name, dt_str, _rem in db_get_events():
+        try:
+            if datetime.fromisoformat(dt_str) < now:
+                continue
+        except Exception:
+            continue
+        if name_contains and name_contains.lower() not in name.lower():
+            continue
+        hits.append(eid)
+    if not hits:
+        return await inter.response.send_message("No upcoming events matched.", ephemeral=True)
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.executemany("UPDATE events SET channel_id=? WHERE id=?", [(None if reset else channel.id, e) for e in hits])
+    conn.commit()
+    conn.close()
+    silent_backup()
+    where = "the default events channel" if reset else channel.mention
+    await inter.response.send_message(f"✅ {len(hits)} event reminder(s) will now post in {where}.")
 
 
 # ============================================================
@@ -9960,6 +10180,7 @@ async def custom_event_loop():
         # "Already reminded" lives in the DB (not memory), so a redeploy/restart between the
         # reminder time and the event can't make the same reminder fire a second time.
         reminded = db_get_reminded_ids()
+        start_pending = db_get_at_start_pending()
         for ev in rows:
             event_id, name, dt, rem = ev
             try:
@@ -9971,6 +10192,20 @@ async def custom_event_loop():
             # Remove events N minutes after they start (N is a /settings value, default 60)
             if now >= dt_obj + timedelta(minutes=cleanup_minutes):
                 db_delete_event(event_id)
+                continue
+
+            # Exact-time ping ("remind me at 14:00") — fires once when the event time arrives.
+            if event_id in start_pending and now >= dt_obj:
+                try:
+                    if now - dt_obj <= timedelta(minutes=10):  # older than that = missed during downtime, don't ping late
+                        tag = event_tags.get(event_id) or f"<@&{default_event_role}>"
+                        target = ch
+                        if event_id in event_channels:
+                            target = bot.get_channel(event_channels[event_id]) or ch
+                        await target.send(f"{tag} ⏰ **{name}** — it's time! <t:{_unix_utc(dt_obj)}:t>")
+                    db_mark_at_start_done(event_id)
+                except Exception as e:
+                    log_info(f"[CUSTOM EVENT LOOP] Start ping failed for '{name}': {type(e).__name__}: {e}")
                 continue
 
             action = _reminder_due(now, dt_obj, rem, event_id in reminded)
