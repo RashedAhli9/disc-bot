@@ -3443,6 +3443,8 @@ async def check_callofstats_update():
     Only notify if the date changed AND actual data exists for new date
     """
     try:
+        await ensure_archive_current()  # makes sure members' latest day is saved even if an update was missed
+
         # Always check Rekz's profile for latest data
         account_id = REKZ_ACCOUNT_ID
 
@@ -4846,6 +4848,99 @@ async def addlord_deprecated(inter: discord.Interaction):
     )
 
 
+
+
+_ARCHIVE_LAST_FIX = {"at": None}
+
+
+def _archive_missing_accounts(season_id, account_ids, since_iso):
+    """Account IDs with NO archived merits row for this season on/after since_iso."""
+    have = set()
+    try:
+        conn = sqlite3.connect(DB_PROGRESS)
+        rows = conn.execute(
+            "SELECT DISTINCT account_id FROM season_progress WHERE season_id=? AND data_date>=? AND merits IS NOT NULL",
+            (season_id, since_iso)).fetchall()
+        conn.close()
+        have = {str(r[0]) for r in rows}
+    except Exception as e:
+        log_info(f"[ARCHIVE] check failed: {e}")
+    return [a for a in account_ids if str(a) not in have]
+
+
+async def ensure_archive_current():
+    """Safety net: if tracked members have no archived stats for the latest Call of Stats date, save them now.
+    The normal save only runs at the moment an update is detected; if that was missed (restart, COS hiccup),
+    charts and rankings end up with holes. Runs at most once every 3 hours."""
+    try:
+        now = datetime.utcnow()
+        if _ARCHIVE_LAST_FIX["at"] and now - _ARCHIVE_LAST_FIX["at"] < timedelta(hours=3):
+            return
+        season = db_get_current_season()
+        if not season or not bot.guilds:
+            return
+        season_id = season[0]
+        latest = db_get_last_known_data_date()
+        try:
+            d, m, y = str(latest).split("/")
+            since = date(int(y), int(m), int(d)).isoformat()
+        except Exception:
+            since = (now.date() - timedelta(days=1)).isoformat()
+        ids = [l["account_id"] for l in get_all_lords_from_guild(bot.guilds[0])]
+        missing = _archive_missing_accounts(season_id, ids, since)
+        if not missing:
+            return
+        _ARCHIVE_LAST_FIX["at"] = now
+        log_info(f"[ARCHIVE] {len(missing)}/{len(ids)} members have no archived stats since {since} — saving now")
+        await force_refresh_all_stats()
+    except Exception as e:
+        log_info(f"[ARCHIVE] ensure failed: {type(e).__name__}: {e}")
+
+
+@bot.command(name="backfill")
+async def backfill_cmd(ctx):
+    """Owner only: fill in every missing archived day of this season for all tracked members (fixes holes in
+    !groupchart / growth charts). Safe to re-run — it only fetches days that aren't saved yet."""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    season = db_get_current_season()
+    if not season:
+        return await ctx.send("❌ No active season.")
+    season_id, season_name, start_date, _ = season
+    lords = get_all_lords_from_guild(ctx.guild)
+    if not lords:
+        return await ctx.send("❌ No members with numeric roles found.")
+    start = date.fromisoformat(str(start_date)[:10])
+    days = [(start + timedelta(days=i)).isoformat() for i in range(1, (date.today() - start).days + 1)]
+    msg = await ctx.send(f"⏳ Backfilling {season_name}: {len(lords)} members × up to {len(days)} days. This can take a few minutes...")
+    saved = skipped = failed = 0
+    for lord in lords:
+        acct = lord["account_id"]
+        try:
+            conn = sqlite3.connect(DB_PROGRESS)
+            have = {r[0] for r in conn.execute(
+                "SELECT data_date FROM season_progress WHERE season_id=? AND account_id=? AND merits IS NOT NULL",
+                (season_id, acct)).fetchall()}
+            conn.close()
+        except Exception:
+            have = set()
+        for d in days:
+            if d in have:
+                skipped += 1
+                continue
+            try:
+                stats, actual = await fetch_stats_with_fallback(acct, str(start_date)[:10], d)
+                if stats and actual and actual not in have:
+                    db_save_season_progress(season_id, acct, stats.get("lord_name", acct), stats, actual)
+                    have.add(actual)
+                    saved += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                failed += 1
+                log_info(f"[BACKFILL] {acct} {d}: {type(e).__name__}: {e}")
+    silent_backup()
+    await msg.edit(content=f"✅ Backfill done for {season_name}: saved {saved} day(s), {skipped} already there or empty, {failed} failed. Try the chart again.")
 
 
 @bot.command(name="forcefetch")
