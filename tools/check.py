@@ -57,6 +57,28 @@ if r.returncode != 0:
 else:
     print(r.stdout.strip().splitlines()[-1])
 
+# 4b. every image card renderer draws a PNG from sample data
+try:
+    sys.path.insert(0, ROOT)
+    from datetime import datetime, timedelta
+    import card_render as cr
+    _now = datetime(2026, 1, 1, 12)
+    _rows = [dict(name="A", val=3), dict(name="B", val=2, me=True)]
+    _smoke = {
+        "progress": lambda: cr.render_progress_card(dict(tag="[T]", name="Test", season="s", start="2026-01-01",
+                      end="2026-01-09", account_id="1", power=1, merits="+1", kills="+1", deads="+1", healed="+1")),
+        "leaderboard": lambda: cr.render_leaderboard_card(dict(title="t", subtitle="s", accent=cr.RED, rows=_rows)),
+        "compare": lambda: cr.render_compare_card(dict(a=dict(name="A"), b=dict(name="B"), rows=[("Power", 2, 1)])),
+        "events": lambda: cr.render_events_card(dict(now=_now, events=[dict(name="E", dt=_now + timedelta(hours=2),
+                      lead=30, channel="c", ping="@p")], total=1)),
+    }
+    for _name, _fn in _smoke.items():
+        if not _fn().read(8).startswith(b"\x89PNG"):
+            bad(f"{_name} card did not produce a PNG")
+    print("cards: OK")
+except Exception as e:
+    bad(f"card smoke test crashed: {type(e).__name__}: {e}")
+
 # 5. parser tests
 r = subprocess.run([sys.executable, "tests/test_parsers.py"], capture_output=True, text=True, env=env, timeout=180, cwd=ROOT)
 if r.returncode != 0:
