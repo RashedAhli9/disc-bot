@@ -2193,10 +2193,62 @@ def db_set_server_pick(server_num):
     conn.commit()
     conn.close()
 
+RANK_STAT_FIELDS = ("current_power", "highest_power", "deaths", "total_merits", "infantry_merits", "cavalry_merits",
+                    "marksman_merits", "mage_merits", "other_merits", "healing")
+
+
+def _snapshot_prev_ranks(c, server_num, new_end_date):
+    """Before an upload replaces the server's rows, remember each lord's rank per stat so leaderboards can
+    show up/down arrows. Skipped when the upload covers the same end date (a re-upload would erase the arrows)."""
+    c.execute("CREATE TABLE IF NOT EXISTS server_rank_prev (server_num INTEGER, stat TEXT, account_id TEXT, rank INTEGER)")
+    old = c.execute("SELECT DISTINCT end_date FROM server_lord_stats WHERE server_num = ?", (server_num,)).fetchall()
+    if not old or (len(old) == 1 and old[0][0] == new_end_date):
+        return
+    cols = ["account_id", "t4_healed", "t5_healed"] + list(RANK_STAT_FIELDS)
+    rows = c.execute(f"SELECT {', '.join(cols)} FROM server_lord_stats WHERE server_num = ?", (server_num,)).fetchall()
+    recs = [dict(zip(cols, r)) for r in rows]
+    for rec in recs:
+        rec["mana"] = (rec["t4_healed"] or 0) * mana_per_t4() + (rec["t5_healed"] or 0) * mana_per_t5()
+    c.execute("DELETE FROM server_rank_prev WHERE server_num = ?", (server_num,))
+    for stat in list(RANK_STAT_FIELDS) + ["mana"]:
+        ordered = sorted(recs, key=lambda r: (r[stat] or 0), reverse=True)
+        c.executemany("INSERT INTO server_rank_prev VALUES (?,?,?,?)",
+                      [(server_num, stat, r["account_id"], i + 1) for i, r in enumerate(ordered)])
+
+
+def db_get_prev_ranks(server_num, stat):
+    """{account_id: rank} from the upload before the current one (empty if there isn't one)."""
+    try:
+        conn = db_connect(DB)
+        conn.execute("CREATE TABLE IF NOT EXISTS server_rank_prev (server_num INTEGER, stat TEXT, account_id TEXT, rank INTEGER)")
+        rows = conn.execute("SELECT account_id, rank FROM server_rank_prev WHERE server_num = ? AND stat = ?",
+                            (server_num, stat)).fetchall()
+        conn.close()
+        return {a: r for a, r in rows}
+    except Exception as e:
+        log_info(f"[RANK PREV] {e}")
+        return {}
+
+
+def add_rank_deltas(scored, prev):
+    """Set r['delta'] (+ = moved up) on each row, comparing its position now vs in the previous upload.
+    Both orders are computed over the same accounts, so group-only lists get group-relative arrows."""
+    have = [r for r in scored if r.get("aid") in prev]
+    if len(have) < 2:
+        return
+    prev_pos = {r["aid"]: i for i, r in enumerate(sorted(have, key=lambda r: prev[r["aid"]]))}
+    for i, r in enumerate(have):
+        r["delta"] = prev_pos[r["aid"]] - i
+
+
 def db_replace_server_lord_stats(server_num, rows, start_date, end_date):
     """Delete all existing rows for this server, then insert the new upload."""
     conn = db_connect(DB)
     c = conn.cursor()
+    try:
+        _snapshot_prev_ranks(c, server_num, end_date)
+    except Exception as e:
+        log_info(f"[RANK PREV] snapshot failed: {type(e).__name__}: {e}")
     c.execute("DELETE FROM server_lord_stats WHERE server_num = ?", (server_num,))
     now = datetime.utcnow().isoformat()
     for r in rows:
@@ -12629,11 +12681,15 @@ async def _server_leaderboard(ctx, server_num, stat_field, emoji, label, top_n=2
         lines.append(f"{medal} {lord['name']}: +{lord['val']:,}")
     lines.append("```")
     _sd, _ed = lords[0].get("start_date"), lords[0].get("end_date")
+    add_rank_deltas(scored, db_get_prev_ranks(picked, stat_field))
+    _arrows = any(r.get("delta") for r in scored)
     await send_lb_card(ctx, "\n".join(lines), title=f"Top {label}",
                        subtitle=f"S#{picked}" + (f"  ·  {_sd} → {_ed}" if _sd and _ed else ""),
                        rows=scored, accent=LB_ACCENTS.get(stat_field, card_render.BLUE), group=group_only,
                        skip_zero=True, max_rows=top_n,
-                       footer=("Bar color: green = requirement met, yellow = on pace, red = behind" if stat_field == "deaths" else None),
+                       footer=" · ".join(x for x in (
+                           "Bar color: green = requirement met, yellow = on pace, red = behind" if stat_field == "deaths" else None,
+                           "▲▼ = places moved since the previous upload" if _arrows else None) if x) or None,
                        level_fn=(lambda r: _deads_level(r["val"], r.get("hp"), None, _ed)) if stat_field == "deaths" else None)
 
 
@@ -12808,10 +12864,12 @@ async def stopmana(ctx, *, arg: str = None):
     lines.append(f"\n*(T4 Healed × {mana_per_t4()}) + (T5 Healed × {mana_per_t5()}) — exact, not an estimate*")
     lines.append("```")
     _sd, _ed = lords[0].get("start_date"), lords[0].get("end_date")
+    add_rank_deltas(scored, db_get_prev_ranks(picked, "mana"))
     await send_lb_card(ctx, "\n".join(lines), title=f"Top {scope_label}",
                        subtitle=f"S#{picked}" + (f"  ·  {_sd} → {_ed}" if _sd and _ed else ""),
                        rows=scored, accent=LB_ACCENTS["mana"], group=group_only, skip_zero=True, max_rows=top,
-                       footer=f"Exact: (T4 healed x {mana_per_t4()}) + (T5 healed x {mana_per_t5()})")
+                       footer=f"Exact: (T4 healed x {mana_per_t4()}) + (T5 healed x {mana_per_t5()})"
+                              + ("  ·  ▲▼ = places moved since the previous upload" if any(r.get("delta") for r in scored) else ""))
 
 @bot.command(name="stopinf")
 async def stopinf(ctx, *, arg: str = None):

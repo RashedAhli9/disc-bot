@@ -179,5 +179,36 @@ class StaleAlerts(unittest.TestCase):
         self.assertTrue(bot._stale_should_alert("x", now + timedelta(hours=25)))
 
 
+class RankArrows(unittest.TestCase):
+    def _rows(self, merits):
+        base = {"current_power": 1, "highest_power": 1, "deaths": 0, "gathering": 0, "infantry_merits": 0,
+                "cavalry_merits": 0, "marksman_merits": 0, "mage_merits": 0, "other_merits": 0, "healing": 0}
+        return [dict(base, account_id=a, lord_name=a, total_merits=m) for a, m in merits.items()]
+
+    def test_arrows_follow_rank_changes(self):
+        try:
+            bot.db_replace_server_lord_stats(998, self._rows({"a": 30, "b": 20, "c": 10}), "2026-01-01", "2026-01-05")
+            # same end date re-upload must NOT wipe/overwrite the snapshot logic
+            bot.db_replace_server_lord_stats(998, self._rows({"a": 30, "b": 20, "c": 10}), "2026-01-01", "2026-01-05")
+            self.assertEqual(bot.db_get_prev_ranks(998, "total_merits"), {})
+            # next day: c overtakes everyone
+            bot.db_replace_server_lord_stats(998, self._rows({"a": 40, "b": 30, "c": 90}), "2026-01-01", "2026-01-06")
+            prev = bot.db_get_prev_ranks(998, "total_merits")
+            self.assertEqual(prev, {"a": 1, "b": 2, "c": 3})
+            scored = [{"aid": "c", "val": 90}, {"aid": "a", "val": 40}, {"aid": "b", "val": 30}]
+            bot.add_rank_deltas(scored, prev)
+            self.assertEqual([r["delta"] for r in scored], [2, -1, -1])
+            # accounts without a previous rank get no arrow
+            scored2 = [{"aid": "new", "val": 5}, {"aid": "a", "val": 4}, {"aid": "b", "val": 3}]
+            bot.add_rank_deltas(scored2, prev)
+            self.assertNotIn("delta", scored2[0])
+        finally:
+            c = bot.db_connect(bot.DB)
+            c.execute("DELETE FROM server_lord_stats WHERE server_num = 998")
+            c.execute("DELETE FROM server_rank_prev WHERE server_num = 998")
+            c.commit()
+            c.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
