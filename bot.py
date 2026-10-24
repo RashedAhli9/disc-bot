@@ -1502,6 +1502,21 @@ SETTINGS_SCHEMA = {
         "min": 1, "max": 72, "unit": " h", "default": 6,
         "desc": "Minimum hours between repeat alerts while it stays broken.",
     },
+    "stale_alerts_enabled": {
+        "group": "alerts", "label": "Stale-data alerts", "type": "bool", "default": True,
+        "desc": "DM the owner when no fresh !serverupdate Excel has been uploaded for a while, when the daily "
+                "archive couldn't save everyone's stats, or when Call of Stats data stops updating.",
+    },
+    "stale_upload_days": {
+        "group": "alerts", "label": "Stale Excel after", "type": "int",
+        "min": 1, "max": 60, "unit": " days", "default": 5,
+        "desc": "Alert if the newest !serverupdate upload is older than this.",
+    },
+    "stale_data_days": {
+        "group": "alerts", "label": "Stale COS data after", "type": "int",
+        "min": 1, "max": 14, "unit": " days", "default": 2,
+        "desc": "Alert if Call of Stats's latest data date is this many days behind today.",
+    },
     # ---- !ask AI ----
     "ask_fast_model": {
         "group": "ask", "label": "Fast model for simple questions", "type": "bool", "default": True,
@@ -3195,6 +3210,67 @@ async def parse_health_monitor():
         log_info(f"[PARSE ALARM ERROR] {type(e).__name__}: {e}")
 
 
+_STALE_ALERT = {}   # kind -> last time we alerted (so each problem pings at most once per 24 h)
+
+
+def _stale_should_alert(kind, now, hours=24):
+    last = _STALE_ALERT.get(kind)
+    return last is None or now - last >= timedelta(hours=hours)
+
+
+def newest_server_upload():
+    """(uploaded_at datetime, server_num) of the newest !serverupdate upload, or (None, None)."""
+    try:
+        conn = db_connect(DB)
+        row = conn.execute("SELECT uploaded_at, server_num FROM server_lord_stats ORDER BY uploaded_at DESC LIMIT 1").fetchone()
+        conn.close()
+        return (datetime.fromisoformat(row[0]), row[1]) if row and row[0] else (None, None)
+    except Exception:
+        return (None, None)
+
+
+def stale_problems(now=None):
+    """List of (kind, message) for things that look stale right now. Pure-ish so it can be tested."""
+    now = now or datetime.utcnow()
+    out = []
+    up, srv = newest_server_upload()
+    days = get_setting("stale_upload_days")
+    if up and now - up > timedelta(days=days):
+        out.append(("upload", f"The newest `!serverupdate` Excel (S#{srv}) was uploaded {(now - up).days} days ago, "
+                              f"so `!stop…` leaderboards and your current-power line are out of date. Upload a fresh one."))
+    latest = db_get_last_known_data_date()
+    try:
+        d, m, y = str(latest).split("/")
+        behind = (now.date() - date(int(y), int(m), int(d))).days
+        if behind >= get_setting("stale_data_days"):
+            out.append(("cos", f"Call of Stats' latest data date is {latest}, {behind} days behind today. "
+                               f"Either COS hasn't published, or the bot's update check is failing."))
+    except Exception:
+        pass
+    return out
+
+
+@tasks.loop(minutes=30)
+async def stale_data_monitor():
+    try:
+        if not get_setting("stale_alerts_enabled"):
+            return
+        now = datetime.utcnow()
+        for kind, msg in stale_problems(now):
+            if _stale_should_alert(kind, now):
+                if await _notify_owner(f"⚠️ **Stale data**\n{msg}"):
+                    _STALE_ALERT[kind] = now
+        if _ARCHIVE_ALERT.get("pending") and _stale_should_alert("archive", now, hours=12):
+            if await _notify_owner(f"⚠️ **Daily archive incomplete**\n{_ARCHIVE_ALERT['pending']}\n"
+                                   f"Run `!backfill` to fill the gaps."):
+                _STALE_ALERT["archive"] = now
+    except Exception as e:
+        log_info(f"[STALE MONITOR ERROR] {type(e).__name__}: {e}")
+
+
+_ARCHIVE_ALERT = {"pending": None}
+
+
 def parse_stats(html):
     """Parse stats from HTML using proper HTML parsing"""
     import re
@@ -3900,6 +3976,8 @@ async def on_ready():
     # ✅ COS PARSE-HEALTH ALARM (DMs the owner if COS changes its layout again)
     if not parse_health_monitor.is_running():
         parse_health_monitor.start()
+    if not stale_data_monitor.is_running():
+        stale_data_monitor.start()
 
     # ✅ LIVE CHANNELS (clock channel etc. — configured in /settings)
     if not live_channels_loop.is_running():
@@ -5147,7 +5225,11 @@ async def ensure_archive_current():
         _ARCHIVE_LAST_FIX["at"] = now
         log_info(f"[ARCHIVE] {len(missing)}/{len(ids)} members have no archived stats since {since} — saving now")
         await force_refresh_all_stats()
+        still = _archive_missing_accounts(season_id, ids, since)
+        _ARCHIVE_ALERT["pending"] = (f"{len(still)} of {len(ids)} members still have no archived stats since {since} "
+                                     f"even after a refresh.") if still else None
     except Exception as e:
+        _ARCHIVE_ALERT["pending"] = f"The archive safety net crashed: {type(e).__name__}: {e}"
         log_info(f"[ARCHIVE] ensure failed: {type(e).__name__}: {e}")
 
 

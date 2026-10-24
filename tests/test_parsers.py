@@ -149,5 +149,35 @@ class Plumbing(unittest.TestCase):
         self.assertGreater(len(png.read()), 1000)
 
 
+class StaleAlerts(unittest.TestCase):
+    def test_old_upload_is_flagged(self):
+        from datetime import datetime, timedelta
+        conn = bot.db_connect(bot.DB)
+        rows = [{"account_id": "9", "lord_name": "T", "current_power": 1, "highest_power": 1, "deaths": 0,
+                 "total_merits": 0, "gathering": 0, "infantry_merits": 0, "cavalry_merits": 0, "marksman_merits": 0,
+                 "mage_merits": 0, "other_merits": 0, "healing": 0}]
+        conn.close()
+        bot.db_replace_server_lord_stats(999, rows, "2026-01-01", "2026-01-02")
+        try:
+            problems = dict(bot.stale_problems(datetime.utcnow() + timedelta(days=30)))
+            self.assertIn("upload", problems)
+            fresh = dict(bot.stale_problems(datetime.utcnow()))
+            self.assertNotIn("upload", fresh)
+        finally:
+            c = bot.db_connect(bot.DB)
+            c.execute("DELETE FROM server_lord_stats WHERE server_num = 999")
+            c.commit()
+            c.close()
+
+    def test_alert_cooldown(self):
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        bot._STALE_ALERT.pop("x", None)
+        self.assertTrue(bot._stale_should_alert("x", now))
+        bot._STALE_ALERT["x"] = now
+        self.assertFalse(bot._stale_should_alert("x", now + timedelta(hours=1)))
+        self.assertTrue(bot._stale_should_alert("x", now + timedelta(hours=25)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
