@@ -181,7 +181,8 @@ def is_bot_admin(user_id):
 
 
 def has_admin(inter):
-    return is_bot_admin(inter.user.id)
+    """Used by /settings — owner only (bot admins can't change settings)."""
+    return inter.user.id == OWNER_ID
 
 def parse_datetime(input_str):
     input_str = input_str.strip()
@@ -10031,8 +10032,10 @@ async def botadmin_cmd(inter: discord.Interaction, action: app_commands.Choice[s
     await inter.response.send_message(msg, allowed_mentions=discord.AllowedMentions.none())
 
 
-@bot.tree.command(name="events", description="List upcoming events with their reminder channel and who gets pinged")
+@bot.tree.command(name="events", description="Owner: list upcoming events with their reminder channel and who gets pinged")
 async def events_cmd(inter: discord.Interaction):
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
     now = datetime.utcnow()
     tags = db_get_event_tags()
     chans = db_get_event_channels()
@@ -10063,12 +10066,12 @@ async def events_cmd(inter: discord.Interaction):
     await inter.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="eventchannel", description="Admin: move the reminders of many events to a channel at once")
+@bot.tree.command(name="eventchannel", description="Owner: move the reminders of many events to a channel at once")
 @app_commands.describe(channel="Channel the reminders should post in", name_contains="Only events whose name contains this (blank = all upcoming)",
                        reset="Send them back to the default events channel instead")
 async def eventchannel_cmd(inter: discord.Interaction, channel: discord.TextChannel, name_contains: str = "", reset: bool = False):
-    if not is_bot_admin(inter.user.id):
-        return await inter.response.send_message("❌ Admins only.", ephemeral=True)
+    if inter.user.id != OWNER_ID:
+        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
     perms = channel.permissions_for(inter.guild.me)
     if not reset and not (perms.view_channel and perms.send_messages):
         return await inter.response.send_message(
@@ -11063,11 +11066,11 @@ class SettingValueModal(discord.ui.Modal):
         )
 
 
-@bot.tree.command(name="settings", description="View and change the bot's settings (admin only)")
+@bot.tree.command(name="settings", description="View and change the bot's settings (owner only)")
 @app_commands.guild_only()
 async def settings_command(inter: discord.Interaction):
     if not has_admin(inter):
-        return await inter.response.send_message("❌ Admin only.", ephemeral=True)
+        return await inter.response.send_message("❌ Only the owner can change settings.", ephemeral=True)
     await inter.response.send_message(
         embed=_settings_overview_embed("channels"),
         view=SettingsView(inter.user.id, "channels"),
