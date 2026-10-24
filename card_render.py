@@ -285,3 +285,185 @@ def render_progress_card(d):
 def _m(n):
     n = float(n)
     return f"{n / 1e6:.2f}M" if abs(n) >= 1e6 else f"{n:,.0f}"
+
+
+# ============================================================
+# LEADERBOARD CARD
+# ============================================================
+def render_leaderboard_card(d):
+    """d: title, subtitle, accent(rgb), group(bool), unit_prefix('+'),
+    rows: [{name, val, delta(int|None: +up/-down rank change), level('good'|'mid'|'bad'|None), me(bool)}] sorted desc,
+    me_row: optional {rank, name, val} pinned at the bottom when the viewer is outside the list,
+    footer: str. Returns BytesIO PNG."""
+    rows = d.get("rows") or []
+    accent = d.get("accent") or GOLD_DEFAULT
+    c = _Canvas(2400)
+    y = PAD
+
+    # header
+    c.rect(PAD, y, W - 2 * PAD, 96, PANEL)
+    c.rect(PAD, y + 20, 5, 56, accent, r=3)
+    c.text(PAD + 28, y + 22, d.get("title", "Leaderboard"), "b", 30, TEXT)
+    c.text(PAD + 28, y + 62, d.get("subtitle", ""), "r", 15, MUTED)
+    if d.get("group"):
+        w = c.text_w("GROUP", "b", 13) + 28
+        c.rect(W - PAD - 28 - w, y + 34, w, 28, PANEL2, r=14)
+        c.text(W - PAD - 28 - w / 2, y + 48, "GROUP", "b", 13, accent, anchor="mm")
+    y += 96 + 16
+
+    # podium: 2nd | 1st | 3rd
+    pod = rows[:3]
+    if pod:
+        gap = 16
+        tw = (W - 2 * PAD - 2 * gap) // 3
+        order = [1, 0, 2]
+        heights = {0: 190, 1: 160, 2: 160}
+        base = max(heights[i] for i in range(len(pod)))
+        for slot, idx in enumerate(order):
+            if idx >= len(pod):
+                continue
+            r = pod[idx]
+            h = heights[idx]
+            x = PAD + slot * (tw + gap)
+            ty = y + (base - h)
+            hl = r.get("me")
+            c.rect(x, ty, tw, h, PANEL, outline=accent if hl else None)
+            if idx == 0:
+                c.rect(x, ty, tw, 5, YELLOW, r=3)
+            medal = _icon(f"medal_{idx + 1}", 44 if idx == 0 else 38)
+            if medal:
+                c.im.paste(medal, (int((x + 20) * S), int((ty + 22) * S)), medal)
+            c.text(x + tw - 20, ty + 26, f"#{idx + 1}", "b", 15, MUTED, anchor="ra")
+            nm = _fit(c, r["name"], "b", 22 if idx == 0 else 19, tw - 40)
+            c.text(x + 20, ty + (84 if idx == 0 else 74), nm[0], "b", nm[1], TEXT)
+            val = f"{d.get('unit_prefix', '+')}{_fmt(r['val'])}"
+            vs = 30 if idx == 0 else 25
+            c.text(x + 20, ty + (118 if idx == 0 else 106), val, "b", vs, accent)
+            if r.get("delta"):
+                _delta(c, x + tw - 20, ty + h - 34, r["delta"])
+        y += base + 16
+
+    # remaining rows
+    rest = rows[3:]
+    if rest:
+        rh = 50
+        panel_h = 20 + len(rest) * rh + 10 + (64 if d.get("me_row") else 0)
+        c.rect(PAD, y, W - 2 * PAD, panel_h, PANEL)
+        top = rows[0]["val"] or 1
+        ry = y + 20
+        for i, r in enumerate(rest):
+            rank = i + 4
+            if r.get("me"):
+                c.rect(PAD + 10, ry - 4, W - 2 * PAD - 20, rh - 4, PANEL2, r=12, outline=accent)
+            c.text(PAD + 40, ry + 20, f"{rank}", "b", 16, MUTED, anchor="mm")
+            nm = _fit(c, r["name"], "s", 17, 230)
+            c.text(PAD + 72, ry + 20, nm[0], "s", nm[1], TEXT, anchor="lm")
+            col = {"good": GREEN, "mid": YELLOW, "bad": RED}.get(r.get("level"), accent)
+            c.bar(PAD + 320, ry + 13, 340, 14, r["val"] / top, col)
+            c.text(PAD + 690, ry + 20, f"{d.get('unit_prefix', '+')}{_fmt(r['val'])}", "b", 17, TEXT, anchor="lm")
+            if r.get("delta"):
+                _delta(c, W - PAD - 28, ry + 8, r["delta"])
+            ry += rh
+        if d.get("me_row"):
+            m = d["me_row"]
+            c.d.line([(PAD + 28) * S, (ry + 4) * S, (W - PAD - 28) * S, (ry + 4) * S], fill=TRACK, width=S)
+            ry += 14
+            c.rect(PAD + 10, ry, W - 2 * PAD - 20, 44, PANEL2, r=12, outline=accent)
+            c.text(PAD + 40, ry + 22, f"{m['rank']}", "b", 16, accent, anchor="mm")
+            c.text(PAD + 72, ry + 22, f"{m['name']}  (you)", "s", 17, TEXT, anchor="lm")
+            c.text(PAD + 690, ry + 22, f"{d.get('unit_prefix', '+')}{_fmt(m['val'])}", "b", 17, TEXT, anchor="lm")
+        y += panel_h + 16
+
+    if d.get("footer"):
+        c.text(PAD + 4, y + 2, d["footer"], "r", 13, MUTED)
+        y += 26
+    y += 10
+    out = io.BytesIO()
+    c.finish(max(y, 200)).save(out, "PNG", optimize=True)
+    out.seek(0)
+    return out
+
+
+GOLD_DEFAULT = (245, 197, 66)
+
+
+def _fit(c, s, weight, size, max_w):
+    """Shrink font size until text fits max_w (min 12); returns (text, size)."""
+    s = str(s)
+    while c.text_w(s, weight, size) > max_w and size > 12:
+        size -= 1
+    return s, size
+
+
+def _delta(c, right, y, delta, **kw):
+    up = delta > 0
+    col = GREEN if up else RED
+    txt = f"{'▲' if up else '▼'} {abs(delta)}"
+    c.text(right, y + 12, txt, "b", 14, col, anchor="rm")
+
+
+# ============================================================
+# COMPARE CARD (head to head)
+# ============================================================
+def render_compare_card(d):
+    """d: a{name,tag}, b{name,tag}, subtitle, rows: [(label, a_val, b_val)], higher_is_better default True."""
+    rows = d["rows"]
+    c = _Canvas(1600)
+    y = PAD
+    half = (W - 2 * PAD - 120) // 2
+    c.rect(PAD, y, W - 2 * PAD, 110, PANEL)
+    ax = PAD + 28
+    bx = W - PAD - 28
+    c.text(ax, y + 22, f"{d['a'].get('tag', '')}", "s", 14, MUTED)
+    na = _fit(c, d["a"]["name"], "b", 30, 340)
+    c.text(ax, y + 44, na[0], "b", na[1], BLUE)
+    c.text(bx, y + 22, f"{d['b'].get('tag', '')}", "s", 14, MUTED, anchor="ra")
+    nb = _fit(c, d["b"]["name"], "b", 30, 340)
+    c.text(bx, y + 44, nb[0], "b", nb[1], ORANGE, anchor="ra")
+    c.text(W / 2, y + 40, "VS", "b", 26, MUTED, anchor="mm")
+    c.text(W / 2, y + 80, d.get("subtitle", ""), "r", 13, MUTED, anchor="mm")
+    y += 110 + 16
+
+    wins_a = wins_b = 0
+    rh = 74
+    panel_h = 20 + len(rows) * rh
+    c.rect(PAD, y, W - 2 * PAD, panel_h, PANEL)
+    ry = y + 14
+    mid = W / 2
+    bar_w = half - 150
+    for label, av, bv in rows:
+        aw, bw = av > bv, bv > av
+        wins_a += aw
+        wins_b += bw
+        top = max(av, bv, 1)
+        c.text(mid, ry + 8, label.upper(), "s", 12, MUTED, anchor="mm")
+        # left bar grows leftwards from center, right bar rightwards
+        by = ry + 24
+        lx = mid - 24
+        c.rect(lx - bar_w, by, bar_w, 14, TRACK, r=7)
+        fw = max(14, bar_w * av / top) if av else 0
+        if fw:
+            c.rect(lx - fw, by, fw, 14, BLUE if aw or av == bv else (60, 100, 150), r=7)
+        rx = mid + 24
+        c.rect(rx, by, bar_w, 14, TRACK, r=7)
+        fw = max(14, bar_w * bv / top) if bv else 0
+        if fw:
+            c.rect(rx, by, fw, 14, ORANGE if bw or av == bv else (150, 95, 50), r=7)
+        c.text(PAD + 28, ry + 31, _fmt(av), "b" if aw else "s", 19 if aw else 17, TEXT if aw else MUTED, anchor="lm")
+        c.text(W - PAD - 28, ry + 31, _fmt(bv), "b" if bw else "s", 19 if bw else 17, TEXT if bw else MUTED, anchor="rm")
+        ry += rh
+    y += panel_h + 16
+
+    # verdict
+    c.rect(PAD, y, W - 2 * PAD, 64, PANEL)
+    if wins_a == wins_b:
+        verdict, vcol = f"Dead even, {wins_a} categories each", MUTED
+    else:
+        w, n = (d["a"]["name"], wins_a) if wins_a > wins_b else (d["b"]["name"], wins_b)
+        verdict, vcol = f"{w} takes it, {n} of {len(rows)} categories", YELLOW
+    c.text(W / 2, y + 32, verdict, "b", 20, vcol, anchor="mm")
+    y += 64 + 24
+    out = io.BytesIO()
+    c.finish(y).save(out, "PNG", optimize=True)
+    out.seek(0)
+    return out
