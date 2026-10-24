@@ -1542,6 +1542,49 @@ def deads_requirement_line(deaths, highest_power, season_note="", days_elapsed=N
             f"150-249% well above, 250%+ a monster.)")
 
 
+def _fmt_m(n):
+    """1950000 -> '1.95M' (compact units for the progress card)."""
+    n = float(n)
+    return f"{n / 1e6:.2f}M" if abs(n) >= 1e6 else f"{n:,.0f}"
+
+
+def deads_card_line(deaths, highest_power, start_date, end_date, season_id):
+    """One compact line for the !progress card: a status dot (by pace), a 10-block bar toward the full
+    season deads requirement, the numbers, and how many more deads are still needed. None if unknown."""
+    try:
+        if not highest_power or highest_power <= 0:
+            return None
+        try:
+            tiers = _parse_deads_tiers(get_setting("deads_requirement"))
+        except Exception:
+            tiers = _parse_deads_tiers(SETTINGS_SCHEMA["deads_requirement"]["default"])
+        hp_m = highest_power / 1e6
+        chosen = None
+        for power_m, deads_m in tiers:
+            if hp_m >= power_m:
+                chosen = (power_m, deads_m)
+        required = int(chosen[1] * 1e6) if chosen else int(highest_power * (tiers[0][1] / tiers[0][0]))
+        deaths = max(0, int(deaths or 0))
+
+        start = date.fromisoformat(str(start_date)[:10])
+        days = (date.fromisoformat(str(end_date)[:10]) - start).days + 1
+        end = db_get_season_end_date(season_id)
+        season_days = ((date.fromisoformat(str(end)[:10]) - start).days + 1) if end else int(get_setting("season_length_days"))
+        days = max(1, min(days, season_days))
+        pace = deaths / (required * days / season_days) * 100 if required else 0
+
+        filled = max(0, min(10, int(deaths / required * 10))) if required else 0
+        bar = "▰" * filled + "▱" * (10 - filled)
+        if deaths >= required:
+            return f"🟢 **Deads req** {bar} {_fmt_m(deaths)} / {_fmt_m(required)} ✅ done"
+        dot = "🟢" if pace >= 100 else ("🟡" if pace >= 50 else "🔴")
+        return (f"{dot} **Deads req** {bar} {_fmt_m(deaths)} / {_fmt_m(required)} · "
+                f"need **{_fmt_m(required - deaths)}** more · pace {pace:.0f}%")
+    except Exception as e:
+        log_info(f"[DEADS CARD] couldn't build line: {e}")
+        return None
+
+
 def init_settings():
     """Create the settings table (if needed) and load saved values into memory."""
     try:
@@ -4625,7 +4668,12 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
         if t45_healed_val:
             combat_parts.append(f"❤️ {t45_healed_val}{healed_rank_str}")
         if combat_parts:
-            embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value="  ·  ".join(combat_parts), inline=False)
+            combat_value = "  ·  ".join(combat_parts)
+            _deads_val = _parse_stat_num(stats.get("deads_gain")) if stats.get("deads_gain") else None
+            _deads_line = deads_card_line(_deads_val, highest_power, start_date, end_date_used, season_id) if _deads_val is not None else None
+            if _deads_line:
+                combat_value += "\n" + _deads_line
+            embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value=combat_value, inline=False)
 
         # Mana Spent — estimated the same way as !stopmana used to, assuming it's all T5.
         # Guild-side !progress only has the COMBINED T4/T5 Healed figure (unlike the server
