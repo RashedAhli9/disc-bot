@@ -1618,6 +1618,46 @@ def deads_requirement_line(deaths, highest_power, season_note="", days_elapsed=N
             f"150-249% well above, 250%+ a monster.)")
 
 
+# ============================================================
+# BOT (APPLICATION) EMOJIS — images in emoji_assets/ are uploaded once and usable in every server
+# ============================================================
+EMOJI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emoji_assets")
+_APP_EMOJIS = {}  # emoji name -> '<:name:id>' text
+
+
+def emo(name, fallback=""):
+    """The bot's custom emoji as text, or `fallback` (a normal emoji/character) if it isn't uploaded."""
+    return _APP_EMOJIS.get(name) or fallback
+
+
+async def sync_app_emojis():
+    """Upload any emoji_assets/*.png the bot doesn't own yet, and remember all of them for emo()."""
+    try:
+        existing = {e.name: e for e in await bot.fetch_application_emojis()}
+        added = 0
+        if os.path.isdir(EMOJI_DIR):
+            for fn in sorted(os.listdir(EMOJI_DIR)):
+                name, ext = os.path.splitext(fn)
+                if ext.lower() not in (".png", ".gif", ".jpg", ".jpeg") or name in existing:
+                    continue
+                with open(os.path.join(EMOJI_DIR, fn), "rb") as fh:
+                    existing[name] = await bot.create_application_emoji(name=name, image=fh.read())
+                added += 1
+        _APP_EMOJIS.clear()
+        _APP_EMOJIS.update({n: str(e) for n, e in existing.items()})
+        log_info(f"[EMOJI] {len(_APP_EMOJIS)} bot emojis ready ({added} newly uploaded)")
+    except Exception as e:
+        log_info(f"[EMOJI] sync failed (plain emojis will be used): {type(e).__name__}: {e}")
+
+
+def _rank_tag(rank):
+    """' (🥇 #1)' style rank text: custom medals for the top 3, plain '#N' after that."""
+    medals = {1: ("medal_1", "🥇"), 2: ("medal_2", "🥈"), 3: ("medal_3", "🥉")}
+    if rank in medals:
+        return f" ({emo(*medals[rank])} #{rank})"
+    return f" (#{rank})"
+
+
 def _fmt_m(n):
     """1950000 -> '1.95M' (compact units for the progress card)."""
     n = float(n)
@@ -1650,10 +1690,12 @@ def deads_card_line(deaths, highest_power, start_date, end_date, season_id):
         pace = deaths / (required * days / season_days) * 100 if required else 0
 
         filled = max(0, min(10, int(deaths / required * 10))) if required else 0
-        bar = "▰" * filled + "▱" * (10 - filled)
-        if deaths >= required:
+        done = deaths >= required
+        dot = "🟢" if (done or pace >= 100) else ("🟡" if pace >= 50 else "🔴")
+        seg = {"🟢": "bar_g", "🟡": "bar_y", "🔴": "bar_r"}[dot]
+        bar = emo(seg, "▰") * filled + emo("bar_e", "▱") * (10 - filled)
+        if done:
             return f"🟢 **Deads req** {bar} {_fmt_m(deaths)} / {_fmt_m(required)} ✅ done"
-        dot = "🟢" if pace >= 100 else ("🟡" if pace >= 50 else "🔴")
         return (f"{dot} **Deads req** {bar} {_fmt_m(deaths)} / {_fmt_m(required)} · "
                 f"need **{_fmt_m(required - deaths)}** more")
     except Exception as e:
@@ -3676,6 +3718,8 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Command sync failed: {e}")
     
+    await sync_app_emojis()
+
     # Pre-load cache from database on startup (so commands work immediately)
     preload_cache_from_db()
 
@@ -4658,16 +4702,16 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
                 power_gain = 0
         
         # Build ranking strings
-        power_rank_str = f" (#{power_rank[account_id][0]})" if account_id in power_rank else ""
-        merits_rank_str = f" (#{merits_rank[account_id][0]})" if account_id in merits_rank else ""
-        kills_rank_str = f" (#{kills_rank[account_id][0]})" if account_id in kills_rank else ""
-        deads_rank_str = f" (#{deads_rank[account_id][0]})" if account_id in deads_rank else ""
-        healed_rank_str = f" (#{healed_rank[account_id][0]})" if account_id in healed_rank else ""
-        infantry_rank_str = f" (#{infantry_rank[account_id][0]})" if account_id in infantry_rank else ""
-        cavalry_rank_str = f" (#{cavalry_rank[account_id][0]})" if account_id in cavalry_rank else ""
-        mage_rank_str = f" (#{mage_rank[account_id][0]})" if account_id in mage_rank else ""
-        marksman_rank_str = f" (#{marksman_rank[account_id][0]})" if account_id in marksman_rank else ""
-        other_rank_str = f" (#{other_rank[account_id][0]})" if account_id in other_rank else ""
+        power_rank_str = _rank_tag(power_rank[account_id][0]) if account_id in power_rank else ""
+        merits_rank_str = _rank_tag(merits_rank[account_id][0]) if account_id in merits_rank else ""
+        kills_rank_str = _rank_tag(kills_rank[account_id][0]) if account_id in kills_rank else ""
+        deads_rank_str = _rank_tag(deads_rank[account_id][0]) if account_id in deads_rank else ""
+        healed_rank_str = _rank_tag(healed_rank[account_id][0]) if account_id in healed_rank else ""
+        infantry_rank_str = _rank_tag(infantry_rank[account_id][0]) if account_id in infantry_rank else ""
+        cavalry_rank_str = _rank_tag(cavalry_rank[account_id][0]) if account_id in cavalry_rank else ""
+        mage_rank_str = _rank_tag(mage_rank[account_id][0]) if account_id in mage_rank else ""
+        marksman_rank_str = _rank_tag(marksman_rank[account_id][0]) if account_id in marksman_rank else ""
+        other_rank_str = _rank_tag(other_rank[account_id][0]) if account_id in other_rank else ""
         
         
         # Calculate totals for RSS
@@ -10170,6 +10214,24 @@ async def menu_rate_lord(inter: discord.Interaction, member: discord.Member):
     except Exception as e:
         log_info(f"[MENU] rate failed: {type(e).__name__}: {e}")
         await inter.followup.send(f"❌ Couldn't rate them: {e}", ephemeral=True)
+
+
+@bot.command(name="emojitest")
+async def emojitest(ctx):
+    """Owner only: (re)upload the bot's custom emojis and show how they look."""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    await sync_app_emojis()
+    if not _APP_EMOJIS:
+        return await ctx.send("❌ No bot emojis loaded — check the logs for `[EMOJI]`.")
+    def bar(n, seg):
+        return emo(seg, "▰") * n + emo("bar_e", "▱") * (10 - n)
+    await ctx.send(
+        f"**Loaded {len(_APP_EMOJIS)} emojis:** " + " ".join(_APP_EMOJIS.values()) + "\n\n"
+        f"🟢 **Deads req** {bar(10, 'bar_g')} done\n"
+        f"🟡 **Deads req** {bar(5, 'bar_y')} behind\n"
+        f"🔴 **Deads req** {bar(1, 'bar_r')} far behind\n\n"
+        f"Ranks: {_rank_tag(1)} {_rank_tag(2)} {_rank_tag(3)} {_rank_tag(4)}")
 
 
 @bot.tree.command(name="botadmin", description="Owner: choose who counts as a bot admin (add / remove / list)")
