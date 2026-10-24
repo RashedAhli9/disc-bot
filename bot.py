@@ -1623,7 +1623,7 @@ def deads_card_line(deaths, highest_power, start_date, end_date, season_id):
             return f"🟢 **Deads req** {bar} {_fmt_m(deaths)} / {_fmt_m(required)} ✅ done"
         dot = "🟢" if pace >= 100 else ("🟡" if pace >= 50 else "🔴")
         return (f"{dot} **Deads req** {bar} {_fmt_m(deaths)} / {_fmt_m(required)} · "
-                f"need **{_fmt_m(required - deaths)}** more · pace {pace:.0f}%")
+                f"need **{_fmt_m(required - deaths)}** more")
     except Exception as e:
         log_info(f"[DEADS CARD] couldn't build line: {e}")
         return None
@@ -4723,7 +4723,7 @@ async def progress(ctx, user_input: str = None, season_input: str = None):
             _deads_val = _parse_stat_num(stats.get("deads_gain")) if stats.get("deads_gain") else None
             _deads_line = deads_card_line(_deads_val, highest_power, start_date, end_date_used, season_id) if _deads_val is not None else None
             if _deads_line:
-                combat_value += "\n" + _deads_line
+                combat_value += "\n\n" + _deads_line
             embed.add_field(name="Kills / Deads / T4/T5 Units Rss Healed", value=combat_value, inline=False)
 
         # Mana Spent — estimated the same way as !stopmana used to, assuming it's all T5.
