@@ -157,8 +157,13 @@ def render_progress_card(d):
     th = 124
     if d.get("power") or d.get("power_gain"):
         pv = _fmt(d["power"]) if d.get("power") else f"+{_fmt(d.get('power_gain'))}"
-        sub = f"+{_fmt(d['power_gain'])} this season" if d.get("power") and d.get("power_gain") else None
-        c.tile(PAD, y, half, th, "Power", pv, GREEN, sub, d.get("power_rank"))
+        if d.get("power") and d.get("power_gain"):
+            sub = f"+{_fmt(d['power_gain'])} this season"
+        elif d.get("power"):
+            sub = "no new peak this season"
+        else:
+            sub = None
+        c.tile(PAD, y, half, th, "Power", pv, GREEN if d.get("power_gain") else MUTED, sub, d.get("power_rank"))
     if d.get("merits"):
         sub = f"{d['merits_pct']} of power" if d.get("merits_pct") else None
         c.tile(PAD + half + 16, y, half, th, "Merits", d["merits"].lstrip("+"), RED, sub, d.get("merits_rank"))
