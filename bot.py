@@ -2366,13 +2366,13 @@ migrate_db_progress()
 # SEASON TRACKER DATABASE FUNCTIONS
 # ============================================================
 
-def db_queue_task(tool_name, tool_input, description, scheduled_time_iso, created_by, channel_id):
+def db_queue_task(tool_name, tool_input, description, scheduled_time_iso, created_by, channel_id, repeat=None):
     conn = db_connect(DB)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO queued_tasks (tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, created_at) "
-        "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
-        (tool_name, json.dumps(tool_input), description, scheduled_time_iso, str(created_by), str(channel_id), datetime.utcnow().isoformat())
+        "INSERT INTO queued_tasks (tool_name, tool_input, description, scheduled_time, status, created_by, channel_id, created_at, repeat) "
+        "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+        (tool_name, json.dumps(tool_input), description, scheduled_time_iso, str(created_by), str(channel_id), datetime.utcnow().isoformat(), repeat)
     )
     task_id = c.lastrowid
     conn.commit()
@@ -2394,7 +2394,7 @@ def db_get_due_tasks():
     now = datetime.utcnow().isoformat()
     conn = db_connect(DB)
     c = conn.cursor()
-    c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, channel_id FROM queued_tasks WHERE status='pending' AND scheduled_time<=?", (now,))
+    c.execute("SELECT id, tool_name, tool_input, description, scheduled_time, channel_id, repeat FROM queued_tasks WHERE status='pending' AND scheduled_time<=?", (now,))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -3997,10 +3997,42 @@ _commands_synced = False
 import traceback as _traceback
 
 
+async def _command_rescue(ctx):
+    """Unknown !command: suggest the closest real one, or treat a sentence-like message as an !ask."""
+    import difflib
+    name = (ctx.invoked_with or "").lower()
+    if not name or not name.isalpha() or not ctx.guild:
+        return
+    close = difflib.get_close_matches(name, list(bot.all_commands), n=1, cutoff=0.72)
+    if close:
+        return await ctx.send(f"🤔 No `!{name}` — did you mean `!{close[0]}`?")
+    text = ctx.message.content[len(ctx.prefix or ""):].strip()
+    if len(text.split()) >= 3 and _anthropic_client:
+        await ask.callback(ctx, query=text)
+
+
+async def _ask_followup(message):
+    """@mention the bot, or reply to one of its 🧠 answers, to keep talking without typing !ask."""
+    if not message.guild or not _anthropic_client or message.content.strip().startswith("!"):
+        return False
+    mentioned = bot.user is not None and bot.user in message.mentions
+    replied = False
+    ref = message.reference
+    if ref and not mentioned:
+        target = ref.resolved if isinstance(ref.resolved, discord.Message) else ref.cached_message
+        replied = bool(target and target.author.id == bot.user.id and target.content.startswith("🧠"))
+    if not (mentioned or replied):
+        return False
+    q = re.sub(rf"<@!?{bot.user.id}>", "", message.content).strip()
+    ctx = await bot.get_context(message)
+    await ask.callback(ctx, query=q or None)
+    return True
+
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
-        return
+        return await _command_rescue(ctx)
     if isinstance(error, commands.CommandInvokeError):
         error = error.original
     if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument, commands.TooManyArguments)):
@@ -6655,28 +6687,219 @@ async def topspent(ctx, season_name: str = None):
                        footer=f"Estimate: T4/T5 healed x {mana_per_t5()} mana, assuming all T5")
 
 
-# Per-channel short-term conversation memory for !ask follow-ups.
-# In-memory only (not persisted) — resets on bot restart, capped per channel.
-_ask_conversations = {}
+# Per-channel short-term conversation memory for !ask follow-ups, kept in SQLite so a deploy/restart
+# doesn't wipe it. Capped to the last few turns and expires after a while.
 _ASK_MEMORY_TURNS = 3  # user+assistant pairs kept per channel — kept short so a bad
                        # answer can't compound across many turns before aging out
+_ASK_MEMORY_TTL_H = 12  # older turns are ignored (and pruned)
+_ASK_NOTE_MAX = 12      # standing notes kept per person
+
+
+def _ask_db_init():
+    conn = db_connect(DB)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS ask_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+              "channel_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS ask_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+              "user_id TEXT NOT NULL, note TEXT NOT NULL, ts TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS ask_usage (day TEXT NOT NULL, model TEXT NOT NULL, asks INTEGER DEFAULT 0, "
+              "in_tok INTEGER DEFAULT 0, out_tok INTEGER DEFAULT 0, cache_read INTEGER DEFAULT 0, "
+              "cache_write INTEGER DEFAULT 0, cost REAL DEFAULT 0, PRIMARY KEY (day, model))")
+    try:
+        c.execute("ALTER TABLE queued_tasks ADD COLUMN repeat TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already there
+    conn.commit()
+    conn.close()
+
+
+_ask_db_init()
 
 
 def _ask_get_history(channel_id):
-    return _ask_conversations.get(channel_id, [])
+    cutoff = (datetime.utcnow() - timedelta(hours=_ASK_MEMORY_TTL_H)).isoformat()
+    conn = db_connect(DB)
+    rows = conn.execute("SELECT role, content FROM ask_memory WHERE channel_id=? AND ts>=? ORDER BY id DESC LIMIT ?",
+                        (str(channel_id), cutoff, _ASK_MEMORY_TURNS * 2)).fetchall()
+    conn.close()
+    hist = [{"role": r, "content": c} for r, c in reversed(rows)]
+    while hist and hist[0]["role"] != "user":  # never start on an assistant turn
+        hist.pop(0)
+    return hist
 
 
 def _ask_save_turn(channel_id, user_msg, assistant_msg):
-    history = _ask_conversations.setdefault(channel_id, [])
-    history.append({"role": "user", "content": user_msg})
-    history.append({"role": "assistant", "content": assistant_msg})
-    # Keep only the last N turns (2 entries per turn)
-    if len(history) > _ASK_MEMORY_TURNS * 2:
-        del history[:len(history) - _ASK_MEMORY_TURNS * 2]
+    now = datetime.utcnow()
+    conn = db_connect(DB)
+    conn.execute("INSERT INTO ask_memory (channel_id, role, content, ts) VALUES (?,?,?,?)",
+                 (str(channel_id), "user", user_msg[:1500], now.isoformat()))
+    conn.execute("INSERT INTO ask_memory (channel_id, role, content, ts) VALUES (?,?,?,?)",
+                 (str(channel_id), "assistant", assistant_msg[:1500], now.isoformat()))
+    conn.execute("DELETE FROM ask_memory WHERE channel_id=? AND id NOT IN "
+                 "(SELECT id FROM ask_memory WHERE channel_id=? ORDER BY id DESC LIMIT ?)",
+                 (str(channel_id), str(channel_id), _ASK_MEMORY_TURNS * 2))
+    conn.execute("DELETE FROM ask_memory WHERE ts<?", ((now - timedelta(hours=_ASK_MEMORY_TTL_H * 4)).isoformat(),))
+    conn.commit()
+    conn.close()
 
 
 def _ask_clear_history(channel_id):
-    _ask_conversations.pop(channel_id, None)
+    conn = db_connect(DB)
+    conn.execute("DELETE FROM ask_memory WHERE channel_id=?", (str(channel_id),))
+    conn.commit()
+    conn.close()
+
+
+def ask_notes_get(user_id):
+    conn = db_connect(DB)
+    rows = conn.execute("SELECT note FROM ask_notes WHERE user_id=? ORDER BY id", (str(user_id),)).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def ask_note_add(user_id, note):
+    note = " ".join(note.split())[:200]
+    conn = db_connect(DB)
+    conn.execute("INSERT INTO ask_notes (user_id, note, ts) VALUES (?,?,?)", (str(user_id), note, datetime.utcnow().isoformat()))
+    conn.execute("DELETE FROM ask_notes WHERE user_id=? AND id NOT IN "
+                 "(SELECT id FROM ask_notes WHERE user_id=? ORDER BY id DESC LIMIT ?)",
+                 (str(user_id), str(user_id), _ASK_NOTE_MAX))
+    conn.commit()
+    conn.close()
+
+
+def ask_notes_clear(user_id):
+    conn = db_connect(DB)
+    n = conn.execute("DELETE FROM ask_notes WHERE user_id=?", (str(user_id),)).rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+# ---- !ask cost tracking (estimates; per million tokens: input, output) ----
+ASK_DAILY_BUDGET_USD = float(os.getenv("ASK_DAILY_BUDGET_USD", "3"))
+_ASK_PRICES = {"haiku": (1.0, 5.0), "sonnet": (3.0, 15.0), "opus": (5.0, 25.0)}
+_ask_budget_alerted = {"day": None}
+
+
+def ask_estimate_cost(model, in_tok, out_tok, cache_read=0, cache_write=0):
+    key = next((k for k in _ASK_PRICES if k in model), "sonnet")
+    pin, pout = _ASK_PRICES[key]
+    return (in_tok * pin + cache_read * pin * 0.1 + cache_write * pin * 1.25 + out_tok * pout) / 1_000_000
+
+
+def ask_record_usage(model, usage):
+    try:
+        i = getattr(usage, "input_tokens", 0) or 0
+        o = getattr(usage, "output_tokens", 0) or 0
+        cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cost = ask_estimate_cost(model, i, o, cr, cw)
+        day = datetime.utcnow().strftime("%Y-%m-%d")
+        conn = db_connect(DB)
+        conn.execute("INSERT INTO ask_usage (day, model, asks, in_tok, out_tok, cache_read, cache_write, cost) "
+                     "VALUES (?,?,0,?,?,?,?,?) ON CONFLICT(day, model) DO UPDATE SET in_tok=in_tok+excluded.in_tok, "
+                     "out_tok=out_tok+excluded.out_tok, cache_read=cache_read+excluded.cache_read, "
+                     "cache_write=cache_write+excluded.cache_write, cost=cost+excluded.cost",
+                     (day, model, i, o, cr, cw, cost))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_error(f"[ASK USAGE] {type(e).__name__}: {e}")
+
+
+def ask_count_ask(model):
+    try:
+        day = datetime.utcnow().strftime("%Y-%m-%d")
+        conn = db_connect(DB)
+        conn.execute("INSERT INTO ask_usage (day, model, asks) VALUES (?,?,1) ON CONFLICT(day, model) DO UPDATE SET asks=asks+1",
+                     (day, model))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_error(f"[ASK USAGE] {type(e).__name__}: {e}")
+
+
+def ask_usage_today():
+    day = datetime.utcnow().strftime("%Y-%m-%d")
+    conn = db_connect(DB)
+    rows = conn.execute("SELECT model, asks, in_tok, out_tok, cache_read, cost FROM ask_usage WHERE day=?", (day,)).fetchall()
+    conn.close()
+    return rows
+
+
+async def ask_budget_check():
+    """DM the owner once per day when estimated !ask spend passes the daily budget."""
+    day = datetime.utcnow().strftime("%Y-%m-%d")
+    if _ask_budget_alerted["day"] == day:
+        return
+    total = sum(r[5] for r in ask_usage_today())
+    if total < ASK_DAILY_BUDGET_USD:
+        return
+    _ask_budget_alerted["day"] = day
+    try:
+        owner = bot.get_user(OWNER_ID) or await bot.fetch_user(OWNER_ID)
+        await owner.send(f"💸 !ask has used about ${total:.2f} today (budget ${ASK_DAILY_BUDGET_USD:.2f}). "
+                         f"Details in /status. Set ASK_DAILY_BUDGET_USD on Railway to change the limit.")
+    except Exception as e:
+        log_error(f"[ASK BUDGET] couldn't DM owner: {e}")
+
+
+# ---- number double-check: every figure in an answer should trace back to tool data ----
+_NUM_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s?([kKmMbB])?(?![\w])")
+_SUFFIX = {"k": 1e3, "m": 1e6, "b": 1e9}
+
+
+def _ask_parse_numbers(text, answer=False):
+    """[(value, tolerance)] for numbers in text. For an answer, small numbers/years are skipped."""
+    text = re.sub(r"<[^>]*>|https?://\S+|`[^`]*`", " ", text)
+    out = []
+    for m in _NUM_RE.finditer(text):
+        whole, frac, suf = m.group(1), m.group(2), m.group(3)
+        val = float(whole.replace(",", "") + ("." + frac if frac else ""))
+        tol = 0.5 if not frac else 0.5 * 10 ** -len(frac)
+        if suf:
+            mult = _SUFFIX[suf.lower()]
+            val *= mult
+            tol *= mult
+        if answer:
+            if val < 1000 and not suf:
+                continue
+            if not suf and not frac and "," not in whole and 1900 <= val <= 2100:
+                continue  # looks like a year
+        out.append((val, tol * 1.02 + 1e-9))
+    return out
+
+
+def ask_unverified_numbers(answer, sources):
+    """Figures in `answer` that match nothing in `sources` (tool results + the question), directly or as
+    a sum/difference of two of them. Returns the offending number strings."""
+    ans = _ask_parse_numbers(answer, answer=True)
+    if not ans:
+        return []
+    pool = [v for v, _ in _ask_parse_numbers(" ".join(sources))][:400]
+    derived = list(pool)
+    for i, a in enumerate(pool):
+        for b in pool[i + 1:]:
+            derived.append(a + b)
+            derived.append(abs(a - b))
+    bad = []
+    for val, tol in ans:
+        if not any(abs(val - d) <= max(tol, abs(d) * 0.0005) for d in derived):
+            bad.append(f"{val:,.0f}" if val >= 100 else f"{val:g}")
+    return list(dict.fromkeys(bad))[:8]
+
+
+_ASK_TOOL_LABELS = {
+    "get_player_stats": "pulling stats", "show_player_progress": "building the progress card",
+    "compare_players": "comparing players", "run_leaderboard": "pulling the leaderboard",
+    "run_server_leaderboard": "pulling server data", "show_scoreboard": "grading everyone",
+    "show_benchmark": "loading the benchmark", "show_server_top": "checking top servers",
+    "show_events_card": "drawing the schedule", "get_activity_rankings": "ranking everyone",
+    "get_pace_projection": "projecting pace", "show_chart": "drawing a chart", "show_group_chart": "drawing a chart",
+    "add_event": "adding the event", "edit_event": "editing the event", "delete_event": "removing the event",
+    "calculate": "double-checking the math", "get_player_growth": "checking growth",
+}
 
 
 def _ask_resolve_account_id(ctx, player_input):
@@ -7484,6 +7707,16 @@ ASK_TOOLS = [
         }
     },
     {
+        "name": "save_note",
+        "description": "Remember a standing preference or fact about the person asking (e.g. 'keep answers short', 'call me Rekz', 'my main is X'). Only when they ask you to remember something. Applies to them only.",
+        "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    },
+    {
+        "name": "forget_notes",
+        "description": "Delete every standing note saved about the person asking.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
         "name": "list_queued_tasks",
         "description": "List all pending scheduled/queued tasks (things set to run later). Renders its own message directly.",
         "input_schema": {"type": "object", "properties": {}}
@@ -7842,7 +8075,32 @@ async def _ask_fetch_player_stats_summary(ctx, player_input, season_input):
 
 
 SCHEDULABLE_TOOLS = {"add_event", "edit_event", "bulk_edit_event_times", "delete_event",
-                     "edit_season", "create_season", "force_fetch_all"}
+                     "edit_season", "create_season", "force_fetch_all",
+                     "show_scoreboard", "show_benchmark", "show_server_top", "show_events_card", "run_leaderboard"}
+REPEAT_CHOICES = ("daily", "weekly", "monthly")
+
+
+def next_repeat(dt, repeat, now=None):
+    """Next run after `dt` for a daily/weekly/monthly task, skipping anything already in the past."""
+    now = now or datetime.utcnow()
+    while True:
+        if repeat == "daily":
+            dt = dt + timedelta(days=1)
+        elif repeat == "weekly":
+            dt = dt + timedelta(days=7)
+        else:
+            y, m = (dt.year + 1, 1) if dt.month == 12 else (dt.year, dt.month + 1)
+            dt = dt.replace(year=y, month=m, day=min(dt.day, 28))
+        if dt > now:
+            return dt
+
+
+for _t in ASK_TOOLS:  # every schedulable tool can take a first-run time and an optional repeat
+    if _t["name"] in SCHEDULABLE_TOOLS:
+        _props = _t["input_schema"].setdefault("properties", {})
+        _props.setdefault("scheduled_time", {"type": "string", "description": "ISO 8601 UTC datetime to run this later instead of now. Omit to run immediately."})
+        _props["repeat"] = {"type": "string", "enum": list(REPEAT_CHOICES),
+                            "description": "Make a scheduled run recur (needs scheduled_time = first run). Admin only."}
 
 
 ASK_CONFIRM_OVER = 5  # bulk event changes touching more than this many events need a 👍 first
@@ -7907,19 +8165,40 @@ async def _ask_execute_tool_inner(ctx, tool_name, tool_input, bypass_permission=
     """
     try:
         # If this call includes a future scheduled_time, queue it instead of running now.
-        if not bypass_permission and tool_name in SCHEDULABLE_TOOLS and tool_input.get("scheduled_time"):
+        repeat = (tool_input.get("repeat") or "").lower() or None
+        if repeat and repeat not in REPEAT_CHOICES:
+            return False, f"repeat must be one of {', '.join(REPEAT_CHOICES)}."
+        if not bypass_permission and tool_name in SCHEDULABLE_TOOLS and (tool_input.get("scheduled_time") or repeat):
+            if not tool_input.get("scheduled_time"):
+                return False, "A repeating task needs scheduled_time for its first run (UTC ISO)."
             try:
                 scheduled_dt = datetime.fromisoformat(tool_input["scheduled_time"])
             except Exception:
                 return False, f"Couldn't parse scheduled_time '{tool_input['scheduled_time']}'. Use ISO format like 2026-08-28T00:00:00."
+            if repeat and scheduled_dt <= datetime.utcnow():
+                scheduled_dt = next_repeat(scheduled_dt, repeat)
             if scheduled_dt > datetime.utcnow():
                 if not _ask_is_admin(ctx):
                     return False, "Only admins can schedule actions."
-                clean_input = {k: v for k, v in tool_input.items() if k != "scheduled_time"}
+                clean_input = {k: v for k, v in tool_input.items() if k not in ("scheduled_time", "repeat")}
                 description = f"{tool_name}(" + ", ".join(f"{k}={v}" for k, v in clean_input.items()) + ")"
-                task_id = db_queue_task(tool_name, clean_input, description, scheduled_dt.isoformat(), ctx.author.id, ctx.channel.id)
-                return False, f"Queued task #{task_id}: {description} — scheduled for {scheduled_dt.strftime('%Y-%m-%d %H:%M UTC')}."
+                if repeat:
+                    description += f" [repeats {repeat}]"
+                task_id = db_queue_task(tool_name, clean_input, description, scheduled_dt.isoformat(), ctx.author.id, ctx.channel.id, repeat)
+                return False, (f"Queued task #{task_id}: {description} — "
+                               f"{'first run' if repeat else 'scheduled for'} {scheduled_dt.strftime('%Y-%m-%d %H:%M UTC')}.")
             # scheduled_time is in the past/now — fall through and run immediately
+
+        if tool_name == "save_note":
+            note = (tool_input.get("note") or "").strip()
+            if not note:
+                return False, "No note given."
+            ask_note_add(ctx.author.id, note)
+            return False, f"Saved. I'll keep this in mind for {ctx.author.display_name}: {note[:200]}"
+
+        if tool_name == "forget_notes":
+            n = ask_notes_clear(ctx.author.id)
+            return False, f"Cleared {n} saved note(s) for {ctx.author.display_name}."
 
         if tool_name == "show_scoreboard":
             await scoreboard.callback(ctx)
@@ -8635,7 +8914,7 @@ class _QueuedTaskCtx:
 async def check_queued_tasks():
     """Run any !ask-queued tasks whose scheduled time has arrived."""
     due = db_get_due_tasks()
-    for task_id, tool_name, tool_input_json, description, scheduled_time, channel_id in due:
+    for task_id, tool_name, tool_input_json, description, scheduled_time, channel_id, repeat in due:
         try:
             channel = bot.get_channel(int(channel_id))
             if not channel:
@@ -8652,17 +8931,23 @@ async def check_queued_tasks():
             fake_ctx = _QueuedTaskCtx(channel, guild, author)
             tool_input = json.loads(tool_input_json)
 
+            if repeat:  # line up the next run first, so a slow or failing run can't repeat itself
+                db_update_task_time(task_id, next_repeat(datetime.fromisoformat(scheduled_time), repeat).isoformat())
+
             rendered, result_text = await _ask_execute_tool(fake_ctx, tool_name, tool_input, bypass_permission=True)
-            db_set_task_status(task_id, "completed", result_text or "Done")
+            if not repeat:
+                db_set_task_status(task_id, "completed", result_text or "Done")
 
             if rendered:
-                await channel.send(f"✅ Scheduled task completed: {description}")
+                if not repeat:
+                    await channel.send(f"✅ Scheduled task completed: {description}")
             else:
                 await channel.send(f"✅ Scheduled task completed: {description}\n{result_text or ''}")
 
         except Exception as e:
             log_info(f"[QUEUED TASK ERROR] #{task_id}: {e}")
-            db_set_task_status(task_id, "failed", str(e))
+            if not repeat:
+                db_set_task_status(task_id, "failed", str(e))
 
 
 _BG_TASKS = set()  # keeps background tasks alive until they finish
@@ -8787,7 +9072,8 @@ ASK_RATE_MAX = 20      # asks per rolling hour for non-admins
 _ask_rate = {}         # user_id -> [timestamps of recent asks]
 _ASK_STATS = {"count": 0, "errors": 0, "capped": 0, "nudged": 0, "secs": []}  # secs = last 100 durations (shown in /status)
 
-ASK_MAIN_MODEL = "claude-sonnet-5"
+ASK_MAIN_MODEL = "claude-sonnet-5-5"
+ASK_DEEP_MODEL = "claude-opus-5-5"   # ratings / analysis / advice only
 ASK_FAST_MODEL = "claude-haiku-5-5"
 # Simple read-only lookups the fast model handles well...
 _ASK_FAST_OK = re.compile(
@@ -8800,8 +9086,15 @@ _ASK_NEEDS_MAIN = re.compile(
     r"pace|project\w*|grow\w*|chart|graph|tag|every|recurring|until)\b")
 
 
+# Judgement questions get the strongest model; anything that changes data does not need it.
+_ASK_DEEP = re.compile(r"\b(rate|rating|advice|analy\w*|slack\w*|worst|best player|who should|is it worth|strategy)\b")
+_ASK_MUTATES = re.compile(r"\b(add|edit|delete|remove|change|create|move|cancel|set|force|update|schedule|queue\w*|rename)\b")
+
+
 def _ask_pick_model(q_lower):
-    """Fast model for short, simple, read-only lookups; the full model for everything else."""
+    """Strongest model for rating/analysis, fast model for short read-only lookups, the full model otherwise."""
+    if _ASK_DEEP.search(q_lower) and not _ASK_MUTATES.search(q_lower):
+        return ASK_DEEP_MODEL
     if not get_setting("ask_fast_model"):
         return ASK_MAIN_MODEL
     if len(q_lower) > 120 or "\n" in q_lower or _ASK_NEEDS_MAIN.search(q_lower):
@@ -8945,7 +9238,9 @@ async def _ask_impl(ctx, *, query: str = None):
         "show_group_chart; the strongest-servers ratio cutoffs -> show_benchmark; top servers by power "
         "-> show_server_top; the event schedule image -> show_events_card (bot admins) or "
         "get_upcoming_events; active/inactive members -> show_active_members; the command list -> "
-        "show_help. These all post images themselves, so after calling one add at most one short line "
+        "show_help. To post one of these on a schedule ('every Monday 9am Dubai' — Dubai is UTC+4), call it with "
+        "scheduled_time (the FIRST run, UTC ISO) plus repeat = daily/weekly/monthly; admins only. If someone says "
+        "'remember that I like X' or 'keep it short for me', call save_note. These all post images themselves, so after calling one add at most one short line "
         "of your own. If someone asks what you can do or which command to use, call show_help and "
         "point at the 2-3 most relevant things for what they said.\n\n"
         "CHAINING: you can call multiple tools in sequence across turns to fully answer a "
@@ -9240,6 +9535,14 @@ async def _ask_impl(ctx, *, query: str = None):
     except Exception as e:
         log_error(f"[ASK] couldn't load chat sample: {e}")
 
+    try:
+        _notes = ask_notes_get(ctx.author.id)
+    except Exception:
+        _notes = []
+    if _notes:
+        voice_block += (f"STANDING NOTES {asker_name} asked you to remember (follow them): "
+                        + " | ".join(_notes) + "\n\n")
+
     _static_part, _marker, _rest = system_prompt.partition("You have broad access")
     if _marker:
         system_blocks = [
@@ -9276,6 +9579,29 @@ async def _ask_impl(ctx, *, query: str = None):
             messages=_cache_last(messages),
         )
 
+    status = {"msg": None}
+
+    async def _status_set(text):
+        try:
+            if status["msg"] is None:
+                status["msg"] = await ctx.send(f"⏳ {text}…")
+            else:
+                await status["msg"].edit(content=f"⏳ {text}…")
+        except Exception:
+            pass
+
+    async def _status_clear():
+        m, status["msg"] = status["msg"], None
+        if m is not None:
+            try:
+                await m.delete()
+            except Exception:
+                pass
+
+    tool_texts = []   # everything the tools told the AI — used to double-check the numbers in its answer
+    verify_retries = 0
+    ask_count_ask(model)
+
     try:
         final_text = None
         any_rendered = False
@@ -9288,12 +9614,13 @@ async def _ask_impl(ctx, *, query: str = None):
             except Exception as e:
                 if model == ASK_MAIN_MODEL:
                     raise
-                # The fast model failed (e.g. unavailable) — retry once on the full model and stick with it.
-                log_info(f"[ASK] fast model {model} failed ({type(e).__name__}: {e}); falling back to {ASK_MAIN_MODEL}")
+                # The fast/deep model failed (e.g. unavailable) — retry once on the main model and stick with it.
+                log_info(f"[ASK] model {model} failed ({type(e).__name__}: {e}); falling back to {ASK_MAIN_MODEL}")
                 model = ASK_MAIN_MODEL
                 ctx._ask_meta["model"] = model + " (fallback)"
                 response = await _ask_call(model)
             ctx._ask_meta["rounds"] += 1
+            ask_record_usage(model, getattr(response, "usage", None))
 
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
             ctx._ask_meta["tools"].extend(b.name for b in tool_use_blocks)
@@ -9312,13 +9639,29 @@ async def _ask_impl(ctx, *, query: str = None):
                     else:
                         messages[-1] = {"role": "user", "content": (messages[-1]["content"] if isinstance(messages[-1]["content"], list) else [{"type": "text", "text": str(messages[-1]["content"])}]) + [{"type": "text", "text": "Now write your answer to the user's question in plain text, using the data you just fetched."}]}
                     continue
+                if final_text and tool_texts and verify_retries < 1:
+                    bad = ask_unverified_numbers(final_text, tool_texts + [q])
+                    if bad:
+                        verify_retries += 1
+                        ctx._ask_meta["verify"] = bad
+                        log_info(f"[ASK] unverified numbers {bad}; asking for a re-check")
+                        messages.append({"role": "assistant", "content": response.content})
+                        messages.append({"role": "user", "content": (
+                            "Check before answering: these figures in your draft don't appear in the tool data: "
+                            + ", ".join(bad) + ". If you calculated them, redo it with the calculate tool; if they "
+                            "came from the data, quote the data exactly; if you can't source them, remove or correct "
+                            "them. Then write the final answer.")})
+                        continue
                 finished = True
                 break
 
             messages.append({"role": "assistant", "content": response.content})
             tool_results = []
             for block in tool_use_blocks:
+                await _status_set(_ASK_TOOL_LABELS.get(block.name, "working on it"))
                 rendered, result_text = await _ask_execute_tool(ctx, block.name, block.input)
+                if result_text:
+                    tool_texts.append(str(result_text))
                 if rendered:
                     any_rendered = True
                     if not result_text:
@@ -9347,6 +9690,9 @@ async def _ask_impl(ctx, *, query: str = None):
             else:
                 final_text = "✅ Done."
 
+        await _status_clear()
+        await ask_budget_check()
+
         if final_text:
             # Discord rejects messages over 2000 chars (and counts raw <t:..> markup), so split
             # long replies on line boundaries instead of failing the whole response.
@@ -9372,6 +9718,7 @@ async def _ask_impl(ctx, *, query: str = None):
         _ask_save_turn(channel_id, q, final_text or "(showed results above)")
 
     except Exception as e:
+        await _status_clear()
         log_info(f"[ASK ERROR] {e}")
         await ctx.send(f"❌ Something went wrong: {e}")
 
@@ -10675,6 +11022,15 @@ async def status_cmd(inter: discord.Interaction):
             value=(f"{_n} asks · typical {_p50:.0f}s · slowest 10% over {_p90:.0f}s\n"
                    f"hit the step cap: {_ASK_STATS['capped']} · errors: {_ASK_STATS['errors']} · "
                    f"blank-answer retries: {_ASK_STATS['nudged']}"),
+            inline=False,
+        )
+    _use = ask_usage_today()
+    if _use:
+        _cost = sum(r[5] for r in _use)
+        embed.add_field(
+            name="!ask spend today (estimate)",
+            value=(f"~${_cost:.2f} of ${ASK_DAILY_BUDGET_USD:.2f} budget · " + " · ".join(
+                f"{r[0].replace('claude-', '')}: {r[1]} asks, ${r[5]:.2f}" for r in _use)),
             inline=False,
         )
     await send_embed_card(inter.response.send_message, embed)
@@ -12115,6 +12471,9 @@ async def on_message(message):
     _md = _re2.match(r'^!delmatchup\s+(\d+)$', message.content.strip(), _re2.IGNORECASE)
     if _md:
         await cmd_matchup_delete(message, int(_md.group(1)))
+        return
+
+    if await _ask_followup(message):
         return
 
     await bot.process_commands(message)

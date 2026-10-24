@@ -274,5 +274,45 @@ class AskCardTools(unittest.TestCase):
             self.assertIn(n, names)
 
 
+
+class AskUpgrades(unittest.TestCase):
+    def test_numbers_verified(self):
+        src = ["Rekz power 198,000,000 merits 7,396,977 deaths 120,000"]
+        self.assertEqual(bot.ask_unverified_numbers("Rekz has 198M power and 7,396,977 merits", src), [])
+        self.assertEqual(bot.ask_unverified_numbers("Merits plus deaths is 7,516,977", src), [])  # sum is fine
+        self.assertEqual(bot.ask_unverified_numbers("He has 250M power", src), ["250,000,000"])
+        self.assertEqual(bot.ask_unverified_numbers("Season 2026, rank 3, <t:1790000000:R>", src), [])
+
+    def test_next_repeat(self):
+        from datetime import datetime
+        now = datetime(2026, 10, 24, 12, 0)
+        self.assertEqual(bot.next_repeat(datetime(2026, 10, 19, 5, 0), "weekly", now), datetime(2026, 10, 26, 5, 0))
+        self.assertEqual(bot.next_repeat(datetime(2026, 10, 24, 5, 0), "daily", now), datetime(2026, 10, 25, 5, 0))
+        self.assertEqual(bot.next_repeat(datetime(2026, 12, 31, 5, 0), "monthly", datetime(2026, 12, 31, 6, 0)).month, 1)
+
+    def test_memory_and_notes_persist(self):
+        ch = 987654321
+        bot._ask_clear_history(ch)
+        for i in range(5):
+            bot._ask_save_turn(ch, f"q{i}", f"a{i}")
+        h = bot._ask_get_history(ch)
+        self.assertEqual(len(h), 6)
+        self.assertEqual(h[0], {"role": "user", "content": "q2"})
+        bot._ask_clear_history(ch)
+        self.assertEqual(bot._ask_get_history(ch), [])
+        bot.ask_notes_clear(5)
+        bot.ask_note_add(5, "keep it short")
+        self.assertEqual(bot.ask_notes_get(5), ["keep it short"])
+        bot.ask_notes_clear(5)
+
+    def test_model_pick_and_tools(self):
+        self.assertEqual(bot._ask_pick_model("rate rekz please"), bot.ASK_DEEP_MODEL)
+        self.assertEqual(bot._ask_pick_model("delete the rating event"), bot.ASK_MAIN_MODEL)
+        names = {t["name"] for t in bot.ASK_TOOLS}
+        self.assertTrue({"save_note", "forget_notes"} <= names)
+        sb = next(t for t in bot.ASK_TOOLS if t["name"] == "show_scoreboard")
+        self.assertIn("repeat", sb["input_schema"]["properties"])
+        self.assertIn("scheduled_time", sb["input_schema"]["properties"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
