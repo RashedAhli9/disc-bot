@@ -283,6 +283,11 @@ class AskUpgrades(unittest.TestCase):
         self.assertEqual(bot.ask_unverified_numbers("He has 250M power", src), ["250,000,000"])
         self.assertEqual(bot.ask_unverified_numbers("Season 2026, rank 3, <t:1790000000:R>", src), [])
 
+    def test_merits_not_reset(self):
+        self.assertTrue(bot.merits_not_reset({"merits": "+16,469,020", "deads_gain": "+0", "kills_gain": "0", "healed_gain": "+0"}))
+        self.assertFalse(bot.merits_not_reset({"merits": "+8,175,719", "deads_gain": "+120,000", "kills_gain": "+5", "healed_gain": "+0"}))
+        self.assertFalse(bot.merits_not_reset({"merits": "+0"}))
+
     def test_next_repeat(self):
         from datetime import datetime
         now = datetime(2026, 10, 24, 12, 0)

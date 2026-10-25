@@ -6329,6 +6329,17 @@ async def topdeaths(ctx, season_name: str = None):
                        level_fn=lambda r: _deads_level(r["val"], db_get_latest_field_value(season_id, r.get("aid"), "highest_power") if r.get("aid") else None, start_date, actual_end_date))
 
 
+def merits_not_reset(stats):
+    """True when a member clearly sat the KvK out: big merits but no deads/kills/healing at all
+    (their merits never reset, so the figure is old lifetime merits, not this KvK's)."""
+    try:
+        m = abs(_signed_stat(stats.get("merits")))
+        fights = sum(abs(_signed_stat(stats.get(k))) for k in ("deads_gain", "kills_gain", "healed_gain"))
+        return m >= 1_000_000 and fights == 0
+    except Exception:
+        return False
+
+
 @bot.command(name="topmerits")
 async def topmerits(ctx, season_name: str = None):
     """Leaderboard for highest merits. Usage: !topmerits (current) or !topmerits sos1 (specific season)"""
@@ -6358,6 +6369,7 @@ async def topmerits(ctx, season_name: str = None):
     results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
     
     leaderboard = []
+    skipped = []  # members whose merits never reset (not in this KvK)
     actual_end_date = today
     
     for lord, result in zip(lords, results):
@@ -6376,6 +6388,9 @@ async def topmerits(ctx, season_name: str = None):
                         merits_clean = merits_str.replace(",", "").replace("+", "")
                         merits_num = abs(int(merits_clean)) if merits_clean.lstrip("-").isdigit() else 0
             
+            if result and not isinstance(result, Exception) and result[0] and merits_not_reset(result[0]):
+                skipped.append(lord_name)
+                continue
             leaderboard.append({"aid": lord["account_id"], "name": lord_name, "merits": merits_num, "merits_str": merits_str})
         except Exception as e:
             log_info(f"[TOPMERITS ERROR] {lord.get('account_id')}: {e}")
@@ -6391,7 +6406,8 @@ async def topmerits(ctx, season_name: str = None):
     output += f"📅 {start_date} → {actual_end_date}```"
     await send_lb_card(ctx, output, title="Top Merits", subtitle=f"{season_name_display}  ·  {start_date} → {actual_end_date}",
                        rows=[{"aid": l["aid"], "name": l["name"], "val": l["merits"]} for l in leaderboard],
-                       accent=LB_ACCENTS["merits"], group=True)
+                       accent=LB_ACCENTS["merits"], group=True,
+                       footer=(f"Not ranked (merits didn't reset, not in this KvK): {', '.join(skipped)}" if skipped else None))
 
 
 
