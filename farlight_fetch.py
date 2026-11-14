@@ -28,37 +28,55 @@ async def _visible(locator, timeout=2500):
         return False
 
 
+async def _login_frame(page, timeout_ms=STEP_TIMEOUT):
+    """The sign-in popup may live in an iframe: return whichever frame (page or iframe) shows the email box."""
+    waited = 0
+    while waited <= timeout_ms:
+        for frame in page.frames:
+            try:
+                box = frame.get_by_placeholder("Enter your email address")
+                if await box.count() and await box.first.is_visible():
+                    return frame
+            except Exception:
+                continue
+        await page.wait_for_timeout(500)
+        waited += 500
+    return None
+
+
 async def _login(page, email, password):
-    email_box = page.get_by_placeholder("Enter your email address")
-    if not await _visible(email_box):
+    frame = await _login_frame(page, 3000)
+    if frame is None:
         # Not logged in and no popup yet: open it from the header
         await page.get_by_text("Log In", exact=False).first.click(timeout=STEP_TIMEOUT)
-        await email_box.first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+        frame = await _login_frame(page)
+    if frame is None:
+        frames = ", ".join(f.url[:60] for f in page.frames)
+        raise FetchError(f"The sign-in form never appeared (frames: {frames})")
     # Make sure we are on the password tab (the other tab is the code login)
-    tab = page.get_by_text("Password Login", exact=True)
+    tab = frame.get_by_text("Password Login", exact=True)
     if await _visible(tab, 1000):
         await tab.first.click()
-    await email_box.first.fill(email)
-    await page.get_by_placeholder("Enter Password").first.fill(password)
+    await frame.get_by_placeholder("Enter your email address").first.fill(email)
+    await frame.get_by_placeholder("Enter Password").first.fill(password)
 
     # The agreement is a round tick next to the sentence: click just left of the text
-    agree = page.get_by_text(re.compile(r"I have read and agreed"))
+    agree = frame.get_by_text(re.compile(r"I have read and agreed"))
     await agree.first.wait_for(state="visible", timeout=STEP_TIMEOUT)
     box = await agree.first.bounding_box()
     if box:
         await page.mouse.click(box["x"] - 14, box["y"] + min(10, box["height"] / 2))
-    await page.get_by_text("Login", exact=True).last.click(timeout=STEP_TIMEOUT)
+    await frame.get_by_text("Login", exact=True).last.click(timeout=STEP_TIMEOUT)
     # Either the character card shows straight away, or a "Select Character" popup asks which lord to use
-    done = page.get_by_text("Character ID").first
-    chooser = page.get_by_text("Select Character").first
     await page.wait_for_function(
         "() => document.body.innerText.includes('Character ID') || document.body.innerText.includes('Select Character')",
         timeout=STEP_TIMEOUT)
+    chooser = page.get_by_text("Select Character").first
     if await _visible(chooser, 1500):
         server = os.getenv("FARLIGHT_SERVER", "375").lstrip("#")
         await page.get_by_text(f"#{server}", exact=True).first.click(timeout=STEP_TIMEOUT)
         await page.get_by_text("Confirm", exact=True).first.click(timeout=STEP_TIMEOUT)
-    await done.wait_for(state="visible", timeout=STEP_TIMEOUT)
+    await page.get_by_text("Character ID").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
 
 
 _FIND_DAY_JS = """
