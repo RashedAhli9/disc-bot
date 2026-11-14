@@ -1517,6 +1517,12 @@ SETTINGS_SCHEMA = {
         "min": 1, "max": 14, "unit": " days", "default": 2,
         "desc": "Alert if Call of Stats's latest data date is this many days behind today.",
     },
+    "auto_server_fetch": {
+        "group": "alerts", "label": "Auto-download server Excel", "type": "bool", "default": False,
+        "desc": "Every day at 00:05 UTC the bot signs in to the Farlight Game Tools site (login from the "
+                "FARLIGHT_EMAIL / FARLIGHT_PASSWORD Railway variables), downloads the Realm Members Excel for the "
+                "current season and loads it like !serverupdate. Test it first with !fetchserver.",
+    },
     # ---- !ask AI ----
     "ask_fast_model": {
         "group": "ask", "label": "Fast model for simple questions", "type": "bool", "default": True,
@@ -4118,6 +4124,10 @@ async def on_ready():
     # ✅ CHECK CALLOFSTATS UPDATES
     if not check_callofstats_update.is_running():
         check_callofstats_update.start()
+
+    # ✅ DAILY SERVER EXCEL DOWNLOAD (only does anything when turned on in /settings)
+    if not daily_server_fetch.is_running():
+        daily_server_fetch.start()
 
     # ✅ QUEUED TASK RUNNER (!ask scheduled actions)
     if not check_queued_tasks.is_running():
@@ -13355,6 +13365,77 @@ async def _process_serverupdate_attachment(ctx, attachment):
         f"Use `!stopmerits`, `!stopdeaths`, `!stopinf`, etc. to view leaderboards."
     ))
     log_info(f"[SERVERUPDATE] S#{server_num}: {len(rows)} lords loaded from {attachment.filename}")
+
+
+async def auto_fetch_server_excel():
+    """Download the Realm Members Excel from the Game Tools site and load it. Returns a one-line summary.
+    Raises RuntimeError / farlight_fetch.FetchError on trouble."""
+    import farlight_fetch
+    email, password = os.getenv("FARLIGHT_EMAIL"), os.getenv("FARLIGHT_PASSWORD")
+    if not email or not password:
+        raise RuntimeError("FARLIGHT_EMAIL / FARLIGHT_PASSWORD aren't set in the Railway variables.")
+    season = db_get_current_season()
+    if not season:
+        raise RuntimeError("No active season — use /newseason first.")
+    start_date = season[2]
+    end_date = (datetime.utcnow().date() - timedelta(days=1)).isoformat()  # the site's newest day is yesterday (UTC)
+    filename, data = await farlight_fetch.fetch_realm_members(email, password, start_date, end_date)
+    server_num, f_start, f_end = parse_server_filename(filename or "")
+    if server_num is None:
+        raise RuntimeError(f"Downloaded a file but couldn't read the server number from its name ({filename!r}).")
+    rows, error = await asyncio.to_thread(parse_server_excel, data)
+    if error or not rows:
+        raise RuntimeError(f"Downloaded {filename} but couldn't parse it: {error or 'no rows'}")
+    db_set_server_pick(server_num)
+    db_replace_server_lord_stats(server_num, rows, f_start or start_date, f_end or end_date)
+    silent_backup()
+    log_info(f"[AUTOFETCH] S#{server_num}: {len(rows)} lords loaded from {filename}")
+    return f"S#{server_num} {f_start or start_date} → {f_end or end_date}: {len(rows)} lords loaded"
+
+
+async def _report_fetch_error(e, send):
+    msg = f"❌ Auto-download of the server Excel failed: {e}"
+    shot = getattr(e, "screenshot", None)
+    text = getattr(e, "page_text", None)
+    if text:
+        msg += f"\nPage said: ```{text[:700]}```"
+    files = [discord.File(io.BytesIO(shot), filename="page.png")] if shot else []
+    try:
+        await send(msg[:1900], files=files)
+    except Exception:
+        await send(msg[:1900])
+
+
+@bot.command(name="fetchserver")
+async def fetchserver(ctx):
+    """Owner only: download the server Excel from the Game Tools site now and load it (same as !serverupdate)."""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.send("❌ Owner only.")
+    msg = await ctx.send("🌐 Signing in to Game Tools and downloading the Excel… (can take a minute)")
+    try:
+        summary = await auto_fetch_server_excel()
+    except Exception as e:
+        await msg.delete()
+        return await _report_fetch_error(e, ctx.send)
+    await msg.edit(content=f"✅ {summary}\nUse `!stopmerits`, `!stopdeaths`, etc.")
+
+
+@tasks.loop(time=time(hour=0, minute=5, tzinfo=timezone.utc))
+async def daily_server_fetch():
+    if not get_setting("auto_server_fetch"):
+        return
+    async def _dm(text, files=None):
+        owner = bot.get_user(OWNER_ID) or await bot.fetch_user(OWNER_ID)
+        await owner.send(text, files=files or [])
+    try:
+        summary = await auto_fetch_server_excel()
+        await _dm(f"✅ Daily server Excel: {summary}")
+    except Exception as e:
+        log_error(f"[AUTOFETCH] {type(e).__name__}: {e}")
+        try:
+            await _report_fetch_error(e, lambda m, files=None: _dm(m, files))
+        except Exception as e2:
+            log_error(f"[AUTOFETCH] couldn't DM the failure: {e2}")
 
 
 @bot.command(name="stopdeaths", aliases=["stopdeads", "stopdead"])

@@ -288,6 +288,14 @@ class AskUpgrades(unittest.TestCase):
         self.assertFalse(bot.merits_not_reset({"merits": "+8,175,719", "deads_gain": "+120,000", "kills_gain": "+5", "healed_gain": "+0"}))
         self.assertFalse(bot.merits_not_reset({"merits": "+0"}))
 
+    def test_auto_fetch_needs_credentials(self):
+        import asyncio
+        os.environ.pop("FARLIGHT_EMAIL", None)
+        os.environ.pop("FARLIGHT_PASSWORD", None)
+        with self.assertRaises(RuntimeError):
+            asyncio.run(bot.auto_fetch_server_excel())
+        self.assertIn("auto_server_fetch", bot.SETTINGS_SCHEMA)
+
     def test_next_repeat(self):
         from datetime import datetime
         now = datetime(2026, 10, 24, 12, 0)

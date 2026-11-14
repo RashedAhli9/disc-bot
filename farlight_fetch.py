@@ -1,0 +1,166 @@
+"""Download the "Realm Members" Excel from the official Farlight Game Tools site with a headless browser.
+
+Credentials come from the caller (Railway variables) and are never logged. If any step fails, a screenshot and
+the visible page text are saved so the owner can see what the page looked like.
+"""
+import os
+import re
+import tempfile
+
+BASE = "https://cod-game-tools.farlightgames.com"
+MANAGE_URL = f"{BASE}/manageTools?park_header=false&locale=en"
+MEMBERS_URL = f"{BASE}/topn"
+STEP_TIMEOUT = 30_000
+
+
+class FetchError(Exception):
+    def __init__(self, message, screenshot=None, page_text=None):
+        super().__init__(message)
+        self.screenshot = screenshot
+        self.page_text = page_text
+
+
+async def _visible(locator, timeout=2500):
+    try:
+        await locator.first.wait_for(state="visible", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+async def _login(page, email, password):
+    email_box = page.get_by_placeholder("Enter your email address")
+    if not await _visible(email_box):
+        # Not logged in and no popup yet: open it from the header
+        await page.get_by_text("Log In", exact=False).first.click(timeout=STEP_TIMEOUT)
+        await email_box.first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+    # Make sure we are on the password tab (the other tab is the code login)
+    tab = page.get_by_text("Password Login", exact=True)
+    if await _visible(tab, 1000):
+        await tab.first.click()
+    await email_box.first.fill(email)
+    await page.get_by_placeholder("Enter Password").first.fill(password)
+
+    # The agreement is a round tick next to the sentence: click just left of the text
+    agree = page.get_by_text(re.compile(r"I have read and agreed"))
+    await agree.first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+    box = await agree.first.bounding_box()
+    if box:
+        await page.mouse.click(box["x"] - 14, box["y"] + min(10, box["height"] / 2))
+    await page.get_by_text("Login", exact=True).last.click(timeout=STEP_TIMEOUT)
+    # Logged in once the character card (with a Character ID) shows
+    await page.get_by_text("Character ID").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+
+
+_FIND_DAY_JS = """
+([month, day]) => {
+  // Walk the calendar in page order; month headers look like 2026/10, days are plain numbers.
+  const all = Array.from(document.querySelectorAll('*')).filter(e => e.children.length === 0 && e.offsetParent !== null);
+  let cur = null;
+  for (const e of all) {
+    const t = (e.textContent || '').trim();
+    if (/^\\d{4}\\/\\d{2}$/.test(t)) { cur = t; continue; }
+    if (cur === month && t === String(day)) {
+      e.scrollIntoView({block: 'center'});
+      const r = e.getBoundingClientRect();
+      return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+    }
+  }
+  return null;
+}
+"""
+
+
+async def _click_day(page, iso):
+    y, m, d = iso.split("-")
+    for _ in range(3):
+        pos = await page.evaluate(_FIND_DAY_JS, [f"{y}/{m}", int(d)])
+        if pos:
+            await page.mouse.click(pos["x"], pos["y"])
+            return
+        await page.wait_for_timeout(500)
+    raise FetchError(f"Couldn't find {iso} in the calendar")
+
+
+async def _pick_range(page, start_iso, end_iso):
+    field = page.get_by_text(re.compile(r"^\d{4}/\d{2}/\d{2}"))
+    await field.first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+    await field.first.click()
+    await page.get_by_text("Select Time").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+    await _click_day(page, start_iso)
+    await _click_day(page, end_iso)
+    await page.get_by_text("Confirm", exact=True).first.click(timeout=STEP_TIMEOUT)
+    await page.get_by_text(f"{start_iso.replace('-', '/')}~{end_iso.replace('-', '/')}").first.wait_for(
+        state="visible", timeout=STEP_TIMEOUT)
+    await page.wait_for_load_state("networkidle", timeout=STEP_TIMEOUT)
+
+
+_FIND_DOWNLOAD_JS = """
+() => {
+  // The download button is the right-most small clickable box on the "Member list" row.
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let label = null;
+  while (walker.nextNode()) {
+    if (/Member list/i.test(walker.currentNode.textContent || '')) { label = walker.currentNode.parentElement; break; }
+  }
+  if (!label) return null;
+  const ly = label.getBoundingClientRect().y;
+  let best = null;
+  for (const e of document.querySelectorAll('*')) {
+    const r = e.getBoundingClientRect();
+    if (r.width < 20 || r.width > 90 || r.height < 20 || r.height > 70) continue;
+    if (Math.abs(r.y + r.height / 2 - (ly + 10)) > 45) continue;
+    if (!best || r.x > best.x) best = {x: r.x, y: r.y, w: r.width, h: r.height};
+  }
+  return best ? {x: best.x + best.w / 2, y: best.y + best.h / 2} : null;
+}
+"""
+
+
+async def _download(page):
+    pos = await page.evaluate(_FIND_DOWNLOAD_JS)
+    if not pos:
+        raise FetchError("Couldn't find the download button on the Realm Members page")
+    async with page.expect_download(timeout=90_000) as dl_info:
+        await page.mouse.click(pos["x"], pos["y"])
+    download = await dl_info.value
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "export.xlsx")
+        await download.save_as(path)
+        with open(path, "rb") as f:
+            return download.suggested_filename, f.read()
+
+
+async def fetch_realm_members(email, password, start_iso, end_iso):
+    """Returns (filename, xlsx_bytes). Raises FetchError (with screenshot + page text when possible)."""
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        try:
+            context = await browser.new_context(viewport={"width": 1100, "height": 1100}, accept_downloads=True,
+                                                locale="en-US")
+            page = await context.new_page()
+            step = "opening the site"
+            try:
+                await page.goto(MANAGE_URL, wait_until="networkidle", timeout=60_000)
+                step = "logging in"
+                await _login(page, email, password)
+                step = "opening Realm Members"
+                await page.goto(MEMBERS_URL, wait_until="networkidle", timeout=60_000)
+                if not await _visible(page.get_by_text("Member list", exact=False), 8000):
+                    raise FetchError("The Realm Members page didn't show its member list")
+                step = "choosing the date range"
+                await _pick_range(page, start_iso, end_iso)
+                step = "downloading the Excel"
+                return await _download(page)
+            except Exception as e:
+                shot = text = None
+                try:
+                    shot = await page.screenshot(type="png")
+                    text = (await page.inner_text("body"))[:1500]
+                except Exception:
+                    pass
+                msg = e.args[0] if isinstance(e, FetchError) else f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"
+                raise FetchError(f"Failed while {step}: {msg}", shot, text) from None
+        finally:
+            await browser.close()
