@@ -75,7 +75,7 @@ async def _login(page, email, password):
     if await _visible(chooser, 1500):
         server = os.getenv("FARLIGHT_SERVER", "375").lstrip("#")
         await page.get_by_text(f"#{server}", exact=True).first.click(timeout=STEP_TIMEOUT)
-        await page.get_by_text("Confirm", exact=True).first.click(timeout=STEP_TIMEOUT)
+        await page.get_by_text("Confirm", exact=True).filter(visible=True).last.click(timeout=STEP_TIMEOUT)
     await page.get_by_text("Character ID").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
 
 
@@ -116,7 +116,8 @@ async def _pick_range(page, start_iso, end_iso):
     await page.get_by_text("Select Time").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
     await _click_day(page, start_iso)
     await _click_day(page, end_iso)
-    await page.get_by_text("Confirm", exact=True).first.click(timeout=STEP_TIMEOUT)
+    # Several popups carry a "Confirm" button and the hidden ones stay in the page: click the one that shows
+    await page.get_by_text("Confirm", exact=True).filter(visible=True).last.click(timeout=STEP_TIMEOUT)
     await page.get_by_text(f"{start_iso.replace('-', '/')}~{end_iso.replace('-', '/')}").first.wait_for(
         state="visible", timeout=STEP_TIMEOUT)
     await page.wait_for_load_state("networkidle", timeout=STEP_TIMEOUT)
