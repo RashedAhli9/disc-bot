@@ -146,7 +146,14 @@ _FIND_DOWNLOAD_JS = """
 
 
 async def _download(page):
-    pos = await page.evaluate(_FIND_DOWNLOAD_JS)
+    # After the date range changes the list reloads (spinner, empty page): wait for the table, then the button
+    await page.get_by_text("Character ID", exact=True).first.wait_for(state="visible", timeout=60_000)
+    pos = None
+    for _ in range(40):
+        pos = await page.evaluate(_FIND_DOWNLOAD_JS)
+        if pos:
+            break
+        await page.wait_for_timeout(500)
     if not pos:
         raise FetchError("Couldn't find the download button on the Realm Members page")
     async with page.expect_download(timeout=90_000) as dl_info:
