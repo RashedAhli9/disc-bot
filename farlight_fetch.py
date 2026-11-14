@@ -48,8 +48,17 @@ async def _login(page, email, password):
     if box:
         await page.mouse.click(box["x"] - 14, box["y"] + min(10, box["height"] / 2))
     await page.get_by_text("Login", exact=True).last.click(timeout=STEP_TIMEOUT)
-    # Logged in once the character card (with a Character ID) shows
-    await page.get_by_text("Character ID").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+    # Either the character card shows straight away, or a "Select Character" popup asks which lord to use
+    done = page.get_by_text("Character ID").first
+    chooser = page.get_by_text("Select Character").first
+    await page.wait_for_function(
+        "() => document.body.innerText.includes('Character ID') || document.body.innerText.includes('Select Character')",
+        timeout=STEP_TIMEOUT)
+    if await _visible(chooser, 1500):
+        server = os.getenv("FARLIGHT_SERVER", "375").lstrip("#")
+        await page.get_by_text(f"#{server}", exact=True).first.click(timeout=STEP_TIMEOUT)
+        await page.get_by_text("Confirm", exact=True).first.click(timeout=STEP_TIMEOUT)
+    await done.wait_for(state="visible", timeout=STEP_TIMEOUT)
 
 
 _FIND_DAY_JS = """
