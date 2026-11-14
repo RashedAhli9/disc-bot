@@ -334,9 +334,7 @@ def make_backup():
             z.write(ABYSS_CONFIG_FILE)
 
     cleanup_old_backups()
-
-    if bot.loop.is_running():
-        bot.loop.create_task(upload_backup(path))
+    # Backups are still kept on the server (/backup, /restorebackup) but no longer posted to a channel.
 
 def silent_backup():
     try:
@@ -1473,7 +1471,7 @@ SETTINGS_SCHEMA = {
     "backup_channel": {
         "group": "channels", "label": "Backup channel", "type": "channel",
         "channel_types": ["text"], "default": BACKUP_CHANNEL_ID,
-        "desc": "Where backup zips and 'new Call of Stats data' notices are posted.",
+        "desc": "Where 'new Call of Stats data' notices are posted.",
     },
     # ---- Events & reminders ----
     "event_cleanup_minutes": {
