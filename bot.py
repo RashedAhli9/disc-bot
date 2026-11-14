@@ -168,8 +168,6 @@ def log_debug(message):
     logger.debug(message)
     
 BACKUP_DIR = "backups"
-MAX_BACKUPS = 10
-os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # ============================================================
 # REQUIRED HELPERS (FIXES ALL CRASHES)
@@ -288,59 +286,29 @@ async def dm_abyss_role(guild: discord.Guild, embed: discord.Embed):
 # BACKUP SYSTEM
 # ============================================================
 
-def cleanup_old_backups():
-    """
-    Remove old backup files, keeping only the MAX_BACKUPS most recent.
-    
-    Returns:
-        None
-    """
-    files = sorted(
-        [f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")],
-        reverse=True
-    )
-    for f in files[MAX_BACKUPS:]:
-        try:
-            os.remove(os.path.join(BACKUP_DIR, f))
-            log_info(f"Deleted old backup: {f}")
-        except Exception as e:
-            log_error(f"Failed to delete backup {f}: {e}")
-
-async def upload_backup(path):
-    """
-    Upload a backup file to the backup channel.
-    
-    Args:
-        path: Path to the backup zip file
-    
-    Returns:
-        None
-    """
-    try:
-        ch = bot.get_channel(get_setting("backup_channel"))
-        if ch:
-            await ch.send("📦 **Backup created**", file=discord.File(path))
-    except Exception as e:
-        log_error(f"[UPLOAD BACKUP] Error: {e}")
-
-def make_backup():
-    ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-    path = os.path.join(BACKUP_DIR, f"backup_{ts}.zip")
-
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        if os.path.exists(DB):
-            z.write(DB)
-        if os.path.exists(ABYSS_CONFIG_FILE):
-            z.write(ABYSS_CONFIG_FILE)
-
-    cleanup_old_backups()
-    # Backups are still kept on the server (/backup, /restorebackup) but no longer posted to a channel.
-
 def silent_backup():
+    """Backups were removed on request; kept as a no-op because many places still call it."""
+    return
+
+
+def _purge_old_backups():
+    """One-time cleanup: delete any backup zips left on the server."""
+    removed = 0
     try:
-        make_backup()
-    except Exception as e:
+        for f in os.listdir(BACKUP_DIR):
+            if f.startswith("backup_") and f.endswith(".zip"):
+                try:
+                    os.remove(os.path.join(BACKUP_DIR, f))
+                    removed += 1
+                except Exception as e:
+                    log_error(f"[BACKUP PURGE] couldn't delete {f}: {e}")
+    except FileNotFoundError:
         pass
+    if removed:
+        log_info(f"[BACKUP PURGE] deleted {removed} old backup zip(s)")
+
+
+_purge_old_backups()
 
 def get_all_lords_from_guild(guild):
     """Get all numeric roles (account IDs) from the guild"""
@@ -3597,26 +3565,9 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 bot.active_edit = None
 
 # ============================================================
-# BACKUP SLASH COMMANDS (OWNER ONLY)
+# OWNER-ONLY SLASH COMMANDS
 # ============================================================
 
-@bot.tree.command(name="backup", description="List recent backups")
-async def backup(inter):
-    if inter.user.id != OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
-
-    files = sorted(
-        [f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")],
-        reverse=True
-    )
-
-    if not files:
-        return await inter.response.send_message("📦 No backups found.", ephemeral=True)
-
-    msg = "**📦 Recent Backups:**\n" + "\n".join(
-        f"- `{f}`" for f in files[:MAX_BACKUPS]
-    )
-    await inter.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="setstatus", description="Set the bot's Discord status (owner only)")
 async def setstatus(inter, text: str):
@@ -3646,55 +3597,7 @@ async def say(inter, text: str):
     await inter.channel.send(text)
 
 
-@bot.tree.command(name="forcebackup", description="Create a backup now")
-async def forcebackup(inter):
-    if inter.user.id != OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
 
-    make_backup()
-    await inter.response.send_message("✅ Backup created.", ephemeral=True)
-
-@bot.tree.command(name="restorebackup", description="Restore a backup")
-async def restorebackup(inter):
-    if inter.user.id != OWNER_ID:
-        return await inter.response.send_message("❌ Owner only.", ephemeral=True)
-
-    files = sorted(
-        [f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")],
-        reverse=True
-    )
-
-    if not files:
-        return await inter.response.send_message("❌ No backups found.", ephemeral=True)
-
-    await inter.response.defer(ephemeral=True)  # ✅ CRITICAL
-
-    select = Select(
-        placeholder="Select a backup to restore",
-        options=[discord.SelectOption(label=f, value=f) for f in files]
-    )
-
-    async def cb(i):
-        await i.response.defer(ephemeral=True)
-
-        path = os.path.join(BACKUP_DIR, select.values[0])
-
-        with zipfile.ZipFile(path, "r") as z:
-            z.extractall(".")
-
-        await i.followup.send(
-            f"♻️ Restored `{select.values[0]}`. Restarting bot...",
-            ephemeral=True
-        )
-
-        await asyncio.sleep(2)
-       # auto-restart on Koyeb
-
-    select.callback = cb
-    view = View(timeout=60)
-    view.add_item(select)
-
-    await inter.followup.send("Choose a backup to restore:", view=view, ephemeral=True)
 
 # ============================================================
 # ON READY
@@ -4315,7 +4218,7 @@ def build_help_embed(is_owner: bool):
 
         embed.add_field(
             name="🛠️ System",
-            value="`/testdm` — Test DM system\n`/backup` — List database backups\n`/forcebackup` — Create backup now\n`/setstatus text` — Set bot status (`default` = latest data date)\n`/say text` — Make the bot say something",
+            value="`/testdm` — Test DM system\n`/setstatus text` — Set bot status (`default` = latest data date)\n`/say text` — Make the bot say something",
             inline=False
         )
 
