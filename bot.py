@@ -1489,6 +1489,13 @@ SETTINGS_SCHEMA = {
                 "FARLIGHT_EMAIL / FARLIGHT_PASSWORD Railway variables), downloads the Realm Members Excel for the "
                 "current season and loads it like !serverupdate. Test it first with !fetchserver.",
     },
+    "cos_bench_servers": {
+        "group": "alerts", "label": "Benchmark servers (current KvK)", "type": "text", "default": "221,249,283,357,375,509,701",
+        "desc": "The 7 (or so) servers !scoreboard, !progress and !ask ratings compare everyone against — should "
+                "be the servers in your current KvK. Comma-separated server numbers, e.g. 221,249,283. The daily "
+                "auto-download updates this on its own when it can read your current KvK matchup; edit it by "
+                "hand here only if that fails or you want a different set.",
+    },
     # ---- !ask AI ----
     "ask_fast_model": {
         "group": "ask", "label": "Fast model for simple questions", "type": "bool", "default": True,
@@ -6871,7 +6878,12 @@ def _ask_resolve_account_id(ctx, player_input):
 # The global leaderboard on callofstats.com only shows the top 100 lords per stat, so this gives cutoffs
 # (#1, #10, #25, #50, #100), not a full percentile. The window is always season start -> today, so every
 # member is compared at the same point of the season (no pro-rating needed). Refreshed lazily (6h cache).
-COS_BENCH_SERVERS = "221%2C249%2C283%2C357%2C375%2C509%2C701"
+def cos_bench_servers_url_part():
+    """URL-encoded, comma-joined server list for the benchmark — from /settings, updated automatically each
+    day by the server Excel fetch when it can read the account's current KvK matchup."""
+    raw = get_setting("cos_bench_servers")
+    nums = re.findall(r"\d+", str(raw))
+    return "%2C".join(nums) if nums else "221%2C249%2C283%2C357%2C375%2C509%2C701"
 COS_BENCH_KINDS = {
     "deads": {"label": "T4/T5 units dead ÷ highest power", "ratio": ("t4_t5_units_dead", "highest_power"), "pct": True},
     "merits": {"label": "merits ÷ highest power", "ratio": ("merits", "highest_power"), "pct": True},
@@ -6888,7 +6900,7 @@ def _cos_bench_url(kind, start, end):
         q = f"ratio_mode=false&ratio_stat_1=&ratio_stat_2=&main_stat={k['stat']}"
     return (f"https://callofstats.com/global_leaderboard/results?{q}&lord_id=&operator_lord_id=%3E%3D&power="
             f"&operator_power=%3E%3D&town_hall=&operator_town_hall=%3E%3D&faction=&alliance_display=&alliance="
-            f"&kvk_pool=&server={COS_BENCH_SERVERS}&operator_server=%3E%3D&order=highest&compare=true"
+            f"&kvk_pool=&server={cos_bench_servers_url_part()}&operator_server=%3E%3D&order=highest&compare=true"
             f"&start_date={start}&end_date={end}")
 
 
@@ -13280,7 +13292,7 @@ async def auto_fetch_server_excel():
         raise RuntimeError("No active season — use /newseason first.")
     start_date = season[2]
     end_date = (datetime.utcnow().date() - timedelta(days=1)).isoformat()  # the site's newest day is yesterday (UTC)
-    filename, data = await farlight_fetch.fetch_realm_members(email, password, start_date, end_date)
+    filename, data, kvk_servers = await farlight_fetch.fetch_realm_members(email, password, start_date, end_date)
     server_num, f_start, f_end = parse_server_filename(filename or "")
     if server_num is None:
         raise RuntimeError(f"Downloaded a file but couldn't read the server number from its name ({filename!r}).")
@@ -13291,7 +13303,25 @@ async def auto_fetch_server_excel():
     db_replace_server_lord_stats(server_num, rows, f_start or start_date, f_end or end_date)
     silent_backup()
     log_info(f"[AUTOFETCH] S#{server_num}: {len(rows)} lords loaded from {filename}")
-    return f"S#{server_num} {f_start or start_date} → {f_end or end_date}: {len(rows)} lords loaded"
+    summary = f"S#{server_num} {f_start or start_date} → {f_end or end_date}: {len(rows)} lords loaded"
+
+    kvk_note = ""
+    if kvk_servers:
+        new_list = ",".join(str(n) for n in kvk_servers)
+        old_list = str(get_setting("cos_bench_servers") or "")
+        old_nums = sorted(int(n) for n in re.findall(r"\d+", old_list))
+        if old_nums != kvk_servers:
+            set_setting("cos_bench_servers", new_list)
+            try:
+                await cos_bench_refresh(force=True)
+            except Exception as e:
+                log_error(f"[AUTOFETCH] bench refresh after server-list change failed: {e}")
+            kvk_note = f"\n📡 Benchmark servers updated for this KvK: {new_list}"
+            log_info(f"[AUTOFETCH] KvK servers changed {old_nums} -> {kvk_servers}")
+    else:
+        kvk_note = "\n⚠️ Couldn't read the current KvK's server list this time — benchmark servers left as they were."
+
+    return summary + kvk_note
 
 
 async def _report_fetch_error(e, send):

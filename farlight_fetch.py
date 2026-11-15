@@ -10,6 +10,7 @@ import tempfile
 BASE = "https://cod-game-tools.farlightgames.com"
 MANAGE_URL = f"{BASE}/manageTools?park_header=false&locale=en"
 MEMBERS_URL = f"{BASE}/topn"
+COMPARE_URL = f"{BASE}/compare"
 STEP_TIMEOUT = 30_000
 
 
@@ -77,6 +78,38 @@ async def _login(page, email, password):
         await page.get_by_text(f"#{server}", exact=True).first.click(timeout=STEP_TIMEOUT)
         await page.get_by_text("Confirm", exact=True).filter(visible=True).last.click(timeout=STEP_TIMEOUT)
     await page.get_by_text("Character ID").first.wait_for(state="visible", timeout=STEP_TIMEOUT)
+
+
+_FIND_KVK_SEASON_SERVERS_JS = """
+() => {
+  // Each season on the "Your Realm" tab is: title, In Progress/Finished, date range, a row of small
+  // numbers (the server IDs in that KvK), then a "Realm Power Comparison and Analysis" button. Grab the
+  // numbers in the first "In Progress" season block.
+  const leaves = Array.from(document.querySelectorAll('*')).filter(e => e.children.length === 0);
+  const start = leaves.findIndex(e => (e.textContent || '').trim() === 'In Progress');
+  if (start === -1) return null;
+  const servers = [];
+  for (let i = start + 1; i < leaves.length; i++) {
+    const t = (leaves[i].textContent || '').trim();
+    if (/Realm Power Comparison/i.test(t)) break;
+    if (/^In Progress$|^Finished$/.test(t)) break;  // next season block started
+    if (/^\d{1,4}$/.test(t)) servers.push(parseInt(t, 10));
+  }
+  return servers.length ? servers : null;
+}
+"""
+
+
+async def fetch_current_kvk_servers(page):
+    """Best-effort: the server IDs in the account's currently in-progress KvK, from the "Your Realm" tab of
+    the KvK Seasons page. Returns a list of ints, or None if the page didn't look as expected (never raises)."""
+    try:
+        await page.goto(COMPARE_URL, wait_until="networkidle", timeout=60_000)
+        await page.get_by_text("In Progress", exact=True).first.wait_for(state="visible", timeout=15_000)
+        servers = await page.evaluate(_FIND_KVK_SEASON_SERVERS_JS)
+        return sorted(set(servers)) if servers else None
+    except Exception:
+        return None
 
 
 _FIND_DAY_JS = """
@@ -167,7 +200,9 @@ async def _download(page):
 
 
 async def fetch_realm_members(email, password, start_iso, end_iso):
-    """Returns (filename, xlsx_bytes). Raises FetchError (with screenshot + page text when possible)."""
+    """Returns (filename, xlsx_bytes, kvk_servers). kvk_servers is a sorted list of server IDs in the
+    account's current KvK, or None if that page couldn't be read (never blocks the Excel download).
+    Raises FetchError (with screenshot + page text when possible) if the Excel itself fails."""
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -180,6 +215,7 @@ async def fetch_realm_members(email, password, start_iso, end_iso):
                 await page.goto(MANAGE_URL, wait_until="networkidle", timeout=60_000)
                 step = "logging in"
                 await _login(page, email, password)
+                kvk_servers = await fetch_current_kvk_servers(page)
                 step = "opening Realm Members"
                 await page.goto(MEMBERS_URL, wait_until="networkidle", timeout=60_000)
                 if not await _visible(page.get_by_text("Member list", exact=False), 8000):
@@ -187,7 +223,8 @@ async def fetch_realm_members(email, password, start_iso, end_iso):
                 step = "choosing the date range"
                 await _pick_range(page, start_iso, end_iso)
                 step = "downloading the Excel"
-                return await _download(page)
+                filename, data = await _download(page)
+                return filename, data, kvk_servers
             except Exception as e:
                 shot = text = None
                 try:

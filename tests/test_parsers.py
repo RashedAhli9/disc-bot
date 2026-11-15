@@ -283,6 +283,13 @@ class AskUpgrades(unittest.TestCase):
         self.assertEqual(bot.ask_unverified_numbers("He has 250M power", src), ["250,000,000"])
         self.assertEqual(bot.ask_unverified_numbers("Season 2026, rank 3, <t:1790000000:R>", src), [])
 
+    def test_cos_bench_servers_setting(self):
+        bot.reset_setting("cos_bench_servers")
+        self.assertEqual(bot.cos_bench_servers_url_part(), "221%2C249%2C283%2C357%2C375%2C509%2C701")
+        bot.set_setting("cos_bench_servers", "9,8,7")
+        self.assertEqual(bot.cos_bench_servers_url_part(), "9%2C8%2C7")
+        bot.reset_setting("cos_bench_servers")
+
     def test_merits_not_reset(self):
         self.assertTrue(bot.merits_not_reset({"merits": "+16,469,020", "deads_gain": "+0", "kills_gain": "0", "healed_gain": "+0"}))
         self.assertFalse(bot.merits_not_reset({"merits": "+8,175,719", "deads_gain": "+120,000", "kills_gain": "+5", "healed_gain": "+0"}))
